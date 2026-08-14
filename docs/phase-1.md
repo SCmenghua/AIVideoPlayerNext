@@ -13,11 +13,21 @@ Phase 1 establishes a clean Flutter application boundary and deterministic test 
 
 ## Acceptance checklist
 
-- [ ] `flutter analyze`
-- [ ] `flutter test`
-- [ ] `flutter build windows`
-- [ ] Windows desktop workload, CMake, and Flutter Windows support installed
-- [ ] New Git history created independently
+- [x] `flutter analyze` (2026-08-15)
+- [x] `flutter test` (6 tests, 2026-08-15)
+- [x] `flutter build windows --debug` (2026-08-15)
+- [x] `flutter build windows --release` (2026-08-15)
+- [x] Flutter Windows support, Visual Studio 2026 C++ workload, CMake, and Windows SDK installed
+- [x] New Git history created independently
+
+## Verification record
+
+- Flutter 3.47.0 and Dart 3.13.0
+- Visual Studio Community 2026 18.9.0, MSVC 14.51, CMake, and Windows SDK 10.0.26100.0
+- Debug artifact: `app/build/windows/x64/runner/Debug/ai_video_player_next.exe`
+- Release artifact: `app/build/windows/x64/runner/Release/ai_video_player_next.exe`
+
+Android SDK is not installed yet. That prevents Android builds only; it does not affect the completed Windows Phase 1 acceptance.
 
 ## Next phase
 

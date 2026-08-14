@@ -143,7 +143,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Text(_providerStatus, style: const TextStyle(color: Color(0xFF5ED6A0), fontSize: 12)),
         const SizedBox(height: 14),
-        if (_timeline.partial case final partial) _subtitleText(partial.original, muted: true),
+        if (_timeline.partial != null) _subtitleText(_timeline.partial!.original, muted: true),
         if (entries.isEmpty && _timeline.partial == null) const Text('Open mock media to preview the Phase 1 flow.'),
         ...entries.reversed.take(3).map((entry) => Padding(padding: const EdgeInsets.only(top: 12), child: _subtitleText('${entry.original}\n${entry.translation ?? 'Translation pending'}'))),
       ]),
