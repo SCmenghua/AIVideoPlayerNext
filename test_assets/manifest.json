@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "assets": [],
+  "requirements": {
+    "license": "Record an explicit license or permission before adding an asset.",
+    "audio": "16 kHz, mono, Float32 PCM reference material is required from Phase 3.",
+    "metadata": ["language", "sampleRate", "duration", "backgroundNoise", "expectedText", "allowedTimingError", "knownLimitations"]
+  }
+}

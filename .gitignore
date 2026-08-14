@@ -1,0 +1,20 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+
+# Native build output
+app/windows/flutter/ephemeral/
+app/android/.gradle/
+app/android/app/build/
+app/ios/Pods/
+
+# Local-only models and media
+models/
+test_assets/media/
+*.gguf
+*.bin
+*.mp4
+*.wav

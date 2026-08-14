@@ -1,0 +1,130 @@
+import 'dart:async';
+
+import '../../domain/player/player_service.dart';
+import '../../domain/speech/speech_models.dart';
+import '../../domain/translation/translation_service.dart';
+
+class MockPlayerService implements PlayerService {
+  final StreamController<PlaybackSnapshot> _controller = StreamController.broadcast();
+  PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
+  Timer? _timer;
+
+  @override
+  Stream<PlaybackSnapshot> get snapshots => _controller.stream;
+
+  @override
+  Future<void> open(MediaSource source) async {
+    _snapshot = PlaybackSnapshot(
+      status: PlaybackStatus.paused,
+      position: Duration.zero,
+      duration: const Duration(minutes: 12, seconds: 34),
+      source: source,
+    );
+    _controller.add(_snapshot);
+  }
+
+  @override
+  Future<void> play() async {
+    if (_snapshot.source == null) return;
+    _snapshot = _copy(status: PlaybackStatus.playing);
+    _controller.add(_snapshot);
+    _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_snapshot.status != PlaybackStatus.playing) return;
+      final next = _snapshot.position + const Duration(seconds: 1);
+      _snapshot = next >= _snapshot.duration
+          ? _copy(status: PlaybackStatus.ended, position: _snapshot.duration)
+          : _copy(position: next);
+      _controller.add(_snapshot);
+      if (_snapshot.status == PlaybackStatus.ended) {
+        _timer?.cancel();
+        _timer = null;
+      }
+    });
+  }
+
+  @override
+  Future<void> pause() async {
+    _timer?.cancel();
+    _timer = null;
+    _snapshot = _copy(status: PlaybackStatus.paused);
+    _controller.add(_snapshot);
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    final bounded = position < Duration.zero
+        ? Duration.zero
+        : position > _snapshot.duration
+            ? _snapshot.duration
+            : position;
+    _snapshot = _copy(position: bounded, status: PlaybackStatus.paused);
+    _controller.add(_snapshot);
+  }
+
+  PlaybackSnapshot _copy({PlaybackStatus? status, Duration? position}) => PlaybackSnapshot(
+        status: status ?? _snapshot.status,
+        position: position ?? _snapshot.position,
+        duration: _snapshot.duration,
+        source: _snapshot.source,
+        message: _snapshot.message,
+      );
+
+  @override
+  Future<void> dispose() async {
+    _timer?.cancel();
+    await _controller.close();
+  }
+}
+
+class MockSpeechRecognitionService implements SpeechRecognitionService {
+  final StreamController<RecognitionEvent> _controller = StreamController.broadcast();
+  String? _sessionId;
+
+  @override
+  Stream<RecognitionEvent> get events => _controller.stream;
+
+  @override
+  Future<void> start(RecognitionRequest request) async {
+    _sessionId = request.sessionId;
+    final start = request.from + const Duration(seconds: 1);
+    _controller.add(RecognitionEvent(
+      sessionId: request.sessionId,
+      segmentId: '${request.sessionId}-1',
+      start: start,
+      end: start + const Duration(seconds: 3),
+      text: 'A preview subtitle from the mock provider.',
+      language: 'en',
+      kind: RecognitionKind.partial,
+      source: RecognitionSource.whisperCpp,
+      confidence: 0.72,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    if (_sessionId != request.sessionId) return;
+    _controller.add(RecognitionEvent(
+      sessionId: request.sessionId,
+      segmentId: '${request.sessionId}-1',
+      start: start,
+      end: start + const Duration(seconds: 3),
+      text: 'A final subtitle from the mock provider.',
+      language: 'en',
+      kind: RecognitionKind.finalResult,
+      source: RecognitionSource.whisperCpp,
+      confidence: 0.94,
+    ));
+  }
+
+  @override
+  Future<void> stop() async => _sessionId = null;
+
+  @override
+  Future<void> reset({required Duration position}) async => _sessionId = null;
+}
+
+class MockTranslationService implements TranslationService {
+  @override
+  Future<TranslationResult> translate(TranslationRequest request) async => TranslationResult(
+        segmentId: request.segmentId,
+        text: '[${request.targetLanguage}] ${request.text}',
+        provider: 'mock',
+      );
+}
