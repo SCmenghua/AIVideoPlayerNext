@@ -8,7 +8,7 @@ class AIVideoPlayerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AI Video Player Next',
+      title: 'AI 视频播放器',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

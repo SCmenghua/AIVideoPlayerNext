@@ -92,8 +92,8 @@ class MockSpeechRecognitionService implements SpeechRecognitionService {
       segmentId: '${request.sessionId}-1',
       start: start,
       end: start + const Duration(seconds: 3),
-      text: 'A preview subtitle from the mock provider.',
-      language: 'en',
+      text: '这是模拟识别服务生成的预览字幕。',
+      language: 'zh',
       kind: RecognitionKind.partial,
       source: RecognitionSource.whisperCpp,
       confidence: 0.72,
@@ -105,8 +105,8 @@ class MockSpeechRecognitionService implements SpeechRecognitionService {
       segmentId: '${request.sessionId}-1',
       start: start,
       end: start + const Duration(seconds: 3),
-      text: 'A final subtitle from the mock provider.',
-      language: 'en',
+      text: '这是模拟识别服务生成的正式字幕。',
+      language: 'zh',
       kind: RecognitionKind.finalResult,
       source: RecognitionSource.whisperCpp,
       confidence: 0.94,
@@ -124,7 +124,7 @@ class MockTranslationService implements TranslationService {
   @override
   Future<TranslationResult> translate(TranslationRequest request) async => TranslationResult(
         segmentId: request.segmentId,
-        text: '[${request.targetLanguage}] ${request.text}',
+        text: '[${request.targetLanguage == 'en' ? '英译' : request.targetLanguage}] ${request.text}',
         provider: 'mock',
       );
 }

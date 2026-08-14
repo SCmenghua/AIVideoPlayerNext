@@ -11,12 +11,12 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: AIVideoPlayerApp()));
     await tester.pump();
 
-    expect(find.text('No media selected'), findsOneWidget);
-    await tester.tap(find.byTooltip('Open mock media'));
+    expect(find.text('尚未选择媒体'), findsOneWidget);
+    await tester.tap(find.byTooltip('打开模拟媒体'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump();
 
-    expect(find.text('Sample interview.mp4'), findsOneWidget);
+    expect(find.text('示例访谈视频.mp4'), findsOneWidget);
   });
 }

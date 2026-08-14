@@ -22,7 +22,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   StreamSubscription<PlaybackSnapshot>? _playbackSubscription;
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
   String _sessionId = 'session-1';
-  String _providerStatus = 'Mock providers active';
+  String _providerStatus = '模拟服务已启用';
 
   @override
   void initState() {
@@ -38,13 +38,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (event.sessionId != _sessionId) return;
     setState(() {
       _timeline.apply(event);
-      _providerStatus = event.kind == RecognitionKind.finalResult ? 'Final subtitle received' : 'Listening...';
+      _providerStatus = event.kind == RecognitionKind.finalResult ? '已收到正式字幕' : '正在识别...';
     });
     if (event.kind == RecognitionKind.finalResult) {
       ref.read(translationServiceProvider).translate(TranslationRequest(
         segmentId: event.segmentId,
         text: event.text,
-        targetLanguage: 'zh',
+        targetLanguage: 'en',
       )).then((result) {
         if (mounted && result.segmentId == event.segmentId) {
           setState(() => _timeline.applyTranslation(result.segmentId, result.text));
@@ -57,9 +57,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final nextSession = 'session-${DateTime.now().millisecondsSinceEpoch}';
     _sessionId = nextSession;
     _timeline.reset(sessionId: _sessionId);
-    await ref.read(playerServiceProvider).open(const MediaSource(path: 'mock://sample.mp4', title: 'Sample interview.mp4'));
+    await ref.read(playerServiceProvider).open(const MediaSource(path: 'mock://sample.mp4', title: '示例访谈视频.mp4'));
     await ref.read(speechRecognitionServiceProvider).start(RecognitionRequest(sessionId: _sessionId, from: Duration.zero));
-    if (mounted) setState(() => _providerStatus = 'Mock media loaded');
+    if (mounted) setState(() => _providerStatus = '已加载模拟媒体');
   }
 
   @override
@@ -74,10 +74,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final isWide = MediaQuery.sizeOf(context).width >= 980;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('AI Video Player Next'),
+        title: const Text('AI 视频播放器'),
         actions: [
-          IconButton(onPressed: _openMockMedia, tooltip: 'Open mock media', icon: const Icon(Icons.folder_open_outlined)),
-          IconButton(onPressed: () {}, tooltip: 'Settings', icon: const Icon(Icons.tune_outlined)),
+          IconButton(onPressed: _openMockMedia, tooltip: '打开模拟媒体', icon: const Icon(Icons.folder_open_outlined)),
+          IconButton(onPressed: () {}, tooltip: '设置', icon: const Icon(Icons.tune_outlined)),
           const SizedBox(width: 12),
         ],
       ),
@@ -99,12 +99,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       );
 
   Widget _sourcePanel() => _Panel(
-        title: 'Sources',
+        title: '媒体来源',
         icon: Icons.video_library_outlined,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _sourceRow(Icons.movie_outlined, 'Local files', 'Ready'),
-          _sourceRow(Icons.cloud_outlined, 'Network media', 'Phase 10'),
-          _sourceRow(Icons.folder_shared_outlined, 'WebDAV', 'Phase 10'),
+          _sourceRow(Icons.movie_outlined, '本地文件', '可用'),
+          _sourceRow(Icons.cloud_outlined, '网络媒体', '第 10 阶段'),
+          _sourceRow(Icons.folder_shared_outlined, 'WebDAV', '第 10 阶段'),
         ]),
       );
 
@@ -123,14 +123,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             child: Center(child: Icon(_snapshot.source == null ? Icons.play_circle_outline : Icons.ondemand_video_outlined, size: 64, color: const Color(0xFF5ED6A0))),
           )),
           const SizedBox(height: 14),
-          Text(_snapshot.source?.title ?? 'No media selected', style: Theme.of(context).textTheme.titleMedium),
+          Text(_snapshot.source?.title ?? '尚未选择媒体', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           LinearProgressIndicator(value: _snapshot.progress, minHeight: 3),
           Row(children: [
-            IconButton(onPressed: _snapshot.status == PlaybackStatus.playing ? () => ref.read(playerServiceProvider).pause() : () => ref.read(playerServiceProvider).play(), tooltip: 'Play or pause', icon: Icon(_snapshot.status == PlaybackStatus.playing ? Icons.pause : Icons.play_arrow)),
+            IconButton(onPressed: _snapshot.status == PlaybackStatus.playing ? () => ref.read(playerServiceProvider).pause() : () => ref.read(playerServiceProvider).play(), tooltip: _snapshot.status == PlaybackStatus.playing ? '暂停播放' : '开始播放', icon: Icon(_snapshot.status == PlaybackStatus.playing ? Icons.pause : Icons.play_arrow)),
             Text('${_format(_snapshot.position)} / ${_format(_snapshot.duration)}', style: const TextStyle(color: Color(0xFF9EA7AC))),
             const Spacer(),
-            IconButton(onPressed: () {}, tooltip: 'More playback controls', icon: const Icon(Icons.more_horiz)),
+            IconButton(onPressed: () {}, tooltip: '更多播放控制', icon: const Icon(Icons.more_horiz)),
           ]),
         ]),
       );
@@ -138,14 +138,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Widget _subtitlePanel() {
     final entries = _timeline.finals;
     return _Panel(
-      title: 'Subtitles',
+      title: '字幕',
       icon: Icons.subtitles_outlined,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Text(_providerStatus, style: const TextStyle(color: Color(0xFF5ED6A0), fontSize: 12)),
         const SizedBox(height: 14),
         if (_timeline.partial != null) _subtitleText(_timeline.partial!.original, muted: true),
-        if (entries.isEmpty && _timeline.partial == null) const Text('Open mock media to preview the Phase 1 flow.'),
-        ...entries.reversed.take(3).map((entry) => Padding(padding: const EdgeInsets.only(top: 12), child: _subtitleText('${entry.original}\n${entry.translation ?? 'Translation pending'}'))),
+        if (entries.isEmpty && _timeline.partial == null) const Text('打开模拟媒体以预览第一阶段流程。'),
+        ...entries.reversed.take(3).map((entry) => Padding(padding: const EdgeInsets.only(top: 12), child: _subtitleText('${entry.original}\n${entry.translation ?? '等待翻译'}'))),
       ]),
     );
   }
