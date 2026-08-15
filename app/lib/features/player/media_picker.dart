@@ -14,6 +14,7 @@ class FileSelectorMediaPicker implements MediaPicker {
         XTypeGroup(
           label: '视频文件',
           extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'm4v'],
+          uniformTypeIdentifiers: ['public.movie'],
         ),
       ],
     );

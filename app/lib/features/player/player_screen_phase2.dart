@@ -38,12 +38,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _openLocalMedia() async {
-    final source = await ref.read(mediaPickerProvider).pickLocalVideo();
-    if (source == null) return;
-    _timeline.reset(
-        sessionId: 'media-${DateTime.now().millisecondsSinceEpoch}');
-    await ref.read(playerServiceProvider).open(source);
-    if (mounted) setState(() => _activeView = _WorkbenchView.player);
+    try {
+      final source = await ref.read(mediaPickerProvider).pickLocalVideo();
+      if (source == null) return;
+      _timeline.reset(
+          sessionId: 'media-${DateTime.now().millisecondsSinceEpoch}');
+      await ref.read(playerServiceProvider).open(source);
+      if (mounted) setState(() => _activeView = _WorkbenchView.player);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法读取所选视频，请在“文件”中选择本机可用的视频文件。')),
+      );
+    }
   }
 
   Future<void> _seekBy(Duration offset) =>

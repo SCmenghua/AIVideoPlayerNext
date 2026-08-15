@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -30,10 +31,19 @@ class MobileBrowserService extends BrowserServiceBase {
       ..setNavigationDelegate(NavigationDelegate(
         onNavigationRequest: (request) {
           final url = Uri.tryParse(request.url);
-          final page = currentState.url;
           if (url != null &&
-              page != null &&
-              handleCandidate(candidate: url, originPage: page)) {
+              (url.scheme == 'blob' || url.scheme == 'mediasource')) {
+            emitUnsupported(
+              page: currentState.url ?? url,
+              reason: '该视频使用浏览器媒体流，无法由内置播放器接管。',
+            );
+            return NavigationDecision.navigate;
+          }
+          if (url != null &&
+              handleCandidate(
+                candidate: url,
+                originPage: currentState.url ?? url,
+              )) {
             return NavigationDecision.prevent;
           }
           return NavigationDecision.navigate;
@@ -48,6 +58,7 @@ class MobileBrowserService extends BrowserServiceBase {
               clearMessage: true,
             );
           }
+          unawaited(_injectMediaBridge());
         },
         onPageFinished: (url) async {
           final page = Uri.tryParse(url);
@@ -103,7 +114,11 @@ class MobileBrowserService extends BrowserServiceBase {
   }
 
   Future<void> _injectMediaBridge() async {
-    await controller.runJavaScript(_mobileMediaBridgeScript);
+    try {
+      await controller.runJavaScript(_mobileMediaBridgeScript);
+    } catch (_) {
+      // A navigation can replace the document while the bridge is injected.
+    }
   }
 
   Future<void> _updateHistory() async {
@@ -152,41 +167,135 @@ class MobileBrowserService extends BrowserServiceBase {
 
 const _mobileMediaBridgeScript = r'''
 (() => {
+  if (window.__aiVideoPlayerMediaBridgeInstalled) {
+    window.__aiVideoPlayerMediaBridgeInstalled.start();
+    return;
+  }
+
   const post = (payload) => window.AIVideoPlayerMedia?.postMessage(JSON.stringify(payload));
-  const sourceOf = (video) => video.currentSrc || video.src || video.querySelector('source[src]')?.src;
+  const emitted = new Set();
+  const absolute = (source) => {
+    try {
+      return new URL(source, document.baseURI).href;
+    } catch (_) {
+      return source || '';
+    }
+  };
+  const sourceOf = (video) => absolute(
+    video.currentSrc ||
+    video.src ||
+    video.getAttribute('src') ||
+    video.querySelector('source[src]')?.src ||
+    video.querySelector('source[src]')?.getAttribute('src')
+  );
   const isHttpMedia = (source) => /^https?:/i.test(source || '');
+  const isBrowserOnlySource = (source) => /^(blob:|mediasource:|data:)/i.test(source || '');
+  const visibleVideo = () => Array.from(document.querySelectorAll('video')).find((video) => {
+    const rect = video.getBoundingClientRect();
+    const style = window.getComputedStyle(video);
+    return rect.width > 1 && rect.height > 1 && style.display !== 'none' && style.visibility !== 'hidden';
+  }) || document.querySelector('video');
+  const isPlaybackGesture = (event, video) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const label = [
+      target?.getAttribute('aria-label'),
+      target?.getAttribute('title'),
+      target?.id,
+      target?.className,
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (/play|播放/.test(label)) return true;
+    const rect = video.getBoundingClientRect();
+    return event.clientX >= rect.left && event.clientX <= rect.right &&
+      event.clientY >= rect.top && event.clientY <= rect.bottom;
+  };
+
   const attach = (video) => {
     video.setAttribute('playsinline', '');
     video.setAttribute('webkit-playsinline', '');
     video.playsInline = true;
     if (video.dataset.aiVideoPlayerBound) return;
     video.dataset.aiVideoPlayerBound = '1';
-    let handoffRequested = false;
-    let unsupportedReported = false;
-    const intercept = (event) => {
+
+    const report = () => {
       const source = sourceOf(video);
       if (isHttpMedia(source)) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
         video.pause();
-        if (!handoffRequested) {
-          handoffRequested = true;
+        if (!emitted.has(source)) {
+          emitted.add(source);
           post({kind: 'media', url: source, title: document.title, videoElement: true});
         }
-      } else if (!unsupportedReported) {
-        unsupportedReported = true;
+        return true;
+      }
+      if (isBrowserOnlySource(source) && !emitted.has(source)) {
+        emitted.add(source);
         post({kind: 'unsupported'});
       }
+      return false;
     };
-    video.addEventListener('pointerdown', intercept, true);
-    video.addEventListener('click', intercept, true);
-    video.addEventListener('play', intercept, true);
+    const interceptKnownSource = (event) => {
+      if (!report()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const discoverAfterPageStartsPlayback = () => {
+      [0, 80, 260, 800].forEach((delay) => setTimeout(report, delay));
+    };
+    video.addEventListener('pointerdown', interceptKnownSource, true);
+    video.addEventListener('touchstart', interceptKnownSource, true);
+    video.addEventListener('click', interceptKnownSource, true);
+    video.addEventListener('play', () => {
+      report();
+    }, true);
+    ['loadstart', 'loadedmetadata', 'canplay', 'playing'].forEach((eventName) => {
+      video.addEventListener(eventName, report, true);
+    });
+    video.addEventListener('pointerdown', discoverAfterPageStartsPlayback, true);
+    video.addEventListener('touchstart', discoverAfterPageStartsPlayback, true);
+    video.addEventListener('click', discoverAfterPageStartsPlayback, true);
   };
   const bind = () => document.querySelectorAll('video').forEach(attach);
+  const discoverFromControl = (event) => {
+    const path = event.composedPath ? event.composedPath() : [];
+    const video = path.find((node) => node && node.tagName === 'VIDEO') || visibleVideo();
+    if (!video || !isPlaybackGesture(event, video)) return;
+    attach(video);
+    if (reportVideo(video)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    [0, 80, 260, 800].forEach((delay) => setTimeout(() => reportVideo(video), delay));
+  };
+  const reportVideo = (video) => {
+    const source = sourceOf(video);
+    if (!isHttpMedia(source)) {
+      if (isBrowserOnlySource(source) && !emitted.has(source)) {
+        emitted.add(source);
+        post({kind: 'unsupported'});
+      }
+      return false;
+    }
+    video.pause();
+    if (!emitted.has(source)) {
+      emitted.add(source);
+      post({kind: 'media', url: source, title: document.title, videoElement: true});
+    }
+    return true;
+  };
+  let started = false;
   const start = () => {
+    if (started) {
+      bind();
+      return;
+    }
+    started = true;
     bind();
     new MutationObserver(bind).observe(document, {childList: true, subtree: true});
+    ['pointerdown', 'touchstart', 'click'].forEach((eventName) => {
+      document.addEventListener(eventName, discoverFromControl, true);
+    });
   };
+  window.__aiVideoPlayerMediaBridgeInstalled = {start};
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start, {once: true});
   } else {
