@@ -287,6 +287,8 @@ const _mobileMediaBridgeScript = r'''
   let selectedVideo = null;
   let selectionExpiresAt = 0;
   let selectionSerial = 0;
+  let pendingGestureExpiresAt = 0;
+  let pendingGestureSerial = 0;
   let lastHandoff = '';
   const absolute = (source) => {
     try {
@@ -339,6 +341,16 @@ const _mobileMediaBridgeScript = r'''
       const rightRect = right.getBoundingClientRect();
       return (rightRect.width * rightRect.height) - (leftRect.width * leftRect.height);
     })[0] || null;
+  const isPlaybackControl = (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const label = [
+      target?.getAttribute('aria-label'),
+      target?.getAttribute('title'),
+      target?.id,
+      target?.className,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return /play|播放|开始|继续|resume|fullscreen|全屏|全畫面|全屏幕/.test(label);
+  };
   const videoFromEvent = (event) => {
     const path = event.composedPath ? event.composedPath() : [];
     return path.find((node) => node instanceof HTMLVideoElement) || primaryVideo();
@@ -358,6 +370,7 @@ const _mobileMediaBridgeScript = r'''
   };
   const arm = (video) => {
     selectedVideo = video;
+    pendingGestureExpiresAt = 0;
     selectionSerial += 1;
     lastHandoff = '';
     const serial = selectionSerial;
@@ -410,6 +423,36 @@ const _mobileMediaBridgeScript = r'''
     setTimeout(observeSelectedPlayback, 50);
   };
   const hasIntentFor = (video) => selectedVideo === video && Date.now() < selectionExpiresAt;
+  const hasPendingGesture = () => Date.now() < pendingGestureExpiresAt;
+  const rememberPendingGesture = (event) => {
+    pendingGestureSerial += 1;
+    pendingGestureExpiresAt = Date.now() + 3500;
+    trace('暂存播放意图', {
+      serial: pendingGestureSerial,
+      event: event.type,
+      expiresInMs: 3500,
+    }, null, event.target);
+    const serial = pendingGestureSerial;
+    [40, 120, 250, 500, 900, 1500, 2500, 3500].forEach((delay) => {
+      setTimeout(() => {
+        if (serial !== pendingGestureSerial || !hasPendingGesture()) return;
+        const candidate = primaryVideo();
+        if (!candidate || isLikelyAdvertisementSource(sourceOf(candidate))) return;
+        trace('尝试认领暂存播放意图', {serial, delay}, candidate);
+        arm(candidate);
+        reportVideo(candidate);
+      }, delay);
+    });
+  };
+  const claimPendingGesture = (video) => {
+    if (!hasPendingGesture() || !video || !isVisible(video) ||
+        isLikelyAdvertisement(video) || isLikelyAdvertisementSource(sourceOf(video))) {
+      return false;
+    }
+    trace('认领暂存播放意图', {serial: pendingGestureSerial}, video);
+    arm(video);
+    return true;
+  };
   const emitMedia = (source) => {
     if (source === lastHandoff) return;
     lastHandoff = source;
@@ -421,6 +464,7 @@ const _mobileMediaBridgeScript = r'''
     post({kind: 'unsupported'});
   };
   const reportVideo = (video) => {
+    if (!hasIntentFor(video)) claimPendingGesture(video);
     if (!hasIntentFor(video) || isLikelyAdvertisement(video)) {
       trace('忽略媒体候选', {
         hasIntent: hasIntentFor(video),
@@ -476,18 +520,27 @@ const _mobileMediaBridgeScript = r'''
     }, true);
     video.addEventListener('emptied', () => trace('video 触发 emptied 事件', {}, video));
     video.addEventListener('durationchange', () => trace('video 触发 durationchange 事件', {}, video));
+    if (hasPendingGesture() && !video.paused) reportVideo(video);
   };
   const bind = () => document.querySelectorAll('video').forEach(attach);
   const discoverFromControl = (event) => {
     const video = videoFromEvent(event);
-    if (!video || !isPlaybackGesture(event, video)) return;
+    if (!video && !isPlaybackControl(event)) return;
+    if (video && !isPlaybackGesture(event, video) && !isPlaybackControl(event)) return;
     trace(`用户触发网页 ${event.type} 操作`, {
       clientX: event.clientX,
       clientY: event.clientY,
       button: event.button,
     }, video, event.target);
+    if (!video) {
+      rememberPendingGesture(event);
+      return;
+    }
     attach(video);
-    if (isLikelyAdvertisement(video)) return;
+    if (isLikelyAdvertisement(video) || isLikelyAdvertisementSource(sourceOf(video))) {
+      if (isPlaybackControl(event)) rememberPendingGesture(event);
+      return;
+    }
     arm(video);
     // Do not consume the tap here. Many sites create or select the main media
     // source from their own click handler; play/fullscreen interception below
