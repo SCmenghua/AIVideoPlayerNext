@@ -1,5 +1,8 @@
 class TranslationRequest {
-  const TranslationRequest({required this.segmentId, required this.text, required this.targetLanguage});
+  const TranslationRequest(
+      {required this.segmentId,
+      required this.text,
+      required this.targetLanguage});
 
   final String segmentId;
   final String text;
@@ -7,7 +10,8 @@ class TranslationRequest {
 }
 
 class TranslationResult {
-  const TranslationResult({required this.segmentId, required this.text, required this.provider});
+  const TranslationResult(
+      {required this.segmentId, required this.text, required this.provider});
 
   final String segmentId;
   final String text;

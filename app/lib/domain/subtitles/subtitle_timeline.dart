@@ -26,8 +26,8 @@ class SubtitleTimeline {
   final Map<String, SubtitleEntry> _entries = {};
   SubtitleEntry? _partial;
 
-  List<SubtitleEntry> get finals => _entries.values.toList()
-    ..sort((a, b) => a.start.compareTo(b.start));
+  List<SubtitleEntry> get finals =>
+      _entries.values.toList()..sort((a, b) => a.start.compareTo(b.start));
 
   SubtitleEntry? get partial => _partial;
 

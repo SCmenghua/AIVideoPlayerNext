@@ -1,6 +1,12 @@
 enum RecognitionKind { partial, finalResult }
 
-enum RecognitionSource { whisperCpp, appleSpeech, windowsLiveCaptions, playerPcm, microphone }
+enum RecognitionSource {
+  whisperCpp,
+  appleSpeech,
+  windowsLiveCaptions,
+  playerPcm,
+  microphone
+}
 
 class RecognitionRequest {
   const RecognitionRequest({required this.sessionId, required this.from});

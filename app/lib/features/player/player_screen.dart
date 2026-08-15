@@ -9,14 +9,16 @@ import '../../domain/speech/speech_models.dart';
 import '../../domain/subtitles/subtitle_timeline.dart';
 import '../../domain/translation/translation_service.dart';
 
-class PlayerScreen extends ConsumerStatefulWidget {
-  const PlayerScreen({super.key});
+export 'player_screen_phase2.dart';
+
+class LegacyPlayerScreen extends ConsumerStatefulWidget {
+  const LegacyPlayerScreen({super.key});
 
   @override
-  ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
+  ConsumerState<LegacyPlayerScreen> createState() => _LegacyPlayerScreenState();
 }
 
-class _PlayerScreenState extends ConsumerState<PlayerScreen> {
+class _LegacyPlayerScreenState extends ConsumerState<LegacyPlayerScreen> {
   final SubtitleTimeline _timeline = SubtitleTimeline();
   StreamSubscription<RecognitionEvent>? _speechSubscription;
   StreamSubscription<PlaybackSnapshot>? _playbackSubscription;
@@ -65,8 +67,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final nextSession = 'session-${DateTime.now().millisecondsSinceEpoch}';
     _sessionId = nextSession;
     _timeline.reset(sessionId: _sessionId);
-    await ref.read(playerServiceProvider).open(
-        const MediaSource(path: 'mock://sample.mp4', title: '示例访谈视频.mp4'));
+    await ref.read(playerServiceProvider).open(MediaSource(
+          uri: Uri.parse('mock://sample.mp4'),
+          title: '示例访谈视频.mp4',
+          kind: MediaSourceKind.localFile,
+        ));
     await ref
         .read(speechRecognitionServiceProvider)
         .start(RecognitionRequest(sessionId: _sessionId, from: Duration.zero));

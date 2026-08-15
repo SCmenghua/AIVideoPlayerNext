@@ -62,14 +62,20 @@ class MockPlayerService implements PlayerService {
     _controller.add(_snapshot);
   }
 
+  @override
+  Future<void> setRate(double rate) async {
+    _snapshot = _snapshot.copyWith(rate: rate.clamp(0.5, 2).toDouble());
+    _controller.add(_snapshot);
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    _snapshot = _snapshot.copyWith(volume: volume.clamp(0, 100).toDouble());
+    _controller.add(_snapshot);
+  }
+
   PlaybackSnapshot _copy({PlaybackStatus? status, Duration? position}) =>
-      PlaybackSnapshot(
-        status: status ?? _snapshot.status,
-        position: position ?? _snapshot.position,
-        duration: _snapshot.duration,
-        source: _snapshot.source,
-        message: _snapshot.message,
-      );
+      _snapshot.copyWith(status: status, position: position);
 
   @override
   Future<void> dispose() async {

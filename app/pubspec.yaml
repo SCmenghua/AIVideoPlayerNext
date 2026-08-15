@@ -10,6 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^2.5.1
+  file_selector: ^1.0.3
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_windows_video: ^1.0.9
 
 dev_dependencies:
   flutter_test:
