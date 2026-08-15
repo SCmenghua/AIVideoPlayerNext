@@ -52,8 +52,21 @@ jobs:
       - name: Resolve Flutter packages
         run: flutter pub get
 
+      - name: Cache iOS Flutter engine
+        run: flutter precache --ios
+
+      - name: Install iOS native dependencies
+        run: pod install --project-directory=ios
+
       - name: Build unsigned iOS application
         run: flutter build ios --release --no-codesign
+
+      - name: Verify bundled player framework
+        run: |
+          framework_path="build/ios/iphoneos/Runner.app/Frameworks/Mpv.framework"
+          test -d "$framework_path"
+          test -f "$framework_path/Mpv"
+          file "$framework_path/Mpv"
 
       - name: Package unsigned IPA
         env:

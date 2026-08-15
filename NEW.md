@@ -249,6 +249,7 @@ abstract interface class TranslationService {
 - **iOS 实现已纳入工程：** `WKWebView` 启用内联媒体播放，创建时允许媒体播放，并在页面中注入 `playsinline`/`webkit-playsinline`；导航代理与 JavaScript message channel 都会拦截可获取真实 URL 的媒体。Android 复用相同的 Dart 服务契约和拦截脚本。
 - **自动化检查已通过：** `flutter analyze` 无问题；`flutter test --concurrency=1` 通过 11 个测试（新增 MP4、HLS、`blob:` 和普通网页分类回归）；`flutter build windows --release` 成功生成 `app/build/windows/x64/runner/Release/ai_video_player_next.exe`。
 - **待人工和真机验收：** Windows 需手动检查浏览器导航、普通 MP4/HLS 交接、播放器返回浏览器以及 `blob:` 提示。第二个 Development/Ad Hoc IPA 仍必须在 macOS/Xcode 上生成，并在真实 iPhone 上验证普通 MP4、页面 `<video>`、重定向、返回浏览器、不支持提示，以及受支持资源绝不进入 iOS 系统网页播放器；此 IPA 门槛未通过前，Phase 3 不视为完成。
+- **iOS 白屏修正（2026-08-15）：** 补充 `media_kit_libs_ios_video`，并为 iOS 工程加入 CocoaPods 集成，使 `Mpv.framework/Mpv` 会随未签名 IPA 一起嵌入。未签名 IPA Action 会预缓存 iOS Flutter engine、执行 `pod install`，并在打包前硬性检查播放器 framework；缺少 framework 时构建直接失败，不再生成可下载但启动白屏的包。应用启动也增加中文诊断页，原生播放器初始化异常会显示错误信息而不是只有白屏。
 - **Windows 验收修正（2026-08-15）：** 浏览器服务改为随浏览器页面创建和自动释放，避免退出后再次进入复用已释放的 WebView2 控制器。页面脚本在文档创建和完成加载后均会注入，并仅在发现 HTTP(S) 真实媒体地址时阻止网页播放并交接；来自已确认 `<video>` 元素、但 URL 没有文件扩展名的 HTTP(S) 媒体也可交接。`blob:`/MSE 页面不再被阻断，会继续在内置浏览器中按网站原逻辑播放，同时显示无法由内置播放器接管的中文原因。Bilibili 等以 MSE/`blob:` 或 DRM 为主的视频站点不能合法交接到内置播放器，此限制符合项目不绕过 DRM 的原则。
 - **工作台交互修正（2026-08-15）：** 浏览器首次打开后作为根工作台中的持久工作区保留，并通过 `IndexedStack` 在播放器与浏览器之间切换；浏览器媒体交接后直接打开并播放主播放器，然后选中“播放器”工作区。已移除浏览器专用播放页、左上角返回按钮及其异步销毁路径，从而避免返回时同时销毁页面、WebView 与播放控制器导致的崩溃。交接播放复用主播放器完整控件，包括进度、前进/后退 10 秒、暂停/继续、倍速与音量调节；选择“内置浏览器”即可恢复原网页会话。
 

@@ -6,6 +6,15 @@ import 'app/app.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  runApp(const ProviderScope(child: AIVideoPlayerApp()));
+  try {
+    MediaKit.ensureInitialized();
+    runApp(const ProviderScope(child: AIVideoPlayerApp()));
+  } catch (error, stackTrace) {
+    FlutterError.reportError(FlutterErrorDetails(
+      exception: error,
+      stack: stackTrace,
+      library: '应用启动',
+    ));
+    runApp(StartupFailureApp(error: error));
+  }
 }
