@@ -199,7 +199,6 @@ const _mobileMediaBridgeScript = r'''
   let selectionExpiresAt = 0;
   let selectionSerial = 0;
   let lastHandoff = '';
-  let lastHandoffAt = 0;
   const absolute = (source) => {
     try {
       return new URL(source, document.baseURI).href;
@@ -271,6 +270,7 @@ const _mobileMediaBridgeScript = r'''
   const arm = (video) => {
     selectedVideo = video;
     selectionSerial += 1;
+    lastHandoff = '';
     const serial = selectionSerial;
     // Keep the intent while a short pre-roll finishes and the page swaps in its content source.
     selectionExpiresAt = Date.now() + 120000;
@@ -280,7 +280,13 @@ const _mobileMediaBridgeScript = r'''
     [40, 120, 250, 500, 900, 1500, 2500, 4000].forEach((delay) => {
       setTimeout(() => {
         if (serial !== selectionSerial || Date.now() >= selectionExpiresAt) return;
-        const candidate = selectedVideo?.isConnected ? selectedVideo : primaryVideo();
+        let candidate = selectedVideo?.isConnected ? selectedVideo : null;
+        const selectedSource = candidate ? sourceOf(candidate) : '';
+        if (!candidate || !isVisible(candidate) || isLikelyAdvertisement(candidate) ||
+            isLikelyAdvertisementSource(selectedSource)) {
+          candidate = primaryVideo();
+          if (candidate) selectedVideo = candidate;
+        }
         if (!candidate) return;
         attach(candidate);
         reportVideo(candidate);
@@ -289,9 +295,8 @@ const _mobileMediaBridgeScript = r'''
   };
   const hasIntentFor = (video) => selectedVideo === video && Date.now() < selectionExpiresAt;
   const emitMedia = (source) => {
-    if (source === lastHandoff && Date.now() - lastHandoffAt < 1500) return;
+    if (source === lastHandoff) return;
     lastHandoff = source;
-    lastHandoffAt = Date.now();
     post({kind: 'media', url: source, title: document.title, videoElement: true});
   };
   const emitUnsupported = () => post({kind: 'unsupported'});
