@@ -5,10 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../app/providers.dart';
+import '../../domain/player/browser_media_handoff.dart';
 import '../../domain/player/player_service.dart';
 import '../../domain/subtitles/subtitle_timeline.dart';
 import '../browser/browser_screen.dart';
 import 'media_kit_player_service.dart';
+
+enum _WorkbenchView { player, browser }
 
 class PlayerScreen extends ConsumerStatefulWidget {
   const PlayerScreen({super.key});
@@ -21,6 +24,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   final SubtitleTimeline _timeline = SubtitleTimeline();
   StreamSubscription<PlaybackSnapshot>? _playbackSubscription;
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
+  _WorkbenchView _activeView = _WorkbenchView.player;
+  bool _browserHasBeenOpened = false;
+  bool _isOpeningBrowserMedia = false;
 
   @override
   void initState() {
@@ -37,14 +43,38 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _timeline.reset(
         sessionId: 'media-${DateTime.now().millisecondsSinceEpoch}');
     await ref.read(playerServiceProvider).open(source);
+    if (mounted) setState(() => _activeView = _WorkbenchView.player);
   }
 
   Future<void> _seekBy(Duration offset) =>
       ref.read(playerServiceProvider).seek(_snapshot.position + offset);
 
-  Future<void> _openBrowser() => Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => const BrowserScreen()),
-      );
+  void _showView(_WorkbenchView view) {
+    if (_activeView == view &&
+        (view != _WorkbenchView.browser || _browserHasBeenOpened)) {
+      return;
+    }
+    setState(() {
+      if (view == _WorkbenchView.browser) _browserHasBeenOpened = true;
+      _activeView = view;
+    });
+  }
+
+  Future<void> _openBrowserMedia(BrowserMediaHandoff handoff) async {
+    if (_isOpeningBrowserMedia) return;
+    _isOpeningBrowserMedia = true;
+    try {
+      final player = ref.read(playerServiceProvider);
+      _timeline.reset(
+          sessionId: 'media-${DateTime.now().millisecondsSinceEpoch}');
+      await player.open(handoff.toMediaSource());
+      if (!mounted) return;
+      setState(() => _activeView = _WorkbenchView.player);
+      await player.play();
+    } finally {
+      _isOpeningBrowserMedia = false;
+    }
+  }
 
   @override
   void dispose() {
@@ -65,7 +95,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             icon: const Icon(Icons.folder_open_outlined),
           ),
           IconButton(
-            onPressed: _openBrowser,
+            onPressed: () => _showView(_WorkbenchView.browser),
             tooltip: '打开内置浏览器',
             icon: const Icon(Icons.language_outlined),
           ),
@@ -80,15 +110,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(width: 240, child: _sourcePanel()),
-          Expanded(child: _playerPanel()),
+          Expanded(child: _workspace()),
           SizedBox(width: 300, child: _subtitlePanel()),
         ],
       );
 
-  Widget _mobileLayout() => ListView(
-        padding: const EdgeInsets.all(8),
-        children: [_playerPanel(), _subtitlePanel(), _sourcePanel()],
+  Widget _mobileLayout() => Column(
+        children: [
+          _mobileNavigation(),
+          Expanded(child: _workspace(includeSubtitles: true)),
+        ],
       );
+
+  Widget _workspace({bool includeSubtitles = false}) {
+    final playerWorkspace = includeSubtitles
+        ? ListView(children: [_playerPanel(), _subtitlePanel()])
+        : _playerPanel();
+    if (!_browserHasBeenOpened) return playerWorkspace;
+    return IndexedStack(
+      index: _activeView.index,
+      children: [
+        playerWorkspace,
+        BrowserWorkspace(onMediaDetected: _openBrowserMedia),
+      ],
+    );
+  }
 
   Widget _sourcePanel() => _Panel(
         title: '媒体来源',
@@ -96,33 +142,109 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _sourceRow(Icons.movie_outlined, '本地文件', '可用'),
-            Material(
-              color: Colors.transparent,
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.language_outlined,
-                    size: 20, color: Color(0xFF5ED6A0)),
-                title: const Text('内置浏览器'),
-                subtitle: const Text('可用',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF5ED6A0))),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: _openBrowser,
-              ),
+            _viewRow(
+              icon: Icons.play_circle_outline,
+              title: '播放器',
+              subtitle: '当前工作区',
+              view: _WorkbenchView.player,
             ),
+            _viewRow(
+              icon: Icons.language_outlined,
+              title: '内置浏览器',
+              subtitle: '单标签会话',
+              view: _WorkbenchView.browser,
+            ),
+            _sourceRow(Icons.movie_outlined, '本地文件', '打开', _openLocalMedia),
             _sourceRow(Icons.cloud_outlined, '网络媒体', '第 4 阶段'),
             _sourceRow(Icons.folder_shared_outlined, 'WebDAV', '第 12 阶段'),
           ],
         ),
       );
 
-  Widget _sourceRow(IconData icon, String title, String status) => ListTile(
+  Widget _viewRow({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required _WorkbenchView view,
+  }) {
+    final selected = _activeView == view;
+    return Material(
+      color: selected ? const Color(0xFF24382F) : Colors.transparent,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+        leading: Icon(
+          icon,
+          size: 20,
+          color: selected ? const Color(0xFF5ED6A0) : const Color(0xFF8A939A),
+        ),
+        title: Text(title),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(
+            fontSize: 12,
+            color: selected ? const Color(0xFF5ED6A0) : const Color(0xFF8A939A),
+          ),
+        ),
+        trailing: selected ? const Icon(Icons.chevron_right) : null,
+        selected: selected,
+        onTap: () => _showView(view),
+      ),
+    );
+  }
+
+  Widget _sourceRow(IconData icon, String title, String status,
+          [VoidCallback? onTap]) =>
+      ListTile(
         contentPadding: EdgeInsets.zero,
         leading: Icon(icon, size: 20, color: const Color(0xFF8A939A)),
         title: Text(title),
         subtitle: Text(
           status,
           style: const TextStyle(fontSize: 12, color: Color(0xFF8A939A)),
+        ),
+        onTap: onTap,
+      );
+
+  Widget _mobileNavigation() => Material(
+        color: const Color(0xFF191C1E),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            children: [
+              _mobileViewButton(
+                Icons.play_circle_outline,
+                '播放器',
+                _WorkbenchView.player,
+              ),
+              _mobileViewButton(
+                Icons.language_outlined,
+                '内置浏览器',
+                _WorkbenchView.browser,
+              ),
+              const Spacer(),
+              IconButton(
+                onPressed: _openLocalMedia,
+                tooltip: '打开本地视频',
+                icon: const Icon(Icons.folder_open_outlined),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _mobileViewButton(
+    IconData icon,
+    String label,
+    _WorkbenchView view,
+  ) =>
+      TextButton.icon(
+        onPressed: () => _showView(view),
+        icon: Icon(icon),
+        label: Text(label),
+        style: TextButton.styleFrom(
+          foregroundColor: _activeView == view
+              ? const Color(0xFF5ED6A0)
+              : const Color(0xFF9EA7AC),
         ),
       );
 
