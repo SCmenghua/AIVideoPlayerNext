@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../app/providers.dart';
@@ -27,6 +28,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   _WorkbenchView _activeView = _WorkbenchView.player;
   bool _browserHasBeenOpened = false;
   bool _isOpeningBrowserMedia = false;
+  bool _isFullscreenOpen = false;
 
   @override
   void initState() {
@@ -80,6 +82,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       await player.play();
     } finally {
       _isOpeningBrowserMedia = false;
+    }
+  }
+
+  Future<void> _openFullscreen() async {
+    final player = ref.read(playerServiceProvider);
+    if (_snapshot.source == null || player is! MediaKitPlayerService) return;
+    setState(() => _isFullscreenOpen = true);
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _FullscreenPlayerScreen(player: player),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isFullscreenOpen = false);
     }
   }
 
@@ -257,14 +274,38 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         children: [
           AspectRatio(
             aspectRatio: 16 / 9,
-            child: DecoratedBox(
-              decoration: const BoxDecoration(color: Color(0xFF202427)),
-              child: hasMedia && player is MediaKitPlayerService
-                  ? Video(
-                      controller: player.videoController,
-                      controls: NoVideoControls,
-                    )
-                  : _emptyVideoSurface(),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                DecoratedBox(
+                  decoration: const BoxDecoration(color: Color(0xFF202427)),
+                  child: hasMedia &&
+                          !_isFullscreenOpen &&
+                          player is MediaKitPlayerService
+                      ? Video(
+                          controller: player.videoController,
+                          controls: NoVideoControls,
+                        )
+                      : _emptyVideoSurface(),
+                ),
+                if (hasMedia && player is MediaKitPlayerService) ...[
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: IconButton.filledTonal(
+                      onPressed: _openFullscreen,
+                      tooltip: '进入全屏',
+                      icon: const Icon(Icons.fullscreen),
+                    ),
+                  ),
+                  Positioned(
+                    left: 8,
+                    right: 8,
+                    bottom: 8,
+                    child: _videoVolumeControl(hasMedia: hasMedia),
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 14),
@@ -363,59 +404,60 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   child: Text('${_snapshot.rate.toStringAsFixed(2)}x'),
                 ),
               ),
+              IconButton(
+                onPressed: canControl ? _openFullscreen : null,
+                tooltip: '进入全屏',
+                icon: const Icon(Icons.fullscreen),
+              ),
             ],
           );
           final time = Text(
             '${_format(_snapshot.position)} / ${_format(_snapshot.duration)}',
             style: const TextStyle(color: Color(0xFF9EA7AC)),
           );
-          final volume = _volumeControl(hasMedia: hasMedia);
-
           if (constraints.maxWidth >= 700) {
             return Row(
               children: [
                 time,
-                const SizedBox(width: 24),
-                SizedBox(width: 180, child: volume),
                 const Spacer(),
                 controls,
               ],
             );
           }
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          return Row(
             children: [
-              Row(
-                children: [
-                  time,
-                  const Spacer(),
-                  controls,
-                ],
-              ),
-              volume,
+              time,
+              const Spacer(),
+              controls,
             ],
           );
         },
       );
 
-  Widget _volumeControl({required bool hasMedia}) => Row(
-        children: [
-          Icon(
-            _snapshot.volume == 0
-                ? Icons.volume_off_outlined
-                : Icons.volume_up_outlined,
-            size: 20,
-            color: const Color(0xFF9EA7AC),
-          ),
-          Expanded(
-            child: Slider(
-              value: _snapshot.volume,
-              max: 100,
-              onChanged:
-                  hasMedia ? ref.read(playerServiceProvider).setVolume : null,
+  Widget _videoVolumeControl({required bool hasMedia}) => Material(
+        color: const Color(0xCC111516),
+        borderRadius: BorderRadius.circular(4),
+        child: Row(
+          children: [
+            Icon(
+              _snapshot.volume == 0
+                  ? Icons.volume_off_outlined
+                  : Icons.volume_up_outlined,
+              size: 18,
+              color: Colors.white,
             ),
-          ),
-        ],
+            SizedBox(
+              width: 160,
+              child: Slider(
+                value: _snapshot.volume,
+                max: 100,
+                onChanged: hasMedia
+                    ? ref.read(playerServiceProvider).setVolume
+                    : null,
+              ),
+            ),
+          ],
+        ),
       );
 
   Widget _emptyVideoSurface() => Center(
@@ -445,6 +487,141 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   String _format(Duration duration) =>
       '${duration.inMinutes.toString().padLeft(2, '0')}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
+}
+
+class _FullscreenPlayerScreen extends StatefulWidget {
+  const _FullscreenPlayerScreen({required this.player});
+
+  final MediaKitPlayerService player;
+
+  @override
+  State<_FullscreenPlayerScreen> createState() => _FullscreenPlayerScreenState();
+}
+
+class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
+  StreamSubscription<PlaybackSnapshot>? _subscription;
+  PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
+
+  @override
+  void initState() {
+    super.initState();
+    _snapshot = widget.player.snapshot;
+    _subscription = widget.player.snapshots.listen((snapshot) {
+      if (mounted) setState(() => _snapshot = snapshot);
+    });
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    super.dispose();
+  }
+
+  Future<void> _close() => Navigator.of(context).maybePop();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Center(
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Video(
+                    controller: widget.player.videoController,
+                    controls: NoVideoControls,
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 12,
+                left: 12,
+                child: IconButton.filledTonal(
+                  onPressed: _close,
+                  tooltip: '退出全屏',
+                  icon: const Icon(Icons.fullscreen_exit),
+                ),
+              ),
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: Material(
+                  color: const Color(0xCC111516),
+                  borderRadius: BorderRadius.circular(4),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _snapshot.volume == 0
+                            ? Icons.volume_off_outlined
+                            : Icons.volume_up_outlined,
+                        color: Colors.white,
+                      ),
+                      SizedBox(
+                        width: 180,
+                        child: Slider(
+                          value: _snapshot.volume,
+                          max: 100,
+                          onChanged: widget.player.setVolume,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 20,
+                right: 20,
+                bottom: 56,
+                child: Slider(
+                  value: _snapshot.position.inMilliseconds.toDouble().clamp(
+                        0,
+                        _snapshot.duration.inMilliseconds > 0
+                            ? _snapshot.duration.inMilliseconds.toDouble()
+                            : 1,
+                      ),
+                  max: _snapshot.duration.inMilliseconds > 0
+                      ? _snapshot.duration.inMilliseconds.toDouble()
+                      : 1,
+                  onChanged: _snapshot.duration > Duration.zero
+                      ? (value) => widget.player
+                          .seek(Duration(milliseconds: value.round()))
+                      : null,
+                ),
+              ),
+              Positioned(
+                left: 72,
+                top: 12,
+                child: IconButton.filledTonal(
+                  onPressed: _snapshot.status == PlaybackStatus.playing
+                      ? widget.player.pause
+                      : widget.player.play,
+                  tooltip: _snapshot.status == PlaybackStatus.playing
+                      ? '暂停播放'
+                      : '开始播放',
+                  icon: Icon(_snapshot.status == PlaybackStatus.playing
+                      ? Icons.pause
+                      : Icons.play_arrow),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 class _Panel extends StatelessWidget {

@@ -51,6 +51,8 @@ class MediaKitPlayerService implements PlayerService {
   @override
   Stream<PlaybackSnapshot> get snapshots => _controller.stream;
 
+  PlaybackSnapshot get snapshot => _snapshot;
+
   @override
   Future<void> open(MediaSource source) async {
     _emit(PlaybackSnapshot(

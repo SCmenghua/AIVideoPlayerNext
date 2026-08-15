@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
@@ -88,6 +89,7 @@ class MobileBrowserService extends BrowserServiceBase {
       );
     _initialized = true;
     updateState(status: BrowserLoadStatus.idle);
+    await _installEarlyMediaBridge();
   }
 
   void _handleJavaScriptMessage(JavaScriptMessage message) {
@@ -118,6 +120,23 @@ class MobileBrowserService extends BrowserServiceBase {
       await controller.runJavaScript(_mobileMediaBridgeScript);
     } catch (_) {
       // A navigation can replace the document while the bridge is injected.
+    }
+  }
+
+  Future<void> _installEarlyMediaBridge() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    final platform = controller.platform;
+    if (platform is! WebKitWebViewController) return;
+    try {
+      await const MethodChannel('ai_video_player/ios_webview').invokeMethod<void>(
+        'installUserScript',
+        <String, Object>{
+          'identifier': platform.webViewIdentifier,
+          'source': _mobileMediaBridgeScript,
+        },
+      );
+    } catch (_) {
+      // The normal page callbacks remain as a fallback on unsupported hosts.
     }
   }
 
@@ -174,6 +193,9 @@ const _mobileMediaBridgeScript = r'''
 
   const post = (payload) => window.AIVideoPlayerMedia?.postMessage(JSON.stringify(payload));
   const emitted = new Set();
+  const originalPlay = HTMLMediaElement.prototype.play;
+  const originalRequestFullscreen = Element.prototype.requestFullscreen;
+  const originalVideoFullscreen = HTMLVideoElement.prototype.webkitEnterFullscreen;
   const absolute = (source) => {
     try {
       return new URL(source, document.baseURI).href;
@@ -203,7 +225,7 @@ const _mobileMediaBridgeScript = r'''
       target?.id,
       target?.className,
     ].filter(Boolean).join(' ').toLowerCase();
-    if (/play|播放/.test(label)) return true;
+    if (/play|播放|fullscreen|全屏|全畫面|全屏幕/.test(label)) return true;
     const rect = video.getBoundingClientRect();
     return event.clientX >= rect.left && event.clientX <= rect.right &&
       event.clientY >= rect.top && event.clientY <= rect.bottom;
@@ -282,6 +304,61 @@ const _mobileMediaBridgeScript = r'''
     }
     return true;
   };
+  const handoffOrBlockFullscreen = (video) => {
+    if (!video) return false;
+    const source = sourceOf(video);
+    if (isHttpMedia(source)) {
+      reportVideo(video);
+      return true;
+    }
+    if (isBrowserOnlySource(source)) {
+      if (!emitted.has(source)) {
+        emitted.add(source);
+        post({kind: 'unsupported'});
+      }
+      return true;
+    }
+    return false;
+  };
+  const patchedPlay = function() {
+    const video = this instanceof HTMLVideoElement ? this : visibleVideo();
+    if (video && handoffOrBlockFullscreen(video)) {
+      return Promise.resolve();
+    }
+    return originalPlay.apply(this, arguments);
+  };
+  const patchedRequestFullscreen = function() {
+    const video = this instanceof HTMLVideoElement ? this : visibleVideo();
+    if (video && handoffOrBlockFullscreen(video)) {
+      return Promise.resolve();
+    }
+    return originalRequestFullscreen ? originalRequestFullscreen.apply(this, arguments) : Promise.resolve();
+  };
+  const patchedVideoFullscreen = function() {
+    if (handoffOrBlockFullscreen(this)) return Promise.resolve();
+    return originalVideoFullscreen ? originalVideoFullscreen.apply(this, arguments) : Promise.resolve();
+  };
+  try {
+    HTMLMediaElement.prototype.play = patchedPlay;
+    Element.prototype.requestFullscreen = patchedRequestFullscreen;
+    HTMLVideoElement.prototype.webkitEnterFullscreen = patchedVideoFullscreen;
+  } catch (_) {
+    // Some protected pages expose read-only media prototypes.
+  }
+  document.addEventListener('fullscreenchange', () => {
+    const video = visibleVideo();
+    if (document.fullscreenElement && video) {
+      handoffOrBlockFullscreen(video);
+      if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    }
+  }, true);
+  document.addEventListener('webkitbeginfullscreen', (event) => {
+    const video = event.target instanceof HTMLVideoElement ? event.target : visibleVideo();
+    if (handoffOrBlockFullscreen(video)) {
+      event.preventDefault();
+      if (video) video.pause();
+    }
+  }, true);
   let started = false;
   const start = () => {
     if (started) {
