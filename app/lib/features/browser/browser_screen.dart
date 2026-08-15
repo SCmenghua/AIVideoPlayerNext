@@ -25,6 +25,7 @@ class _BrowserScreenState extends ConsumerState<BrowserScreen> {
   StreamSubscription<BrowserEvent>? _eventSubscription;
   late BrowserService _browser;
   late BrowserPageState _state;
+  bool _isOpeningMedia = false;
 
   @override
   void initState() {
@@ -58,11 +59,17 @@ class _BrowserScreenState extends ConsumerState<BrowserScreen> {
   }
 
   Future<void> _openBrowserMedia(BrowserMediaHandoff handoff) async {
-    await ref.read(playerServiceProvider).open(handoff.toMediaSource());
-    if (!mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => BrowserMediaPlayerScreen(handoff: handoff),
-    ));
+    if (_isOpeningMedia) return;
+    _isOpeningMedia = true;
+    try {
+      await ref.read(playerServiceProvider).open(handoff.toMediaSource());
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => BrowserMediaPlayerScreen(handoff: handoff),
+      ));
+    } finally {
+      _isOpeningMedia = false;
+    }
   }
 
   Future<void> _submitAddress(String value) async {
@@ -88,37 +95,40 @@ class _BrowserScreenState extends ConsumerState<BrowserScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          titleSpacing: 8,
-          title: _addressBar(),
-          actions: [
-            IconButton(
-              onPressed: _state.status == BrowserLoadStatus.loading
-                  ? _browser.stop
-                  : _browser.reload,
-              tooltip:
-                  _state.status == BrowserLoadStatus.loading ? '停止加载' : '刷新网页',
-              icon: Icon(_state.status == BrowserLoadStatus.loading
-                  ? Icons.close
-                  : Icons.refresh),
+  Widget build(BuildContext context) {
+    ref.watch(browserServiceProvider);
+    return Scaffold(
+      appBar: AppBar(
+        titleSpacing: 8,
+        title: _addressBar(),
+        actions: [
+          IconButton(
+            onPressed: _state.status == BrowserLoadStatus.loading
+                ? _browser.stop
+                : _browser.reload,
+            tooltip:
+                _state.status == BrowserLoadStatus.loading ? '停止加载' : '刷新网页',
+            icon: Icon(_state.status == BrowserLoadStatus.loading
+                ? Icons.close
+                : Icons.refresh),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (_state.status == BrowserLoadStatus.loading)
+            LinearProgressIndicator(value: _state.progress / 100),
+          if (_state.message != null)
+            _BrowserNotice(
+              message: _state.message!,
+              onRetry: _state.url == null ? null : _browser.reload,
             ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        body: Column(
-          children: [
-            if (_state.status == BrowserLoadStatus.loading)
-              LinearProgressIndicator(value: _state.progress / 100),
-            if (_state.message != null)
-              _BrowserNotice(
-                message: _state.message!,
-                onRetry: _state.url == null ? null : _browser.reload,
-              ),
-            Expanded(child: BrowserView(service: _browser)),
-          ],
-        ),
-      );
+          Expanded(child: BrowserView(service: _browser)),
+        ],
+      ),
+    );
+  }
 
   Widget _addressBar() => Row(
         children: [

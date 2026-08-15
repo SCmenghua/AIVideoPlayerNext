@@ -60,12 +60,14 @@ abstract class BrowserServiceBase implements BrowserService {
     required Uri candidate,
     required Uri originPage,
     String? title,
+    bool isVideoElementSource = false,
   }) {
     final decision = _classifier.classify(
       candidate: candidate,
       originPage: originPage,
       browserSessionId: _state.sessionId,
       title: title ?? _state.title,
+      isVideoElementSource: isVideoElementSource,
       requestHeaders: {'Referer': originPage.toString()},
     );
     switch (decision.disposition) {

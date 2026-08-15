@@ -21,7 +21,7 @@ final mediaPickerProvider = Provider<MediaPicker>(
   (ref) => FileSelectorMediaPicker(),
 );
 
-final browserServiceProvider = Provider<BrowserService>((ref) {
+final browserServiceProvider = AutoDisposeProvider<BrowserService>((ref) {
   final BrowserService service = defaultTargetPlatform == TargetPlatform.windows
       ? WindowsBrowserService()
       : MobileBrowserService();

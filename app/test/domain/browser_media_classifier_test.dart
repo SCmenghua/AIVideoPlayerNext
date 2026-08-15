@@ -33,6 +33,19 @@ void main() {
     expect(decision.handoff!.title, '网页视频');
   });
 
+  test('hands off an HTTP source confirmed by a video element', () {
+    final decision = classifier.classify(
+      candidate: Uri.parse('https://media.example.com/play?id=42'),
+      originPage: page,
+      browserSessionId: 'session-1',
+      title: '没有扩展名的视频地址',
+      isVideoElementSource: true,
+    );
+
+    expect(decision.disposition, BrowserMediaDisposition.handoff);
+    expect(decision.handoff!.mediaUri.queryParameters['id'], '42');
+  });
+
   test('reports blob media as unsupported without attempting extraction', () {
     final decision = classifier.classify(
       candidate: Uri.parse('blob:https://example.com/asset'),

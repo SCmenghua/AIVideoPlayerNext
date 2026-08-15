@@ -31,6 +31,9 @@ class WindowsBrowserService extends BrowserServiceBase {
         updateState(title: title);
       }));
       _subscriptions.add(controller.loadingState.listen((loading) {
+        if (loading == LoadingState.navigationCompleted) {
+          unawaited(controller.executeScript(_mediaBridgeScript));
+        }
         updateState(
           status: loading == LoadingState.loading
               ? BrowserLoadStatus.loading
@@ -92,6 +95,7 @@ class WindowsBrowserService extends BrowserServiceBase {
           candidate: candidate,
           originPage: page,
           title: message['title']?.toString(),
+          isVideoElementSource: message['videoElement'] == true,
         );
       }
     } else if (kind == 'unsupported') {
@@ -148,28 +152,44 @@ class WindowsBrowserService extends BrowserServiceBase {
 const _mediaBridgeScript = r'''
 (() => {
   const post = (payload) => window.chrome?.webview?.postMessage(payload);
+  const sourceOf = (video) => video.currentSrc || video.src || video.querySelector('source[src]')?.src;
+  const isHttpMedia = (source) => /^https?:/i.test(source || '');
   const attach = (video) => {
     video.setAttribute('playsinline', '');
     video.setAttribute('webkit-playsinline', '');
     video.playsInline = true;
     if (video.dataset.aiVideoPlayerBound) return;
     video.dataset.aiVideoPlayerBound = '1';
+    let handoffRequested = false;
+    let unsupportedReported = false;
     const intercept = (event) => {
-      const source = video.currentSrc || video.src;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      video.pause();
-      if (source) {
-        post({kind: 'media', url: source, title: document.title});
-      } else {
+      const source = sourceOf(video);
+      if (isHttpMedia(source)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        video.pause();
+        if (!handoffRequested) {
+          handoffRequested = true;
+          post({kind: 'media', url: source, title: document.title, videoElement: true});
+        }
+      } else if (!unsupportedReported) {
+        unsupportedReported = true;
         post({kind: 'unsupported'});
       }
     };
+    video.addEventListener('pointerdown', intercept, true);
     video.addEventListener('click', intercept, true);
     video.addEventListener('play', intercept, true);
   };
   const bind = () => document.querySelectorAll('video').forEach(attach);
-  new MutationObserver(bind).observe(document.documentElement, {childList: true, subtree: true});
-  bind();
+  const start = () => {
+    bind();
+    new MutationObserver(bind).observe(document, {childList: true, subtree: true});
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, {once: true});
+  } else {
+    start();
+  }
 })();
 ''';

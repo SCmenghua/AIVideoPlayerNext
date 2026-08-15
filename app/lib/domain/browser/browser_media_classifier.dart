@@ -38,6 +38,7 @@ class BrowserMediaClassifier {
     required Uri originPage,
     required String browserSessionId,
     required String title,
+    bool isVideoElementSource = false,
     Map<String, String> requestHeaders = const {},
   }) {
     final scheme = candidate.scheme.toLowerCase();
@@ -51,7 +52,8 @@ class BrowserMediaClassifier {
     }
 
     final path = candidate.path.toLowerCase();
-    if (path.endsWith('.mp4') ||
+    if (isVideoElementSource ||
+        path.endsWith('.mp4') ||
         path.endsWith('.m4v') ||
         path.endsWith('.mov') ||
         path.endsWith('.webm') ||
