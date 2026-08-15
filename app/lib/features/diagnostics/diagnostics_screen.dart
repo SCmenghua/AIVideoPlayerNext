@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../core/diagnostics/diagnostic_log_service.dart';
 
@@ -24,22 +25,48 @@ class DiagnosticsWorkspace extends StatelessWidget {
                       const SizedBox(width: 8),
                       Text('诊断日志 (${entries.length})'),
                       const Spacer(),
-                      IconButton(
-                        onPressed: entries.isEmpty
-                            ? null
-                            : () async {
-                                try {
-                                  await logs.export();
-                                } catch (_) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('导出日志失败，请稍后重试。')),
+                      Builder(
+                        builder: (buttonContext) => IconButton(
+                          onPressed: entries.isEmpty
+                              ? null
+                              : () async {
+                                  final box = buttonContext.findRenderObject()
+                                      as RenderBox?;
+                                  final origin = box == null
+                                      ? null
+                                      : box.localToGlobal(Offset.zero) &
+                                          box.size;
+                                  logs.info('诊断日志', '用户点击导出日志');
+                                  try {
+                                    final result = await logs.export(
+                                      sharePositionOrigin: origin,
                                     );
+                                    if (result.status == ShareResultStatus.dismissed) {
+                                      logs.info('诊断日志', '用户取消导出日志');
+                                    } else {
+                                      logs.info('诊断日志', '日志导出已调用系统分享', {
+                                        '结果': result.status.name,
+                                      });
+                                    }
+                                  } catch (error, stackTrace) {
+                                    logs.error('诊断日志', '日志导出失败', {
+                                      '错误类型': error.runtimeType,
+                                      '错误': error,
+                                      '堆栈': stackTrace,
+                                    });
+                                    if (buttonContext.mounted) {
+                                      ScaffoldMessenger.of(buttonContext)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content: Text('导出日志失败，请稍后重试。'),
+                                        ),
+                                      );
+                                    }
                                   }
-                                }
-                              },
-                        tooltip: '导出诊断日志',
-                        icon: const Icon(Icons.ios_share_outlined),
+                                },
+                          tooltip: '导出诊断日志',
+                          icon: const Icon(Icons.ios_share_outlined),
+                        ),
                       ),
                       IconButton(
                         onPressed: entries.isEmpty ? null : logs.clear,

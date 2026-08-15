@@ -1,8 +1,9 @@
 import 'dart:collection';
-import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 enum DiagnosticLogLevel { info, warning, error }
@@ -99,19 +100,39 @@ class DiagnosticLogService extends ChangeNotifier {
     return buffer.toString();
   }
 
-  Future<void> export() async {
-    final directory = await getTemporaryDirectory();
-    final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
-    final file = File(
-      '${directory.path}${Platform.pathSeparator}'
-      'ai-video-player-diagnostics-$timestamp.txt',
+  Future<ShareResult> export({Rect? sharePositionOrigin}) async {
+    final content = formatForExport();
+    final now = DateTime.now();
+    final timestamp = '${now.year.toString().padLeft(4, '0')}'
+        '${now.month.toString().padLeft(2, '0')}'
+        '${now.day.toString().padLeft(2, '0')}-'
+        '${now.hour.toString().padLeft(2, '0')}'
+        '${now.minute.toString().padLeft(2, '0')}'
+        '${now.second.toString().padLeft(2, '0')}';
+    final fileName = 'ai-video-player-diagnostics-$timestamp.txt';
+    final file = XFile.fromData(
+      Uint8List.fromList(utf8.encode(content)),
+      name: fileName,
+      mimeType: 'text/plain',
     );
-    await file.writeAsString(formatForExport(), flush: true);
-    await Share.shareXFiles(
-      [XFile(file.path, mimeType: 'text/plain')],
-      subject: 'AI 视频播放器诊断日志',
-      text: 'AI 视频播放器诊断日志（已自动脱敏）',
-    );
+    try {
+      return await Share.shareXFiles(
+        [file],
+        subject: 'AI 视频播放器诊断日志',
+        sharePositionOrigin: sharePositionOrigin,
+        fileNameOverrides: [fileName],
+      );
+    } catch (error) {
+      warning('诊断日志', '文件分享失败，改用纯文本分享', {
+        '错误类型': error.runtimeType,
+        '错误': error,
+      });
+      return Share.share(
+        content,
+        subject: 'AI 视频播放器诊断日志',
+        sharePositionOrigin: sharePositionOrigin,
+      );
+    }
   }
 
   static String _sanitize(String key, String value) {
