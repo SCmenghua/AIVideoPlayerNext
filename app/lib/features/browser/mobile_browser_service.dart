@@ -197,6 +197,7 @@ const _mobileMediaBridgeScript = r'''
   const originalVideoFullscreen = HTMLVideoElement.prototype.webkitEnterFullscreen;
   let selectedVideo = null;
   let selectionExpiresAt = 0;
+  let selectionSerial = 0;
   let lastHandoff = '';
   let lastHandoffAt = 0;
   const absolute = (source) => {
@@ -269,8 +270,22 @@ const _mobileMediaBridgeScript = r'''
   };
   const arm = (video) => {
     selectedVideo = video;
+    selectionSerial += 1;
+    const serial = selectionSerial;
     // Keep the intent while a short pre-roll finishes and the page swaps in its content source.
     selectionExpiresAt = Date.now() + 120000;
+    // Some sites create the video source only after their click handler returns.
+    // Retry against the selected element and any replacement element so the
+    // first tap does not merely start playback inside the web view.
+    [40, 120, 250, 500, 900, 1500, 2500, 4000].forEach((delay) => {
+      setTimeout(() => {
+        if (serial !== selectionSerial || Date.now() >= selectionExpiresAt) return;
+        const candidate = selectedVideo?.isConnected ? selectedVideo : primaryVideo();
+        if (!candidate) return;
+        attach(candidate);
+        reportVideo(candidate);
+      }, delay);
+    });
   };
   const hasIntentFor = (video) => selectedVideo === video && Date.now() < selectionExpiresAt;
   const emitMedia = (source) => {
