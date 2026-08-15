@@ -17,7 +17,7 @@ import webview_flutter_wkwebview
 
     let channel = FlutterMethodChannel(
       name: "ai_video_player/ios_webview",
-      binaryMessenger: engineBridge.applicationRegistrar.binaryMessenger
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
     channel.setMethodCallHandler { call, result in
       guard call.method == "installUserScript",
