@@ -292,6 +292,28 @@ const _mobileMediaBridgeScript = r'''
         reportVideo(candidate);
       }, delay);
     });
+    // A few players emit `play` before assigning currentSrc, then never emit
+    // another media event after the source becomes ready. Observe only this
+    // user-selected video briefly so the first tap still hands off.
+    let checks = 0;
+    const observeSelectedPlayback = () => {
+      if (serial !== selectionSerial || Date.now() >= selectionExpiresAt || checks >= 80) return;
+      checks += 1;
+      let candidate = selectedVideo?.isConnected ? selectedVideo : null;
+      const selectedSource = candidate ? sourceOf(candidate) : '';
+      if (!candidate || !isVisible(candidate) || isLikelyAdvertisement(candidate) ||
+          isLikelyAdvertisementSource(selectedSource)) {
+        candidate = primaryVideo();
+      }
+      if (candidate) {
+        if (candidate !== selectedVideo && isVisible(candidate) && !isLikelyAdvertisement(candidate)) {
+          selectedVideo = candidate;
+        }
+        if (hasIntentFor(candidate) && !candidate.paused) reportVideo(candidate);
+      }
+      setTimeout(observeSelectedPlayback, 100);
+    };
+    setTimeout(observeSelectedPlayback, 50);
   };
   const hasIntentFor = (video) => selectedVideo === video && Date.now() < selectionExpiresAt;
   const emitMedia = (source) => {
