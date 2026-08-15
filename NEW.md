@@ -248,7 +248,7 @@ abstract interface class TranslationService {
 - **不支持媒体策略：** `blob:`/浏览器媒体流及未提供真实媒体地址的页面显示中文“不支持由内置播放器接管”原因；不提取或绕过 DRM，不使用 Safari、`UIApplication.open` 或 WebView 全屏播放器作为支持资源的播放路径。请求头只在内存交接对象中短暂保存，未写入日志或持久化。
 - **iOS 实现已纳入工程：** `WKWebView` 启用内联媒体播放，创建时允许媒体播放，并在页面中注入 `playsinline`/`webkit-playsinline`；导航代理与 JavaScript message channel 都会拦截可获取真实 URL 的媒体。Android 复用相同的 Dart 服务契约和拦截脚本。
 - **自动化检查已通过：** `flutter analyze` 无问题；`flutter test --concurrency=1` 通过 11 个测试（新增 MP4、HLS、`blob:` 和普通网页分类回归）；`flutter build windows --release` 成功生成 `app/build/windows/x64/runner/Release/ai_video_player_next.exe`。
-- **待人工和真机验收：** Windows 需手动检查浏览器导航、普通 MP4/HLS 交接、播放器返回浏览器以及 `blob:` 提示。第二个 Development/Ad Hoc IPA 仍必须在 macOS/Xcode 上生成，并在真实 iPhone 上验证普通 MP4、页面 `<video>`、重定向、返回浏览器、不支持提示，以及受支持资源绝不进入 iOS 系统网页播放器；此 IPA 门槛未通过前，Phase 3 不视为完成。
+- **验收门槛已通过（2026-08-16）：** Windows 已完成人工检查浏览器导航、普通 MP4/HLS 交接、播放器与浏览器工作区切换、播放器返回浏览器及不支持资源提示；iOS 已通过未签名 IPA 自签后的真机验证，覆盖普通网页视频播放/全屏交接、返回浏览器、不支持资源提示，以及受支持资源不进入 iOS 系统网页播放器。第二个 IPA 门槛已完成，Phase 3 不再处于待验收状态。
 - **iOS 白屏修正（2026-08-15）：** 补充 `media_kit_libs_ios_video`，并为 iOS 工程加入 CocoaPods 集成，使 `Mpv.framework/Mpv` 会随未签名 IPA 一起嵌入。未签名 IPA Action 会预缓存 iOS Flutter engine、执行 `pod install`，并在打包前硬性检查播放器 framework；缺少 framework 时构建直接失败，不再生成可下载但启动白屏的包。应用启动也增加中文诊断页，原生播放器初始化异常会显示错误信息而不是只有白屏。
 - **Windows 验收修正（2026-08-15）：** 浏览器服务改为随浏览器页面创建和自动释放，避免退出后再次进入复用已释放的 WebView2 控制器。页面脚本在文档创建和完成加载后均会注入，并仅在发现 HTTP(S) 真实媒体地址时阻止网页播放并交接；来自已确认 `<video>` 元素、但 URL 没有文件扩展名的 HTTP(S) 媒体也可交接。`blob:`/MSE 页面不再被阻断，会继续在内置浏览器中按网站原逻辑播放，同时显示无法由内置播放器接管的中文原因。Bilibili 等以 MSE/`blob:` 或 DRM 为主的视频站点不能合法交接到内置播放器，此限制符合项目不绕过 DRM 的原则。
 - **工作台交互修正（2026-08-15）：** 浏览器首次打开后作为根工作台中的持久工作区保留，并通过 `IndexedStack` 在播放器与浏览器之间切换；浏览器媒体交接后直接打开并播放主播放器，然后选中“播放器”工作区。已移除浏览器专用播放页、左上角返回按钮及其异步销毁路径，从而避免返回时同时销毁页面、WebView 与播放控制器导致的崩溃。交接播放复用主播放器完整控件，包括进度、前进/后退 10 秒、暂停/继续、倍速与音量调节；选择“内置浏览器”即可恢复原网页会话。
@@ -262,6 +262,7 @@ abstract interface class TranslationService {
 - **Windows 日志导出修正（2026-08-15）：** 诊断日志工具栏在 Windows 提供独立的“复制诊断日志”和“导出 TXT 日志”操作，前者写入系统剪贴板，后者通过系统保存对话框写入 UTF-8 `.txt` 文件；移动端继续使用系统分享。日志内容沿用 URL、授权信息和本地路径脱敏规则。
 - **本轮范围收敛（2026-08-16）：** 回退仅针对 MDN 动态/沙盒 iframe 的实验性媒体桥接改动，保留普通网站的媒体交接、浏览器工作区切换、iOS 防止进入系统网页播放器以及 Windows 日志复制/TXT 导出。MDN `<video>` 示例不再作为 Windows 或 iOS 的必测目标；后续以用户常用网站和项目实际需要访问的网站为准。诊断日志工具栏的 Windows 按钮修复为可见的复制和下载图标。
 - **诊断工具栏标识修正（2026-08-16）：** Windows 日志页的复制和 TXT 导出按钮改用 Flutter `CustomPainter` 绘制，避免 Material 图标字体子集缺少字形时只显示圆形按钮背景。日志页标题和导出 TXT 头部显示应用版本、构建时间和构建编号；Windows 与 iOS Release 构建通过 `APP_VERSION`、`APP_BUILD_TIME`、`APP_BUILD_ID` 注入这些值，便于区分验收包。未签名 iOS IPA 的 Action 会把构建时间和 GitHub Actions 运行号写入构建编号。
+- **Phase 3 完成验收（2026-08-16）：** Windows 与 iOS 全端人工验收通过。用户常用及项目实际需要访问的网站可以在内置浏览器中点击播放或全屏后进入应用“播放器”工作区，不跳转 Safari、Edge 或 iOS 系统网页播放器；播放器与浏览器通过左侧工作区切换，网页会话可以保留，播放器具备暂停、进度、倍速、音量和应用内全屏控制。Windows 日志可以复制或直接导出 TXT，iOS 诊断日志可以正常导出；日志页与导出内容包含应用版本、构建时间和构建编号，便于确认验收包。MDN `<video>` 示例页因其动态/沙盒 iframe 特征不作为硬性目标，`blob:`、MSE、DRM 及无法取得真实媒体地址的资源仍按中文不支持提示处理，不绕过网页保护。当前 UI 风格差异不影响本阶段功能验收，统一视觉系统留到 Phase 10。
 
 ### Phase 4：网络媒体、HLS 与浏览器会话交接
 
