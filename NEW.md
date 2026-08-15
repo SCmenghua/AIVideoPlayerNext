@@ -240,6 +240,16 @@ abstract interface class TranslationService {
 
 验收：真机 IPA 中受支持网页视频点击始终进入内置播放器；浏览器不会将这些媒体交给 Safari 或 iOS 系统网页播放器；浏览器会话可正确恢复。
 
+#### Phase 3 当前执行记录
+
+- **Windows 工程实现已完成（2026-08-15）：** 已建立平台无关的 `BrowserService`、浏览器页面状态和事件模型；Dart 业务层仅消费浏览器状态、媒体交接事件与不支持原因，不直接依赖 WebView2、WKWebView 或 Android WebView。
+- **Windows 浏览器已接入：** 使用 Edge WebView2 提供单标签浏览器、中文地址栏、前进、后退、刷新、停止加载、加载进度和错误提示；WebView2 Runtime 缺失时显示中文原因。为兼容 Visual Studio 2026 的 MSVC 协程弃用诊断，Windows CMake 已为现有 WebView2 插件加入官方兼容宏。
+- **媒体交接实现：** 普通 HTTP/HTTPS MP4、M4V、MOV、WebM、MKV 和 HLS `.m3u8` 由统一分类器交给应用播放器；页面 `<video>` 点击通过浏览器 JavaScript bridge 阻止网页默认播放并交接到应用内播放页。关闭播放页会返回保留的原浏览器路由和单标签会话。
+- **不支持媒体策略：** `blob:`/浏览器媒体流及未提供真实媒体地址的页面显示中文“不支持由内置播放器接管”原因；不提取或绕过 DRM，不使用 Safari、`UIApplication.open` 或 WebView 全屏播放器作为支持资源的播放路径。请求头只在内存交接对象中短暂保存，未写入日志或持久化。
+- **iOS 实现已纳入工程：** `WKWebView` 启用内联媒体播放，创建时允许媒体播放，并在页面中注入 `playsinline`/`webkit-playsinline`；导航代理与 JavaScript message channel 都会拦截可获取真实 URL 的媒体。Android 复用相同的 Dart 服务契约和拦截脚本。
+- **自动化检查已通过：** `flutter analyze` 无问题；`flutter test --concurrency=1` 通过 11 个测试（新增 MP4、HLS、`blob:` 和普通网页分类回归）；`flutter build windows --release` 成功生成 `app/build/windows/x64/runner/Release/ai_video_player_next.exe`。
+- **待人工和真机验收：** Windows 需手动检查浏览器导航、普通 MP4/HLS 交接、播放器返回浏览器以及 `blob:` 提示。第二个 Development/Ad Hoc IPA 仍必须在 macOS/Xcode 上生成，并在真实 iPhone 上验证普通 MP4、页面 `<video>`、重定向、返回浏览器、不支持提示，以及受支持资源绝不进入 iOS 系统网页播放器；此 IPA 门槛未通过前，Phase 3 不视为完成。
+
 ### Phase 4：网络媒体、HLS 与浏览器会话交接
 
 目标：让内置播放器可靠承接网络媒体和浏览器已有的临时会话，不泄露认证数据。

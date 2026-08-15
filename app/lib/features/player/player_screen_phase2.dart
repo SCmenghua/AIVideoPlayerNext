@@ -7,6 +7,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../app/providers.dart';
 import '../../domain/player/player_service.dart';
 import '../../domain/subtitles/subtitle_timeline.dart';
+import '../browser/browser_screen.dart';
 import 'media_kit_player_service.dart';
 
 class PlayerScreen extends ConsumerStatefulWidget {
@@ -41,6 +42,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _seekBy(Duration offset) =>
       ref.read(playerServiceProvider).seek(_snapshot.position + offset);
 
+  Future<void> _openBrowser() => Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const BrowserScreen()),
+      );
+
   @override
   void dispose() {
     _playbackSubscription?.cancel();
@@ -58,6 +63,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             onPressed: _openLocalMedia,
             tooltip: '打开本地视频',
             icon: const Icon(Icons.folder_open_outlined),
+          ),
+          IconButton(
+            onPressed: _openBrowser,
+            tooltip: '打开内置浏览器',
+            icon: const Icon(Icons.language_outlined),
           ),
           const SizedBox(width: 12),
         ],
@@ -87,7 +97,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _sourceRow(Icons.movie_outlined, '本地文件', '可用'),
-            _sourceRow(Icons.language_outlined, '内置浏览器', '第 3 阶段'),
+            Material(
+              color: Colors.transparent,
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.language_outlined,
+                    size: 20, color: Color(0xFF5ED6A0)),
+                title: const Text('内置浏览器'),
+                subtitle: const Text('可用',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF5ED6A0))),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: _openBrowser,
+              ),
+            ),
             _sourceRow(Icons.cloud_outlined, '网络媒体', '第 4 阶段'),
             _sourceRow(Icons.folder_shared_outlined, 'WebDAV', '第 12 阶段'),
           ],
