@@ -192,10 +192,13 @@ const _mobileMediaBridgeScript = r'''
   }
 
   const post = (payload) => window.AIVideoPlayerMedia?.postMessage(JSON.stringify(payload));
-  const emitted = new Set();
   const originalPlay = HTMLMediaElement.prototype.play;
   const originalRequestFullscreen = Element.prototype.requestFullscreen;
   const originalVideoFullscreen = HTMLVideoElement.prototype.webkitEnterFullscreen;
+  let selectedVideo = null;
+  let selectionExpiresAt = 0;
+  let lastHandoff = '';
+  let lastHandoffAt = 0;
   const absolute = (source) => {
     try {
       return new URL(source, document.baseURI).href;
@@ -212,11 +215,45 @@ const _mobileMediaBridgeScript = r'''
   );
   const isHttpMedia = (source) => /^https?:/i.test(source || '');
   const isBrowserOnlySource = (source) => /^(blob:|mediasource:|data:)/i.test(source || '');
-  const visibleVideo = () => Array.from(document.querySelectorAll('video')).find((video) => {
+  const isLikelyAdvertisementSource = (source) => {
+    try {
+      const url = new URL(source);
+      const marker = `${url.hostname}${url.pathname}${url.search}`.toLowerCase();
+      return /(^|[./?&=_-])(ads?|adserver|advert(?:isement)?|preroll|midroll|postroll|commercial|doubleclick|vast|vmap)([./?&=_-]|$)/.test(marker);
+    } catch (_) {
+      return false;
+    }
+  };
+  const isVisible = (video) => {
     const rect = video.getBoundingClientRect();
     const style = window.getComputedStyle(video);
-    return rect.width > 1 && rect.height > 1 && style.display !== 'none' && style.visibility !== 'hidden';
-  }) || document.querySelector('video');
+    return rect.width > 8 && rect.height > 8 && style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  const isLikelyAdvertisement = (video) => {
+    let node = video;
+    for (let depth = 0; node instanceof Element && depth < 5; depth += 1, node = node.parentElement) {
+      const marker = [node.id, node.className, node.getAttribute('aria-label')]
+        .filter((value) => typeof value === 'string')
+        .join(' ')
+        .toLowerCase();
+      if (/(advert|advertisement|preroll|midroll|postroll|commercial|promo|(^|[-_\s])ads?([-_\s]|$))/.test(marker)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const primaryVideo = () => Array.from(document.querySelectorAll('video'))
+    .filter(isVisible)
+    .filter((video) => !isLikelyAdvertisement(video))
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      return (rightRect.width * rightRect.height) - (leftRect.width * leftRect.height);
+    })[0] || null;
+  const videoFromEvent = (event) => {
+    const path = event.composedPath ? event.composedPath() : [];
+    return path.find((node) => node instanceof HTMLVideoElement) || primaryVideo();
+  };
   const isPlaybackGesture = (event, video) => {
     const target = event.target instanceof Element ? event.target : null;
     const label = [
@@ -230,6 +267,33 @@ const _mobileMediaBridgeScript = r'''
     return event.clientX >= rect.left && event.clientX <= rect.right &&
       event.clientY >= rect.top && event.clientY <= rect.bottom;
   };
+  const arm = (video) => {
+    selectedVideo = video;
+    // Keep the intent while a short pre-roll finishes and the page swaps in its content source.
+    selectionExpiresAt = Date.now() + 120000;
+  };
+  const hasIntentFor = (video) => selectedVideo === video && Date.now() < selectionExpiresAt;
+  const emitMedia = (source) => {
+    if (source === lastHandoff && Date.now() - lastHandoffAt < 1500) return;
+    lastHandoff = source;
+    lastHandoffAt = Date.now();
+    post({kind: 'media', url: source, title: document.title, videoElement: true});
+  };
+  const emitUnsupported = () => post({kind: 'unsupported'});
+  const reportVideo = (video) => {
+    if (!hasIntentFor(video) || isLikelyAdvertisement(video)) return false;
+    const source = sourceOf(video);
+    // A page can reuse one video element for a pre-roll and its main content.
+    // Leave identifiable ad sources in the inline web view and wait for the next source.
+    if (isLikelyAdvertisementSource(source)) return false;
+    if (isHttpMedia(source)) {
+      video.pause();
+      emitMedia(source);
+      return true;
+    }
+    if (isBrowserOnlySource(source)) emitUnsupported();
+    return false;
+  };
 
   const attach = (video) => {
     video.setAttribute('playsinline', '');
@@ -237,105 +301,41 @@ const _mobileMediaBridgeScript = r'''
     video.playsInline = true;
     if (video.dataset.aiVideoPlayerBound) return;
     video.dataset.aiVideoPlayerBound = '1';
-
-    const report = () => {
-      const source = sourceOf(video);
-      if (isHttpMedia(source)) {
-        video.pause();
-        if (!emitted.has(source)) {
-          emitted.add(source);
-          post({kind: 'media', url: source, title: document.title, videoElement: true});
-        }
-        return true;
-      }
-      if (isBrowserOnlySource(source) && !emitted.has(source)) {
-        emitted.add(source);
-        post({kind: 'unsupported'});
-      }
-      return false;
-    };
-    const interceptKnownSource = (event) => {
-      if (!report()) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-    const discoverAfterPageStartsPlayback = () => {
-      [0, 80, 260, 800].forEach((delay) => setTimeout(report, delay));
-    };
-    video.addEventListener('pointerdown', interceptKnownSource, true);
-    video.addEventListener('touchstart', interceptKnownSource, true);
-    video.addEventListener('click', interceptKnownSource, true);
     video.addEventListener('play', () => {
-      report();
+      // Autoplaying advertisements have no user-selected video and are ignored.
+      reportVideo(video);
     }, true);
-    ['loadstart', 'loadedmetadata', 'canplay', 'playing'].forEach((eventName) => {
-      video.addEventListener(eventName, report, true);
-    });
-    video.addEventListener('pointerdown', discoverAfterPageStartsPlayback, true);
-    video.addEventListener('touchstart', discoverAfterPageStartsPlayback, true);
-    video.addEventListener('click', discoverAfterPageStartsPlayback, true);
+    video.addEventListener('loadedmetadata', () => {
+      reportVideo(video);
+    }, true);
   };
   const bind = () => document.querySelectorAll('video').forEach(attach);
   const discoverFromControl = (event) => {
-    const path = event.composedPath ? event.composedPath() : [];
-    const video = path.find((node) => node && node.tagName === 'VIDEO') || visibleVideo();
+    const video = videoFromEvent(event);
     if (!video || !isPlaybackGesture(event, video)) return;
     attach(video);
-    if (reportVideo(video)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    [0, 80, 260, 800].forEach((delay) => setTimeout(() => reportVideo(video), delay));
-  };
-  const reportVideo = (video) => {
-    const source = sourceOf(video);
-    if (!isHttpMedia(source)) {
-      if (isBrowserOnlySource(source) && !emitted.has(source)) {
-        emitted.add(source);
-        post({kind: 'unsupported'});
-      }
-      return false;
-    }
-    video.pause();
-    if (!emitted.has(source)) {
-      emitted.add(source);
-      post({kind: 'media', url: source, title: document.title, videoElement: true});
-    }
-    return true;
-  };
-  const handoffOrBlockFullscreen = (video) => {
-    if (!video) return false;
-    const source = sourceOf(video);
-    if (isHttpMedia(source)) {
-      reportVideo(video);
-      return true;
-    }
-    if (isBrowserOnlySource(source)) {
-      if (!emitted.has(source)) {
-        emitted.add(source);
-        post({kind: 'unsupported'});
-      }
-      return true;
-    }
-    return false;
+    if (isLikelyAdvertisement(video)) return;
+    arm(video);
+    // Do not consume the tap here. Many sites create or select the main media
+    // source from their own click handler; play/fullscreen interception below
+    // performs the handoff only after that handler has run.
   };
   const patchedPlay = function() {
-    const video = this instanceof HTMLVideoElement ? this : visibleVideo();
-    if (video && handoffOrBlockFullscreen(video)) {
+    const video = this instanceof HTMLVideoElement ? this : null;
+    if (video && reportVideo(video)) {
       return Promise.resolve();
     }
     return originalPlay.apply(this, arguments);
   };
   const patchedRequestFullscreen = function() {
-    const video = this instanceof HTMLVideoElement ? this : visibleVideo();
-    if (video && handoffOrBlockFullscreen(video)) {
+    const video = this instanceof HTMLVideoElement ? this : selectedVideo;
+    if (video && reportVideo(video)) {
       return Promise.resolve();
     }
     return originalRequestFullscreen ? originalRequestFullscreen.apply(this, arguments) : Promise.resolve();
   };
   const patchedVideoFullscreen = function() {
-    if (handoffOrBlockFullscreen(this)) return Promise.resolve();
+    if (reportVideo(this)) return Promise.resolve();
     return originalVideoFullscreen ? originalVideoFullscreen.apply(this, arguments) : Promise.resolve();
   };
   try {
@@ -346,15 +346,14 @@ const _mobileMediaBridgeScript = r'''
     // Some protected pages expose read-only media prototypes.
   }
   document.addEventListener('fullscreenchange', () => {
-    const video = visibleVideo();
-    if (document.fullscreenElement && video) {
-      handoffOrBlockFullscreen(video);
+    const video = selectedVideo;
+    if (document.fullscreenElement && video && reportVideo(video)) {
       if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     }
   }, true);
   document.addEventListener('webkitbeginfullscreen', (event) => {
-    const video = event.target instanceof HTMLVideoElement ? event.target : visibleVideo();
-    if (handoffOrBlockFullscreen(video)) {
+    const video = event.target instanceof HTMLVideoElement ? event.target : selectedVideo;
+    if (video && reportVideo(video)) {
       event.preventDefault();
       if (video) video.pause();
     }
