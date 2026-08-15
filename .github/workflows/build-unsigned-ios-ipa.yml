@@ -1,0 +1,81 @@
+name: Build Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_identifier:
+        description: Bundle Identifier used by your provisioning profile
+        required: true
+        default: com.scmenghua.aivideoplayernext
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Validate bundle identifier
+        env:
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle_identifier }}
+        run: |
+          if [[ ! "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
+            echo "Bundle Identifier 格式无效: $BUNDLE_IDENTIFIER"
+            exit 1
+          fi
+
+      - name: Apply bundle identifier for this build
+        env:
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle_identifier }}
+        run: |
+          project_file="ios/Runner.xcodeproj/project.pbxproj"
+          default_identifier="com.example.aiVideoPlayerNext"
+
+          test "$(grep -F -c "$default_identifier" "$project_file")" -eq 3
+          sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER = $default_identifier;|PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_IDENTIFIER;|g" "$project_file"
+          test "$(grep -F -c "$BUNDLE_IDENTIFIER" "$project_file")" -eq 3
+
+      - name: Resolve Flutter packages
+        run: flutter pub get
+
+      - name: Build unsigned iOS application
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        env:
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle_identifier }}
+        run: |
+          app_path="build/ios/iphoneos/Runner.app"
+          artifact_name="AI-Video-Player-Next-${BUNDLE_IDENTIFIER}-unsigned.ipa"
+          package_root="build/unsigned-ipa"
+
+          test -d "$app_path"
+          rm -rf "$package_root"
+          mkdir -p "$package_root/Payload"
+          cp -R "$app_path" "$package_root/Payload/"
+          ditto -c -k --sequesterRsrc --keepParent "$package_root/Payload" "build/$artifact_name"
+          test -f "build/$artifact_name"
+
+          echo "IPA_PATH=app/build/$artifact_name" >> "$GITHUB_ENV"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ios-ipa-${{ inputs.bundle_identifier }}
+          path: ${{ env.IPA_PATH }}
+          if-no-files-found: error
+          retention-days: 14
