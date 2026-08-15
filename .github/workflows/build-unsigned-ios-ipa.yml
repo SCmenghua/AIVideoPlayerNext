@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       bundle_identifier:
-        description: Bundle Identifier used by your provisioning profile
-        required: true
+        description: Bundle Identifier embedded in the unsigned IPA (leave the default unless your sideloading tool requires another value)
+        required: false
         default: com.scmenghua.aivideoplayernext
         type: string
 
