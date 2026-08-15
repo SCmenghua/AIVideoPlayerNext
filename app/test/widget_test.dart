@@ -37,7 +37,21 @@ void main() {
     await tester.pump();
 
     expect(find.text('尚未选择媒体'), findsOneWidget);
-    await tester.tap(find.byTooltip('打开本地视频').first);
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byTooltip('打开本地视频'),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byTooltip('打开内置浏览器'),
+      ),
+      findsNothing,
+    );
+    await tester.tap(find.text('打开本地视频').first);
     await tester.pump();
     await tester.pump();
 

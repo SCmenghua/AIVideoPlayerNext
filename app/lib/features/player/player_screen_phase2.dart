@@ -88,19 +88,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('AI 视频播放器'),
-        actions: [
-          IconButton(
-            onPressed: _openLocalMedia,
-            tooltip: '打开本地视频',
-            icon: const Icon(Icons.folder_open_outlined),
-          ),
-          IconButton(
-            onPressed: () => _showView(_WorkbenchView.browser),
-            tooltip: '打开内置浏览器',
-            icon: const Icon(Icons.language_outlined),
-          ),
-          const SizedBox(width: 12),
-        ],
       ),
       body: isWide ? _desktopLayout() : _mobileLayout(),
     );
@@ -111,21 +98,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         children: [
           SizedBox(width: 240, child: _sourcePanel()),
           Expanded(child: _workspace()),
-          SizedBox(width: 300, child: _subtitlePanel()),
         ],
       );
 
   Widget _mobileLayout() => Column(
         children: [
           _mobileNavigation(),
-          Expanded(child: _workspace(includeSubtitles: true)),
+          Expanded(child: _workspace()),
         ],
       );
 
-  Widget _workspace({bool includeSubtitles = false}) {
-    final playerWorkspace = includeSubtitles
-        ? ListView(children: [_playerPanel(), _subtitlePanel()])
-        : _playerPanel();
+  Widget _workspace() {
+    final playerWorkspace = SingleChildScrollView(
+      child: _playerPanel(),
+    );
     if (!_browserHasBeenOpened) return playerWorkspace;
     return IndexedStack(
       index: _activeView.index,
@@ -313,13 +299,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                     .seek(Duration(milliseconds: value.round()))
                 : null,
           ),
-          Row(
+          _playerControls(canControl: canControl, hasMedia: hasMedia),
+          _subtitlePanel(),
+        ],
+      ),
+    );
+  }
+
+  Widget _playerControls({required bool canControl, required bool hasMedia}) =>
+      LayoutBuilder(
+        builder: (context, constraints) {
+          final controls = Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                '${_format(_snapshot.position)} / ${_format(_snapshot.duration)}',
-                style: const TextStyle(color: Color(0xFF9EA7AC)),
-              ),
-              const Spacer(),
               IconButton(
                 onPressed: canControl
                     ? () => _seekBy(const Duration(seconds: -10))
@@ -365,31 +357,59 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 ),
               ),
             ],
-          ),
-          Row(
+          );
+          final time = Text(
+            '${_format(_snapshot.position)} / ${_format(_snapshot.duration)}',
+            style: const TextStyle(color: Color(0xFF9EA7AC)),
+          );
+          final volume = _volumeControl(hasMedia: hasMedia);
+
+          if (constraints.maxWidth >= 700) {
+            return Row(
+              children: [
+                time,
+                const SizedBox(width: 24),
+                SizedBox(width: 180, child: volume),
+                const Spacer(),
+                controls,
+              ],
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Icon(
-                _snapshot.volume == 0
-                    ? Icons.volume_off_outlined
-                    : Icons.volume_up_outlined,
-                size: 20,
-                color: const Color(0xFF9EA7AC),
+              Row(
+                children: [
+                  time,
+                  const Spacer(),
+                  controls,
+                ],
               ),
-              Expanded(
-                child: Slider(
-                  value: _snapshot.volume,
-                  max: 100,
-                  onChanged: hasMedia
-                      ? ref.read(playerServiceProvider).setVolume
-                      : null,
-                ),
-              ),
+              volume,
             ],
+          );
+        },
+      );
+
+  Widget _volumeControl({required bool hasMedia}) => Row(
+        children: [
+          Icon(
+            _snapshot.volume == 0
+                ? Icons.volume_off_outlined
+                : Icons.volume_up_outlined,
+            size: 20,
+            color: const Color(0xFF9EA7AC),
+          ),
+          Expanded(
+            child: Slider(
+              value: _snapshot.volume,
+              max: 100,
+              onChanged:
+                  hasMedia ? ref.read(playerServiceProvider).setVolume : null,
+            ),
           ),
         ],
-      ),
-    );
-  }
+      );
 
   Widget _emptyVideoSurface() => Center(
         child: FilledButton.icon(
