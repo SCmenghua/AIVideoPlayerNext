@@ -10,6 +10,8 @@ import '../../domain/browser/browser_models.dart';
 import 'browser_service_base.dart';
 
 class MobileBrowserService extends BrowserServiceBase {
+  MobileBrowserService({super.logs});
+
   late final WebViewController controller;
   bool _initialized = false;
 
@@ -51,6 +53,7 @@ class MobileBrowserService extends BrowserServiceBase {
         },
         onPageStarted: (url) {
           final page = Uri.tryParse(url);
+          logs?.info('内置浏览器', '网页开始加载', {'网址': url});
           if (page != null) {
             updateState(
               url: page,
@@ -63,6 +66,10 @@ class MobileBrowserService extends BrowserServiceBase {
         },
         onPageFinished: (url) async {
           final page = Uri.tryParse(url);
+          logs?.info('内置浏览器', '网页加载完成', {
+            '网址': url,
+            '标题': await controller.getTitle(),
+          });
           if (page != null) {
             updateState(
                 url: page, status: BrowserLoadStatus.loaded, progress: 100);
@@ -75,6 +82,12 @@ class MobileBrowserService extends BrowserServiceBase {
           progress: progress,
         ),
         onWebResourceError: (error) {
+          logs?.error('内置浏览器', '网页资源加载错误', {
+            '错误代码': error.errorCode,
+            '描述': error.description,
+            '网址': error.url,
+            '主框架': error.isForMainFrame,
+          });
           if (error.isForMainFrame ?? false) {
             updateState(
               status: BrowserLoadStatus.error,
@@ -88,15 +101,32 @@ class MobileBrowserService extends BrowserServiceBase {
         onMessageReceived: _handleJavaScriptMessage,
       );
     _initialized = true;
+    logs?.info('内置浏览器', '移动端浏览器已初始化', {
+      '平台': defaultTargetPlatform.name,
+    });
     updateState(status: BrowserLoadStatus.idle);
     await _installEarlyMediaBridge();
   }
 
   void _handleJavaScriptMessage(JavaScriptMessage message) {
-    final page = currentState.url;
-    if (page == null) return;
     try {
       final payload = jsonDecode(message.message) as Map<String, dynamic>;
+      final page = currentState.url ??
+          Uri.tryParse(payload['page']?.toString() ?? '');
+      if (payload['kind'] == 'trace') {
+        logs?.info('网页媒体桥接', payload['action']?.toString() ?? '网页事件', {
+          '序号': payload['sequence'],
+          '网页地址': payload['page'] ?? page,
+          '网页标题': payload['title'],
+          '元素': payload['element'],
+          '视频序号': payload['videoIndex'],
+          '视频地址': payload['url'] ?? payload['source'],
+          '视频状态': payload['state'],
+          '附加信息': payload['detail'],
+        });
+        return;
+      }
+      if (page == null) return;
       if (payload['kind'] == 'media') {
         final candidate = Uri.tryParse(payload['url']?.toString() ?? '');
         if (candidate != null) {
@@ -112,6 +142,8 @@ class MobileBrowserService extends BrowserServiceBase {
       }
     } on FormatException {
       // Ignore third-party page messages that are not our JSON payload.
+    } catch (error) {
+      logs?.error('网页媒体桥接', '处理网页消息失败', {'错误': error});
     }
   }
 
@@ -135,7 +167,9 @@ class MobileBrowserService extends BrowserServiceBase {
           'source': _mobileMediaBridgeScript,
         },
       );
+      logs?.info('网页媒体桥接', 'iOS 文档开始阶段注入成功');
     } catch (_) {
+      logs?.warning('网页媒体桥接', 'iOS 提前注入失败，使用页面回调注入');
       // The normal page callbacks remain as a fallback on unsupported hosts.
     }
   }
@@ -151,6 +185,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> load(Uri url) async {
     await initialize();
+    logs?.info('内置浏览器', '请求打开网址', {'网址': url});
     if (handleCandidate(candidate: url, originPage: currentState.url ?? url)) {
       return;
     }
@@ -160,6 +195,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> goBack() async {
     if (_initialized && await controller.canGoBack()) {
+      logs?.info('内置浏览器', '用户点击后退');
       await controller.goBack();
       await _updateHistory();
     }
@@ -168,6 +204,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> goForward() async {
     if (_initialized && await controller.canGoForward()) {
+      logs?.info('内置浏览器', '用户点击前进');
       await controller.goForward();
       await _updateHistory();
     }
@@ -175,12 +212,18 @@ class MobileBrowserService extends BrowserServiceBase {
 
   @override
   Future<void> reload() async {
-    if (_initialized) await controller.reload();
+    if (_initialized) {
+      logs?.info('内置浏览器', '用户点击刷新');
+      await controller.reload();
+    }
   }
 
   @override
   Future<void> stop() async {
-    if (_initialized) await controller.runJavaScript('window.stop();');
+    if (_initialized) {
+      logs?.info('内置浏览器', '用户停止加载');
+      await controller.runJavaScript('window.stop();');
+    }
   }
 }
 
@@ -192,6 +235,52 @@ const _mobileMediaBridgeScript = r'''
   }
 
   const post = (payload) => window.AIVideoPlayerMedia?.postMessage(JSON.stringify(payload));
+  let traceSequence = 0;
+  const lastTraces = new Map();
+  const shortText = (value, limit = 120) => {
+    const text = (value || '').toString().replace(/\s+/g, ' ').trim();
+    return text.length > limit ? `${text.slice(0, limit)}...` : text;
+  };
+  const elementInfo = (element) => {
+    if (!(element instanceof Element)) return {};
+    return {
+      tag: element.tagName,
+      id: shortText(element.id, 80),
+      class: shortText(typeof element.className === 'string' ? element.className : '', 120),
+      ariaLabel: shortText(element.getAttribute('aria-label'), 120),
+      title: shortText(element.getAttribute('title'), 120),
+      text: shortText(element.textContent, 120),
+    };
+  };
+  const trace = (action, detail = {}, video = null, element = null, dedupe = '') => {
+    const state = video ? {
+      currentSrc: video.currentSrc || '',
+      src: video.getAttribute('src') || '',
+      paused: video.paused,
+      readyState: video.readyState,
+      networkState: video.networkState,
+      width: Math.round(video.getBoundingClientRect().width),
+      height: Math.round(video.getBoundingClientRect().height),
+      visible: isVisible(video),
+      advertisement: isLikelyAdvertisement(video),
+    } : {};
+    const signature = dedupe || JSON.stringify([action, detail, state.currentSrc, state.paused, state.readyState]);
+    if (lastTraces.get(action) === signature) return;
+    lastTraces.set(action, signature);
+    post({
+      kind: 'trace',
+      action,
+      sequence: ++traceSequence,
+      timestamp: new Date().toISOString(),
+      page: location.href,
+      title: document.title,
+      element: elementInfo(element),
+      videoIndex: video ? Array.from(document.querySelectorAll('video')).indexOf(video) : -1,
+      url: video ? sourceOf(video) : '',
+      state,
+      detail,
+    });
+  };
   const originalPlay = HTMLMediaElement.prototype.play;
   const originalRequestFullscreen = Element.prototype.requestFullscreen;
   const originalVideoFullscreen = HTMLVideoElement.prototype.webkitEnterFullscreen;
@@ -272,6 +361,7 @@ const _mobileMediaBridgeScript = r'''
     selectionSerial += 1;
     lastHandoff = '';
     const serial = selectionSerial;
+    trace('建立播放意图', {serial}, video);
     // Keep the intent while a short pre-roll finishes and the page swaps in its content source.
     selectionExpiresAt = Date.now() + 120000;
     // Some sites create the video source only after their click handler returns.
@@ -288,6 +378,7 @@ const _mobileMediaBridgeScript = r'''
           if (candidate) selectedVideo = candidate;
         }
         if (!candidate) return;
+        trace('重试检查选中视频', {serial, delay}, candidate);
         attach(candidate);
         reportVideo(candidate);
       }, delay);
@@ -309,7 +400,10 @@ const _mobileMediaBridgeScript = r'''
         if (candidate !== selectedVideo && isVisible(candidate) && !isLikelyAdvertisement(candidate)) {
           selectedVideo = candidate;
         }
-        if (hasIntentFor(candidate) && !candidate.paused) reportVideo(candidate);
+        if (hasIntentFor(candidate) && !candidate.paused) {
+          trace('观察到选中视频正在播放', {serial, check: checks}, candidate);
+          reportVideo(candidate);
+        }
       }
       setTimeout(observeSelectedPlayback, 100);
     };
@@ -319,21 +413,41 @@ const _mobileMediaBridgeScript = r'''
   const emitMedia = (source) => {
     if (source === lastHandoff) return;
     lastHandoff = source;
+    trace('发送媒体交接', {source}, selectedVideo, null, `handoff:${source}`);
     post({kind: 'media', url: source, title: document.title, videoElement: true});
   };
-  const emitUnsupported = () => post({kind: 'unsupported'});
+  const emitUnsupported = () => {
+    trace('发送不支持媒体提示', {}, selectedVideo);
+    post({kind: 'unsupported'});
+  };
   const reportVideo = (video) => {
-    if (!hasIntentFor(video) || isLikelyAdvertisement(video)) return false;
+    if (!hasIntentFor(video) || isLikelyAdvertisement(video)) {
+      trace('忽略媒体候选', {
+        hasIntent: hasIntentFor(video),
+        reason: isLikelyAdvertisement(video) ? '疑似广告' : '没有用户播放意图',
+      }, video);
+      return false;
+    }
     const source = sourceOf(video);
+    trace('检查媒体候选', {
+      sourceType: isBrowserOnlySource(source) ? '浏览器内部流' : '外部地址',
+    }, video);
     // A page can reuse one video element for a pre-roll and its main content.
     // Leave identifiable ad sources in the inline web view and wait for the next source.
-    if (isLikelyAdvertisementSource(source)) return false;
+    if (isLikelyAdvertisementSource(source)) {
+      trace('忽略疑似广告媒体源', {}, video);
+      return false;
+    }
     if (isHttpMedia(source)) {
+      trace('发现可交接媒体源', {}, video);
       video.pause();
       emitMedia(source);
       return true;
     }
-    if (isBrowserOnlySource(source)) emitUnsupported();
+    if (isBrowserOnlySource(source)) {
+      trace('发现浏览器内部媒体流', {}, video);
+      emitUnsupported();
+    }
     return false;
   };
 
@@ -343,18 +457,35 @@ const _mobileMediaBridgeScript = r'''
     video.playsInline = true;
     if (video.dataset.aiVideoPlayerBound) return;
     video.dataset.aiVideoPlayerBound = '1';
+    trace('发现并绑定 video 元素', {}, video);
     video.addEventListener('play', () => {
       // Autoplaying advertisements have no user-selected video and are ignored.
+      trace('video 触发 play 事件', {}, video);
       reportVideo(video);
     }, true);
+    video.addEventListener('pause', () => trace('video 触发 pause 事件', {}, video));
+    video.addEventListener('playing', () => trace('video 触发 playing 事件', {}, video));
+    video.addEventListener('waiting', () => trace('video 触发 waiting 事件', {}, video));
+    video.addEventListener('canplay', () => trace('video 触发 canplay 事件', {}, video));
+    video.addEventListener('error', () => trace('video 触发 error 事件', {
+      mediaError: video.error?.code || '',
+    }, video));
     video.addEventListener('loadedmetadata', () => {
+      trace('video 触发 loadedmetadata 事件', {}, video);
       reportVideo(video);
     }, true);
+    video.addEventListener('emptied', () => trace('video 触发 emptied 事件', {}, video));
+    video.addEventListener('durationchange', () => trace('video 触发 durationchange 事件', {}, video));
   };
   const bind = () => document.querySelectorAll('video').forEach(attach);
   const discoverFromControl = (event) => {
     const video = videoFromEvent(event);
     if (!video || !isPlaybackGesture(event, video)) return;
+    trace(`用户触发网页 ${event.type} 操作`, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      button: event.button,
+    }, video, event.target);
     attach(video);
     if (isLikelyAdvertisement(video)) return;
     arm(video);
@@ -364,6 +495,7 @@ const _mobileMediaBridgeScript = r'''
   };
   const patchedPlay = function() {
     const video = this instanceof HTMLVideoElement ? this : null;
+    if (video) trace('网页调用 video.play()', {}, video);
     if (video && reportVideo(video)) {
       return Promise.resolve();
     }
@@ -371,15 +503,26 @@ const _mobileMediaBridgeScript = r'''
   };
   const patchedRequestFullscreen = function() {
     const video = this instanceof HTMLVideoElement ? this : selectedVideo;
+    trace('网页调用 requestFullscreen()', {}, video);
     if (video && reportVideo(video)) {
       return Promise.resolve();
     }
     return originalRequestFullscreen ? originalRequestFullscreen.apply(this, arguments) : Promise.resolve();
   };
   const patchedVideoFullscreen = function() {
+    trace('网页调用 webkitEnterFullscreen()', {}, this);
     if (reportVideo(this)) return Promise.resolve();
     return originalVideoFullscreen ? originalVideoFullscreen.apply(this, arguments) : Promise.resolve();
   };
+  ['pointerdown', 'touchstart', 'click'].forEach((eventName) => {
+    document.addEventListener(eventName, (event) => {
+      trace(`网页 ${eventName} 事件`, {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        button: event.button,
+      }, null, event.target);
+    }, true);
+  });
   try {
     HTMLMediaElement.prototype.play = patchedPlay;
     Element.prototype.requestFullscreen = patchedRequestFullscreen;
@@ -389,12 +532,16 @@ const _mobileMediaBridgeScript = r'''
   }
   document.addEventListener('fullscreenchange', () => {
     const video = selectedVideo;
+    trace('网页触发 fullscreenchange 事件', {
+      fullscreen: Boolean(document.fullscreenElement),
+    }, video);
     if (document.fullscreenElement && video && reportVideo(video)) {
       if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
     }
   }, true);
   document.addEventListener('webkitbeginfullscreen', (event) => {
     const video = event.target instanceof HTMLVideoElement ? event.target : selectedVideo;
+    trace('网页触发 webkitbeginfullscreen 事件', {}, video);
     if (video && reportVideo(video)) {
       event.preventDefault();
       if (video) video.pause();
@@ -407,6 +554,7 @@ const _mobileMediaBridgeScript = r'''
       return;
     }
     started = true;
+    trace('媒体桥接已启动');
     bind();
     new MutationObserver(bind).observe(document, {childList: true, subtree: true});
     ['pointerdown', 'touchstart', 'click'].forEach((eventName) => {

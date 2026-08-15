@@ -10,9 +10,10 @@ import '../../domain/player/browser_media_handoff.dart';
 import '../../domain/player/player_service.dart';
 import '../../domain/subtitles/subtitle_timeline.dart';
 import '../browser/browser_screen.dart';
+import '../diagnostics/diagnostics_screen.dart';
 import 'media_kit_player_service.dart';
 
-enum _WorkbenchView { player, browser }
+enum _WorkbenchView { player, browser, diagnostics }
 
 class PlayerScreen extends ConsumerStatefulWidget {
   const PlayerScreen({super.key});
@@ -33,6 +34,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    ref.read(diagnosticsLogProvider).info('工作台', '应用工作台已打开');
     _playbackSubscription =
         ref.read(playerServiceProvider).snapshots.listen((snapshot) {
       if (mounted) setState(() => _snapshot = snapshot);
@@ -40,14 +42,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _openLocalMedia() async {
+    final logs = ref.read(diagnosticsLogProvider);
+    logs.info('工作台', '用户点击打开本地视频');
     try {
       final source = await ref.read(mediaPickerProvider).pickLocalVideo();
-      if (source == null) return;
+      if (source == null) {
+        logs.info('工作台', '用户取消选择本地视频');
+        return;
+      }
+      logs.info('工作台', '已选择本地视频', {
+        '标题': source.title,
+        '地址': source.uri,
+      });
       _timeline.reset(
           sessionId: 'media-${DateTime.now().millisecondsSinceEpoch}');
       await ref.read(playerServiceProvider).open(source);
       if (mounted) setState(() => _activeView = _WorkbenchView.player);
-    } catch (_) {
+    } catch (error) {
+      logs.error('工作台', '打开本地视频失败', {'错误': error});
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('无法读取所选视频，请在“文件”中选择本机可用的视频文件。')),
@@ -63,6 +75,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         (view != _WorkbenchView.browser || _browserHasBeenOpened)) {
       return;
     }
+    ref.read(diagnosticsLogProvider).info('工作台', '用户切换工作区', {
+      '从': _viewLabel(_activeView),
+      '到': _viewLabel(view),
+    });
     setState(() {
       if (view == _WorkbenchView.browser) _browserHasBeenOpened = true;
       _activeView = view;
@@ -70,7 +86,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _openBrowserMedia(BrowserMediaHandoff handoff) async {
-    if (_isOpeningBrowserMedia) return;
+    final logs = ref.read(diagnosticsLogProvider);
+    if (_isOpeningBrowserMedia) {
+      logs.warning('工作台', '忽略重复的浏览器媒体交接');
+      return;
+    }
+    logs.info('工作台', '开始接收浏览器媒体', {
+      '标题': handoff.title,
+      '媒体地址': handoff.mediaUri,
+      '来源页面': handoff.originPage,
+    });
     _isOpeningBrowserMedia = true;
     try {
       final player = ref.read(playerServiceProvider);
@@ -80,6 +105,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       if (!mounted) return;
       setState(() => _activeView = _WorkbenchView.player);
       await player.play();
+      logs.info('工作台', '浏览器媒体已切换到播放器');
+    } catch (error) {
+      logs.error('工作台', '浏览器媒体交接失败', {'错误': error});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('视频已检测到，但内置播放器打开失败。请导出诊断日志。')),
+        );
+      }
     } finally {
       _isOpeningBrowserMedia = false;
     }
@@ -88,6 +121,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _openFullscreen() async {
     final player = ref.read(playerServiceProvider);
     if (_snapshot.source == null || player is! MediaKitPlayerService) return;
+    ref.read(diagnosticsLogProvider).info('播放器', '用户进入全屏');
     setState(() => _isFullscreenOpen = true);
     try {
       await Navigator.of(context).push(
@@ -96,7 +130,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
       );
     } finally {
-      if (mounted) setState(() => _isFullscreenOpen = false);
+      if (mounted) {
+        ref.read(diagnosticsLogProvider).info('播放器', '用户退出全屏');
+        setState(() => _isFullscreenOpen = false);
+      }
     }
   }
 
@@ -136,12 +173,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final playerWorkspace = SingleChildScrollView(
       child: _playerPanel(),
     );
-    if (!_browserHasBeenOpened) return playerWorkspace;
+    if (!_browserHasBeenOpened) {
+      return _activeView == _WorkbenchView.diagnostics
+          ? DiagnosticsWorkspace(logs: ref.read(diagnosticsLogProvider))
+          : playerWorkspace;
+    }
     return IndexedStack(
       index: _activeView.index,
       children: [
         playerWorkspace,
         BrowserWorkspace(onMediaDetected: _openBrowserMedia),
+        DiagnosticsWorkspace(logs: ref.read(diagnosticsLogProvider)),
       ],
     );
   }
@@ -163,6 +205,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               title: '内置浏览器',
               subtitle: '单标签会话',
               view: _WorkbenchView.browser,
+            ),
+            _viewRow(
+              icon: Icons.bug_report_outlined,
+              title: '诊断日志',
+              subtitle: '操作与媒体桥接记录',
+              view: _WorkbenchView.diagnostics,
             ),
             _sourceRow(Icons.movie_outlined, '本地文件', '打开', _openLocalMedia),
             _sourceRow(Icons.cloud_outlined, '网络媒体', '第 4 阶段'),
@@ -230,6 +278,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 Icons.language_outlined,
                 '内置浏览器',
                 _WorkbenchView.browser,
+              ),
+              _mobileViewButton(
+                Icons.bug_report_outlined,
+                '诊断日志',
+                _WorkbenchView.diagnostics,
               ),
               const Spacer(),
               IconButton(
@@ -487,6 +540,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   String _format(Duration duration) =>
       '${duration.inMinutes.toString().padLeft(2, '0')}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
+
+  String _viewLabel(_WorkbenchView view) => switch (view) {
+        _WorkbenchView.player => '播放器',
+        _WorkbenchView.browser => '内置浏览器',
+        _WorkbenchView.diagnostics => '诊断日志',
+      };
 }
 
 class _FullscreenPlayerScreen extends StatefulWidget {

@@ -50,8 +50,16 @@ class _BrowserWorkspaceState extends ConsumerState<BrowserWorkspace> {
   Future<void> _handleBrowserEvent(BrowserEvent event) async {
     if (!mounted) return;
     if (event case BrowserMediaDetected(:final handoff)) {
+      ref.read(diagnosticsLogProvider).info('内置浏览器', '收到媒体交接事件', {
+        '标题': handoff.title,
+        '媒体地址': handoff.mediaUri,
+        '来源页面': handoff.originPage,
+      });
       await widget.onMediaDetected(handoff);
     } else if (event case BrowserUnsupportedMedia(:final reason)) {
+      ref.read(diagnosticsLogProvider).warning('内置浏览器', '收到不支持媒体事件', {
+        '原因': reason,
+      });
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(reason)));
@@ -60,15 +68,22 @@ class _BrowserWorkspaceState extends ConsumerState<BrowserWorkspace> {
 
   Future<void> _submitAddress(String value) async {
     final text = value.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty) {
+      ref.read(diagnosticsLogProvider).warning('内置浏览器', '用户提交了空网址');
+      return;
+    }
     final normalized = text.contains('://') ? text : 'https://$text';
     final url = Uri.tryParse(normalized);
     if (url == null || !(url.isScheme('https') || url.isScheme('http'))) {
+      ref.read(diagnosticsLogProvider).warning('内置浏览器', '网址格式无效', {
+        '输入': text,
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('请输入有效的网址。')),
       );
       return;
     }
+    ref.read(diagnosticsLogProvider).info('内置浏览器', '用户提交网址', {'网址': url});
     await _browser.load(url);
   }
 
