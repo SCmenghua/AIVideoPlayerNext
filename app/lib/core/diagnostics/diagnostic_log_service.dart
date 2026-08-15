@@ -1,10 +1,13 @@
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:typed_data';
-import 'dart:ui';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
+
+import '../app_build_info.dart';
 
 enum DiagnosticLogLevel { info, warning, error }
 
@@ -86,6 +89,9 @@ class DiagnosticLogService extends ChangeNotifier {
   String formatForExport() {
     final buffer = StringBuffer()
       ..writeln('# AI 视频播放器诊断日志')
+      ..writeln('应用版本：${AppBuildInfo.version}')
+      ..writeln('构建时间：${AppBuildInfo.buildTime}')
+      ..writeln('构建编号：${AppBuildInfo.buildId}')
       ..writeln('导出时间：${_formatTime(DateTime.now())}')
       ..writeln('日志条数：${_entries.length}')
       ..writeln('隐私说明：URL 查询参数、Cookie、授权信息和本地完整路径已脱敏。')
@@ -100,16 +106,35 @@ class DiagnosticLogService extends ChangeNotifier {
     return buffer.toString();
   }
 
+  Future<void> copyToClipboard() async {
+    await Clipboard.setData(ClipboardData(text: formatForExport()));
+    info('诊断日志', '日志已复制到剪贴板', {'日志条数': _entries.length});
+  }
+
+  Future<String?> saveAsTextFile() async {
+    final location = await getSaveLocation(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: '文本文件', extensions: ['txt']),
+      ],
+      suggestedName: _fileName(),
+      confirmButtonText: '保存',
+    );
+    if (location == null) return null;
+
+    final path = location.path.toLowerCase().endsWith('.txt')
+        ? location.path
+        : '${location.path}.txt';
+    await File(path).writeAsString(formatForExport(), encoding: utf8);
+    info('诊断日志', '日志已导出为 TXT', {
+      '路径': path,
+      '日志条数': _entries.length,
+    });
+    return path;
+  }
+
   Future<ShareResult> export({Rect? sharePositionOrigin}) async {
     final content = formatForExport();
-    final now = DateTime.now();
-    final timestamp = '${now.year.toString().padLeft(4, '0')}'
-        '${now.month.toString().padLeft(2, '0')}'
-        '${now.day.toString().padLeft(2, '0')}-'
-        '${now.hour.toString().padLeft(2, '0')}'
-        '${now.minute.toString().padLeft(2, '0')}'
-        '${now.second.toString().padLeft(2, '0')}';
-    final fileName = 'ai-video-player-diagnostics-$timestamp.txt';
+    final fileName = _fileName();
     final file = XFile.fromData(
       Uint8List.fromList(utf8.encode(content)),
       name: fileName,
@@ -133,6 +158,17 @@ class DiagnosticLogService extends ChangeNotifier {
         sharePositionOrigin: sharePositionOrigin,
       );
     }
+  }
+
+  static String _fileName() {
+    final now = DateTime.now();
+    final timestamp = '${now.year.toString().padLeft(4, '0')}'
+        '${now.month.toString().padLeft(2, '0')}'
+        '${now.day.toString().padLeft(2, '0')}-'
+        '${now.hour.toString().padLeft(2, '0')}'
+        '${now.minute.toString().padLeft(2, '0')}'
+        '${now.second.toString().padLeft(2, '0')}';
+    return 'ai-video-player-diagnostics-$timestamp.txt';
   }
 
   static String _sanitize(String key, String value) {

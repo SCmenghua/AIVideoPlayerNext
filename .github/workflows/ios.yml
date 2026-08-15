@@ -19,4 +19,17 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build ios --no-codesign
+      - name: Set build identity
+        run: |
+          app_version="$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml | head -n 1)"
+          app_build_time="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          app_build_id="$(date '+%Y%m%d-%H%M%S')-${GITHUB_RUN_NUMBER}"
+          echo "APP_VERSION=$app_version" >> "$GITHUB_ENV"
+          echo "APP_BUILD_TIME=$app_build_time" >> "$GITHUB_ENV"
+          echo "APP_BUILD_ID=$app_build_id" >> "$GITHUB_ENV"
+      - name: Build iOS application
+        run: |
+          flutter build ios --no-codesign \
+            --dart-define=APP_VERSION="$APP_VERSION" \
+            --dart-define=APP_BUILD_TIME="$APP_BUILD_TIME" \
+            --dart-define=APP_BUILD_ID="$APP_BUILD_ID"
