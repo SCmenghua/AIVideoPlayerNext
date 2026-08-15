@@ -45,9 +45,9 @@ jobs:
           project_file="ios/Runner.xcodeproj/project.pbxproj"
           default_identifier="com.example.aiVideoPlayerNext"
 
-          test "$(grep -F -c "$default_identifier" "$project_file")" -eq 3
+          test "$(grep -F -c "PRODUCT_BUNDLE_IDENTIFIER = $default_identifier;" "$project_file")" -eq 3
           sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER = $default_identifier;|PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_IDENTIFIER;|g" "$project_file"
-          test "$(grep -F -c "$BUNDLE_IDENTIFIER" "$project_file")" -eq 3
+          test "$(grep -F -c "PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_IDENTIFIER;" "$project_file")" -eq 3
 
       - name: Resolve Flutter packages
         run: flutter pub get
