@@ -18,7 +18,7 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var accepting = false
   private var generation = 0
 
-  func register(with registrar: FlutterPluginRegistrar) {
+  func register(with registrar: FlutterApplicationRegistrar) {
     let methods = FlutterMethodChannel(
       name: "ai_video_player/ios_audio",
       binaryMessenger: registrar.messenger()
