@@ -4,11 +4,27 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_video_player_next/domain/speech/speech_models.dart';
 import 'package:ai_video_player_next/features/speech/whisper_cpp_speech_service.dart';
+import 'package:ai_video_player_next/domain/speech/speech_core_status.dart';
 
 void main() {
   final nativeLibrary = File(
     '${Directory.current.parent.path}\\native\\speech_core\\build-vs\\Release\\speech_core.dll',
   );
+
+  test('backend status keeps requested, actual and fallback values distinct', () {
+    const status = WhisperBackendStatus(
+      requested: WhisperRequestedBackend.vulkan,
+      actual: WhisperActualBackend.cpu,
+      gpuEnabled: false,
+      deviceName: 'NVIDIA test device',
+      fallbackReason: WhisperFallbackReason.runtimeFailed,
+      message: 'CPU fallback active',
+    );
+    expect(status.requestedLabel, 'Vulkan');
+    expect(status.actualLabel, 'CPU');
+    expect(status.gpuEnabled, isFalse);
+    expect(status.fallbackLabel, 'runtimeFailed');
+  });
 
   test(
     'FFI provider maps the deterministic native segment to RecognitionEvent',

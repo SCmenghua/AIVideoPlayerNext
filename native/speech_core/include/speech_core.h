@@ -33,6 +33,32 @@ typedef enum speech_core_status {
   SPEECH_CORE_INTERNAL_ERROR = 10
 } speech_core_status;
 
+typedef enum speech_core_requested_backend {
+  SPEECH_CORE_REQUESTED_BACKEND_AUTO = 0,
+  SPEECH_CORE_REQUESTED_BACKEND_CPU = 1,
+  SPEECH_CORE_REQUESTED_BACKEND_VULKAN = 2,
+  SPEECH_CORE_REQUESTED_BACKEND_METAL = 3
+} speech_core_requested_backend;
+
+typedef enum speech_core_actual_backend {
+  SPEECH_CORE_ACTUAL_BACKEND_UNKNOWN = 0,
+  SPEECH_CORE_ACTUAL_BACKEND_CPU = 1,
+  SPEECH_CORE_ACTUAL_BACKEND_VULKAN = 2,
+  SPEECH_CORE_ACTUAL_BACKEND_METAL = 3,
+  SPEECH_CORE_ACTUAL_BACKEND_UNAVAILABLE = 4
+} speech_core_actual_backend;
+
+typedef enum speech_core_fallback_reason {
+  SPEECH_CORE_FALLBACK_NONE = 0,
+  SPEECH_CORE_FALLBACK_BACKEND_NOT_BUILT = 1,
+  SPEECH_CORE_FALLBACK_LOADER_MISSING = 2,
+  SPEECH_CORE_FALLBACK_DEVICE_UNAVAILABLE = 3,
+  SPEECH_CORE_FALLBACK_INIT_FAILED = 4,
+  SPEECH_CORE_FALLBACK_RUNTIME_FAILED = 5,
+  SPEECH_CORE_FALLBACK_MEMORY_ERROR = 6,
+  SPEECH_CORE_FALLBACK_MODEL_ERROR = 7
+} speech_core_fallback_reason;
+
 typedef struct speech_core_diagnostics {
   uint64_t audio_samples;
   uint32_t input_sample_rate;
@@ -61,10 +87,30 @@ typedef void (*speech_core_segment_callback)(
 
 SPEECH_CORE_API const char* speech_core_status_message(speech_core_status status);
 
+SPEECH_CORE_API uint32_t speech_core_abi_version(void);
+
+SPEECH_CORE_API speech_core_status speech_core_model_create_with_backend(
+    const char* model_path,
+    speech_core_requested_backend requested_backend,
+    speech_core_model** out_model);
+
 SPEECH_CORE_API speech_core_status speech_core_model_create(
     const char* model_path,
     speech_core_model** out_model);
 SPEECH_CORE_API void speech_core_model_destroy(speech_core_model* model);
+
+SPEECH_CORE_API speech_core_requested_backend speech_core_model_requested_backend(
+    const speech_core_model* model);
+SPEECH_CORE_API speech_core_actual_backend speech_core_model_actual_backend(
+    const speech_core_model* model);
+SPEECH_CORE_API uint8_t speech_core_model_gpu_enabled(
+    const speech_core_model* model);
+SPEECH_CORE_API const char* speech_core_model_device_name(
+    const speech_core_model* model);
+SPEECH_CORE_API speech_core_fallback_reason speech_core_model_fallback_reason(
+    const speech_core_model* model);
+SPEECH_CORE_API const char* speech_core_model_backend_message(
+    const speech_core_model* model);
 
 SPEECH_CORE_API speech_core_status speech_core_session_create(
     speech_core_model* model,

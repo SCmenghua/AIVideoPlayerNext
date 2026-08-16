@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../../domain/audio/audio_models.dart';
 import '../../domain/speech/speech_models.dart';
+import '../../domain/speech/speech_core_status.dart';
 import '../speech/whisper_cpp_speech_service.dart';
 import '../../core/diagnostics/diagnostic_log_service.dart';
 
@@ -67,6 +68,7 @@ class WhisperWindowRecognitionService
     this.logs,
     this.threads = 16,
     this.language = 'ja',
+    this.requestedBackend = WhisperRequestedBackend.vulkan,
   });
 
   final String libraryPath;
@@ -74,16 +76,19 @@ class WhisperWindowRecognitionService
   final int threads;
   final String language;
   final DiagnosticLogService? logs;
+  final WhisperRequestedBackend requestedBackend;
   final StreamController<WindowRecognitionStatus> _statuses =
       StreamController<WindowRecognitionStatus>.broadcast();
   late WindowRecognitionStatus _status = WindowRecognitionStatus.notLoaded(
     modelName: File(modelPath).uri.pathSegments.last,
+    backendStatus: WhisperBackendStatus.initial(requested: requestedBackend),
   );
   late final WhisperCppPersistentRecognitionWorker _worker =
       WhisperCppPersistentRecognitionWorker(
     libraryPath: libraryPath,
     modelPath: modelPath,
     threads: threads,
+    requestedBackend: requestedBackend,
   );
   bool _disposed = false;
 
@@ -99,8 +104,12 @@ class WhisperWindowRecognitionService
     logs?.info('识别音频', 'Whisper 开始加载模型', {'模型': _status.modelName});
     try {
       await _worker.warmUp();
-      _setStatus(_status.copyWith(state: WindowRecognitionState.ready));
+      _setStatus(_status.copyWith(
+        state: WindowRecognitionState.ready,
+        backendStatus: _worker.backendStatus,
+      ));
       logs?.info('识别音频', 'Whisper 模型加载成功', {'模型': _status.modelName});
+      _logBackendStatus(_worker.backendStatus);
     } on Object catch (error) {
       _setStatus(_status.copyWith(
         state: WindowRecognitionState.error,
@@ -149,6 +158,7 @@ class WhisperWindowRecognitionService
         ),
         samples: window.samples,
       );
+      _setStatus(_status.copyWith(backendStatus: _worker.backendStatus));
       final filteredEvents = <RecognitionEvent>[];
       for (final event in events) {
         final text = event.text.trim();
@@ -202,6 +212,13 @@ class WhisperWindowRecognitionService
         '实时倍率':
             stopwatch.elapsed.inMicroseconds / window.duration.inMicroseconds,
         '语言参数': language,
+        '请求后端': _worker.backendStatus.requestedLabel,
+        '实际后端': _worker.backendStatus.actualLabel,
+        'GPU 已启用': _worker.backendStatus.gpuEnabled,
+        '设备': _worker.backendStatus.deviceName.isEmpty
+            ? '未报告'
+            : _worker.backendStatus.deviceName,
+        '回退原因': _worker.backendStatus.fallbackLabel,
       });
       if (events.isEmpty) {
         logs?.info('识别音频', 'Whisper 输出为空', {'窗口 ID': window.windowId});
@@ -252,6 +269,17 @@ class WhisperWindowRecognitionService
     if (_disposed && value.state != WindowRecognitionState.stopped) return;
     _status = value;
     if (!_statuses.isClosed) _statuses.add(value);
+  }
+
+  void _logBackendStatus(WhisperBackendStatus status) {
+    logs?.info('识别音频', 'Whisper 后端状态', {
+      '请求后端': status.requestedLabel,
+      '实际后端': status.actualLabel,
+      'GPU 已启用': status.gpuEnabled,
+      '设备': status.deviceName.isEmpty ? '未报告' : status.deviceName,
+      '回退原因': status.fallbackLabel,
+      '后端说明': status.message,
+    });
   }
 
   static const _knownHallucinations = <String>{

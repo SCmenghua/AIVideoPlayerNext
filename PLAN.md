@@ -3,423 +3,394 @@
 > 本文件是当前 Phase 的执行计划。每个 Phase 开始时，清空本文件并重新填充为该阶段的计划；阶段完成后保留最终状态，开始下一阶段时再整体替换。
 >
 > 当前项目：`AIVideoPlayerNext`
-> 当前阶段：`Phase 6`
-> 计划状态：Phase 6 已完成；后续 Phase 尚未开始
+> 当前阶段：`Phase 6.5`
+> 计划状态：进行中（Windows Vulkan + CPU fallback 已完成；等待 iOS Metal 验证）
+> 软件版本目标：`0.6.5`
 > 更新日期：2026-08-17
 
 ## 1. 阶段定位
 
-### Phase 6：播放器音频、分窗与背压
+### Phase 6.5：Whisper GPU 后端与平台加速
 
-Phase 5 已证明固定 WAV 可以经过 PCM 标准化、whisper.cpp、`speech_core` C ABI 和 Dart FFI，产生可比较的 `RecognitionEvent`。Phase 6 将这个固定输入闭环推进到实际播放器：从正在播放的本地媒体取得带媒体时间的 PCM，按有限窗口送入 Whisper，并正确处理播放控制生命周期。
+Phase 6 已经完成 Windows 本地视频音频解码、窗口化识别、有限队列、播放器字幕框和真实日语视频回归。Phase 6.5 专门完成 Windows 的 Whisper/whisper.cpp 原生推理后端：使用 Vulkan，并建立可验证的 CPU fallback。
 
-本阶段的核心目标：
+本阶段不重新设计 Phase 6 的音频、分窗、队列和字幕事件契约，而是让相同的输入窗口经过不同硬件后端完成识别，并把实际运行结果完整暴露给诊断页和日志。
+
+目标链路：
 
 ```text
-本地视频
-  -> 独立音频解码 adapter
-  -> 带媒体时间的 AudioChunk
-  -> AudioWindowPlanner
-  -> 有界识别队列
-  -> WhisperCppSpeechRecognitionService
-  -> RecognitionEvent
-  -> 诊断状态
+AudioWindow / RecognitionEvent
+  -> Whisper backend selector
+  -> Vulkan (Windows) / CPU fallback
+  -> actual backend + device status
+  -> recognition result + diagnostics
 ```
-
-本阶段首先以 Windows、本地 MP4/MKV/WebM 和已有的 `ggml-large-v3-turbo-q5_0` 为基准。浏览器媒体、HLS、Cookie、DRM、MSE、移动端真实音频和最终字幕视觉系统不作为首轮完成条件。
 
 ## 2. 已知前提
 
-- Phase 5 已完成：固定英语 WAV 的真实模型回归、manifest 比较器、native CTest、Dart FFI 测试、完整 Flutter 测试和 Phase 3 Windows 人工回归均通过。
-- whisper.cpp 固定为 v1.7.6，commit 为 `a8d002cfd879315632a579e73f0148d06959de36`；Release 包把模型放在程序目录的 `models/` 子目录，模型二进制仍由 Git 忽略并通过 Git LFS、Release Asset 或安装包分发。
-- `native/speech_core` 当前以整段 Float32 PCM 识别为主，Phase 6 需要在不破坏 Phase 5 C ABI 和固定音频回归的前提下增加窗口化调用能力。
-- `WhisperCppSpeechRecognitionService` 当前位于 worker isolate 中执行一次识别，模型路径和音频加载器由调用方提供，尚未成为主应用默认 Provider。
-- `MediaKitPlayerService` 当前提供媒体打开、播放、暂停、seek、倍速、音量、位置和状态流，但没有向 Dart 暴露 PCM 音频帧。
-- 主播放器的窗口识别链路已经使用真实 `WhisperWindowRecognitionService`；旧的 `speechRecognitionServiceProvider` Mock 仅保留给 Phase 5 的通用 Provider 测试，不驱动播放器字幕。
-- `SubtitleTimeline` 已存在，但最终字幕 Overlay、翻译回填、视觉配置和字幕历史属于 Phase 7/8，不在本阶段扩展为完整产品功能。
-- 用户的 HTTP(S) 代理不应影响本地 Flutter 测试；运行 Flutter 测试时继续对本机回环地址设置当前会话级 `NO_PROXY`，不修改永久代理配置。
+- Phase 6 已完成，当前应用版本基线为 `0.6.0`；Phase 6.5 的目标版本为 `0.6.5`。
+- Phase 6 已验证 `ggml-large-v3-turbo-q5_0.bin` 可以加载，并能对用户提供的日语本地 MP4 产生日语 `final RecognitionEvent`。
+- 当前 `native/speech_core/src/speech_core.cpp` 仍将 GPU 使用关闭，历史实现包含 `params.use_gpu = false`；不能把现有 CPU 构建误认为 GPU 构建。
+- whisper.cpp 固定使用 v1.7.6，commit 为 `a8d002cfd879315632a579e73f0148d06959de36`；Phase 6 的 CPU 回归结果必须保留，作为 GPU 对比基线。
+- 当前已知 Windows 设备包括 `NVIDIA GeForce RTX 5060 Laptop GPU` 和 `AMD Radeon(TM) 610M`；已知 Vulkan Instance Version 为 `1.4.321`。这些信息需要通过运行时实际查询再次确认，不能写死为验收结果。
+- Windows Vulkan 依赖系统 Vulkan loader、显卡驱动和 whisper.cpp/ggml Vulkan 构建；Vulkan SDK、驱动文件和开发机绝对路径不进入仓库。
+- iOS Metal 必须在 macOS/Xcode 环境构建，并在真实 iPhone 上验证；Windows 环境不能宣称 iOS Metal 已编译或 IPA 已验证。模拟器测试不能替代真实 iPhone GPU 验收。
+- 模型继续放在程序目录的 `models/` 或受控发布资产中。模型、视频、PCM、结果 JSONL 和 native 构建产物不提交普通 Git。
+- 用户的 HTTP(S) 代理不应影响本地 Flutter 测试；运行 Flutter 测试时继续对当前会话设置 `NO_PROXY=localhost,127.0.0.1,::1`。
 
 ## 3. 本阶段完成定义
 
-Phase 6 只有在以下条件全部满足后才算完成：
+Phase 6.5 的 Windows 子目标在以下条件全部满足后算完成；整个 Phase 6.5 仍必须追加 iOS Metal 真机验证：
 
-1. Windows 可以从至少一种受支持的本地视频格式取得音频 PCM，并为每个音频块提供稳定的媒体起点、采样率、声道数和样本数。
-2. 解码 adapter 不依赖 Flutter UI 线程直接处理 FFmpeg、libmpv 或其他 native 细节；资源、错误和取消有明确生命周期。
-3. PCM 经过与 Phase 5 相同的 16 kHz、单声道、Float32 标准化后，窗口时间可以准确映射回媒体时间轴。
-4. Whisper 识别窗口按顺序、有界地处理；模型不会为每个窗口重复加载，队列不会无限增长。
-5. 播放、暂停、seek、换片、停止和 dispose 都能取消或隔离旧任务；旧 `sessionId` 的事件不会进入新媒体的字幕时间轴。
-6. 识别落后、窗口跳过、纯静音、解码失败、模型缺失和 native 加载失败都能在诊断状态中明确区分，不得静默产生错位字幕。
-7. 主应用可以在模型和 native 依赖可用时选择真实 Whisper Provider；不可用时显示明确状态并可回退到 Mock，不因缺少模型而崩溃。
-8. 在至少一段项目自有或明确授权的本地视频上，实际播放能够产生带媒体时间的 final `RecognitionEvent`；暂停、seek、换片和取消回归通过。
-9. `flutter analyze`、Flutter 测试、native 测试、Windows Release 构建和本地视频 smoke test 通过；真实模型结果不写入 Git。
+1. Windows 建立独立的 whisper.cpp/ggml Vulkan Release 构建，且不破坏已经通过回归的 CPU 构建。
+2. Windows 在支持 Vulkan 的真实设备上，用真实模型和固定音频或本地视频完成识别；日志能够证明实际后端为 `Vulkan`，并显示实际 GPU 设备名。
+3. Windows 在 Vulkan loader 缺失、设备不兼容、初始化失败或运行时错误时，可以明确回退到 CPU，或显示明确的不可用状态；不能伪造 GPU 成功。
+4. C ABI 和 Dart FFI 能稳定查询请求后端、实际后端、GPU 状态、设备名、模型状态和回退原因；增加状态不得破坏 Phase 6 的现有 ABI 使用者。
+5. 诊断页和导出日志显示 Whisper 是否加载、请求后端、实际后端、设备、GPU 是否启用、回退原因、输入窗口、输出文本/数量、推理耗时和实时倍率。
+6. 真实识别结果仍进入播放器下方字幕框，播放、暂停、seek、换片、停止和 dispose 的 session 隔离不受后端切换影响。
+7. CPU 与 GPU 对同一模型、同一音频窗口、同一语言参数的结果、时间轴和失败语义可比较；性能记录包含加载耗时、推理耗时和实时倍率。
+8. Flutter 分析和测试、Windows native 构建与 CTest、Windows Release smoke 均有记录。
+9. 版本、构建时间、构建编号均符合 `NEW.md` 的强制规则：版本为 `0.6.5`，构建信息是真实值且可在诊断页和导出日志中确认。
+10. iOS 在 macOS/Xcode 上完成 Metal 原生构建，并在真实 iPhone 上确认实际后端为 `Metal` 或明确的 CPU fallback；未完成时，Phase 6.5 整体不得结项。
 
 ## 4. 范围边界
 
 ### 本阶段包含
 
-- Windows 本地视频音频解码技术尖峰。
-- `AudioChunk`、`RecognitionWindow`、窗口状态和诊断契约。
-- PCM 分块、16 kHz 单声道 Float32 标准化和媒体时间换算。
-- 语音窗口规划、前导/尾部停顿、最大窗口和纯静音跳过。
-- 有界缓冲、串行识别、有限预读和识别落后状态。
-- Whisper 模型长生命周期、窗口识别、取消和 session 隔离。
-- 播放器与识别控制器的 play/pause/seek/open/stop/dispose 生命周期。
-- Windows 本地模型目录、native DLL 加载、版本检查和 Mock 回退。
-- 诊断页的窗口、队列、延迟、推理耗时和跳过原因。
-- 自动化 fake decoder、fake recognizer、队列和控制器测试。
-- 一段本地授权视频的 Windows 真实模型回归。
+- whisper.cpp/ggml 的 Windows Vulkan 后端构建和运行时选择。
+- CPU、Vulkan、不可用状态的统一后端状态契约。
+- GPU 设备名称、实际后端、初始化错误、回退原因和性能指标的诊断记录。
+- Windows 的模型加载、native 动态库打包和路径检查。
+- 真实模型的 CPU/GPU 对照回归和固定输入性能记录。
+- GPU 初始化失败、驱动异常、内存不足、取消和生命周期错误的回退测试。
+- `0.6.5` 版本注入、构建标识、构建脚本和相关文档更新。
 
 ### 本阶段不包含
 
-- 完整字幕 Overlay、独立透明置顶窗口、字幕样式设置和字幕历史；属于 Phase 7。
-- 翻译 Provider、翻译缓存、SQLite 历史和导出增强；属于 Phase 8。
-- Apple Speech、Windows Live Captions、Apple Translation 和移动端 native 音频适配；属于后续平台阶段。
-- HLS、MSE、DRM、blob URL、Cookie/授权头提取和浏览器音频抓取。
-- 通过录音设备捕获系统混音或绕过网页保护取得音频。
-- 以当前 Windows CPU 的实时倍率推断 iPhone/Android 性能。
-- 在没有完成本地文件链路前同时支持所有网络媒体格式。
+- 重做 `AudioWindowPlanner`、`RecognitionQueue`、`RecognitionController` 或 `SubtitleTimeline` 的产品契约。
+- 完整字幕 Overlay、字幕样式、翻译 Provider、字幕历史和导出增强；这些仍按 Phase 7/8 推进。
+- HLS、MSE、DRM、blob URL、Cookie/授权头提取和网络媒体音频抓取。
+- 自行提交 Vulkan SDK、显卡驱动、Metal SDK、模型或测试视频。
+- 以编译成功、DLL 存在或请求参数为依据宣称 GPU 已经运行。
+- 在 Windows 上模拟 iOS Metal 验收，或用 iOS Simulator 代替真实 iPhone GPU 验收。
 
 ## 5. 设计原则
 
-### 5.1 播放器与识别解耦
+### 5.1 请求后端不等于实际后端
 
-播放器负责显示和控制媒体，音频解码 adapter 负责提供可取消的音频流，识别控制器负责窗口和队列。Flutter UI 不直接调用 FFmpeg、libmpv 或 whisper.cpp 内部 API。
-
-```text
-PlayerService -> PlaybackSnapshot
-AudioDecoder  -> Stream<AudioChunk>
-AudioWindowPlanner -> Stream<RecognitionWindow>
-RecognitionQueue -> RecognitionService
-RecognitionController -> events + diagnostics
-```
-
-播放器的播放位置是控制参考，音频块中的媒体时间是识别事件的权威时间来源。不能用识别完成时间代替媒体时间。
-
-### 5.2 PCM 契约
-
-`AudioChunk` 至少包含：
+应用可以请求 `Vulkan` 或 `Metal`，但只有原生运行时成功初始化设备并完成至少一个识别窗口后，才能把实际后端记为 GPU 后端。诊断必须同时展示：
 
 ```text
-sessionId
-mediaStart
-sampleRate
-channels
-sampleCount
-samples
+requestedBackend: Vulkan | Metal | CPU | Auto
+actualBackend: Vulkan | Metal | CPU | Unavailable
+gpuEnabled: true | false
+deviceName: 脱敏后的设备名称
+fallbackReason: none | loaderMissing | deviceUnavailable | initFailed | runtimeFailed | memoryError
 ```
 
-进入 Whisper 前统一为：16 kHz、单声道、Float32、样本范围 `[-1.0, 1.0]`。Dart 使用 `Duration`，native 使用整数毫秒或样本索引。输入/输出样本数、媒体起点和转换耗时可以进入诊断；音频内容、完整媒体路径、Cookie 和授权头不能进入默认日志。
+### 5.2 兼容现有 ABI
 
-### 5.3 窗口与时间
+优先增加独立的状态查询函数和版本化能力查询，而不是直接改变已有结构体布局。所有返回字符串都必须有明确的所有权和释放规则；未知字段、未知枚举和未来版本必须安全处理。旧的 CPU 调用方继续可用。
 
-首版固定窗口建议为 8 秒，允许通过本地配置调整到 6-10 秒。首版不做重叠窗口，先保证时间不重复、不漂移；窗口文本重复合并和重叠窗口留到后续评估。
+### 5.3 GPU 失败必须可降级
 
-每个窗口至少记录：`windowId`、`sessionId`、`mediaStart`、`duration`、`sampleCount`、`state`、`skipReason`、`inferenceMs` 和 `realtimeFactor`。
+Vulkan 或 Metal 初始化失败时，先记录失败阶段和错误码，再按配置回退 CPU。回退后产生的字幕必须标记实际后端为 CPU，不能继续显示上一次 GPU 状态。CPU 也不可用时，识别模块进入 `Unavailable`，播放器仍可以继续播放。
 
-识别返回的段落时间必须加上窗口的 `mediaStart`。seek、换片或停止后，旧窗口即使晚返回，也必须在控制器和服务层双重检查 `sessionId`。
+### 5.4 相同输入才能比较性能
 
-### 5.4 有界背压
+CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同窗口边界、相同语言、相同线程/批量配置和相同输出规则。性能记录不能改变字幕文本的质量门控，也不能用识别完成时间代替媒体时间。
 
-首版队列上限为当前处理窗口 1 个、等待窗口最多 1 个；使用队列索引、双端队列或环形缓冲，不能通过不断删除列表头部维持队列。
+### 5.5 诊断全面但不泄露内容
 
-当识别速度低于播放速度时，暂停继续预读而不是无限积累 PCM；记录识别延迟和队列深度；队列无法及时恢复时允许按完整窗口跳过，但必须记录媒体时间范围和跳过原因，不得把落后伪装成识别完成。
-
-### 5.5 本地优先和降级
-
-默认尝试本地 Whisper，但必须区分：模型未找到、native DLL 未找到、模型加载失败、模型版本不匹配、识别可用、识别暂时落后、识别被暂停和识别已停止。模型文件和 native 产物不提交 Git；默认诊断只记录脱敏模型标识、状态和版本。
+记录模块初始化、输入窗口、native 调用、输出段数、文本结果、推理耗时、队列状态和错误原因；继续脱敏本地完整路径、Cookie、授权头和网页请求内容。日志记录需要有稳定事件名和字段，便于用户复制后定位问题。
 
 ## 6. 执行步骤
 
-### Step 1：盘点音频解码路线并固定首个 adapter
+### Step 1：盘点构建工具链和 GPU 运行环境
 
-状态：`已完成`
-
-任务：
-
-- 检查当前 `media_kit`/libmpv 版本是否提供稳定、可分发的音频帧输出接口。
-- 评估独立 FFmpeg 解码 adapter 和 libmpv/native 音频输出 adapter 的许可证、Windows 构建、二进制体积、取消和时间戳能力。
-- 以本地 MP4 为第一目标格式，准备一段项目自有或明确授权的带语音视频。
-- 不在评估完成前把 native 解码实现写死到 Dart UI 或 Provider 中。
-- 记录选型结论、依赖版本、许可证和不支持格式。
-
-输出物：adapter 选型记录；能打开本地测试视频并输出音频时长/采样规格的最小 native 或 Dart smoke 工具。
-
-完成条件：同一测试视频可以重复打开，音频时长和采样规格稳定；解码依赖的许可和分发边界明确。
-
-### Step 2：定义 AudioChunk 和解码服务契约
-
-状态：`已完成`
+状态：`已完成（Windows；iOS 前置条件待 macOS 环境确认）`
 
 任务：
 
-- 定义 `AudioChunk`、`AudioDecoderRequest`、`AudioDecoderStatus` 和 `AudioDecoder` 接口。
-- 明确 chunk 的媒体起点、样本数、声道布局、采样率、结束条件和错误语义。
-- 定义 `open`、`start`、`pause`、`seek`、`stop`、`dispose` 生命周期及 Stream 关闭时的取消行为。
-- 明确 decoder 是否在后台 isolate/native worker 运行。
-- 为 fake decoder 提供可控的时间轴、静音块、语音块、延迟和错误注入。
+- 检查 Vulkan loader、Vulkan headers、`vulkan-1.lib`、`glslc`/shader 编译工具和 Visual Studio 构建工具是否可用。
+- 记录 `vulkaninfo --summary` 的实例版本、设备名、驱动版本、队列能力和显存信息；记录结果作为环境快照，不把它写死到代码中。
+- 检查 NVIDIA 和 AMD 设备是否分别可见，确认实际运行测试时使用的设备选择规则。
+- 盘点 whisper.cpp v1.7.6 中 `GGML_VULKAN` 的 CMake 选项、依赖和动态库要求。
+- 确认 iOS Metal 所需的 macOS、Xcode、CocoaPods、部署目标和真实 iPhone 测试条件；如果当前没有 macOS/真机，只记录阻塞项，不伪造通过。
+- 检查当前 CPU 构建目录、Vulkan 构建目录和 iOS 构建产物的隔离规则。
 
-输出物：`app/lib/domain/audio/` 下的纯 Dart 契约、fake decoder 和契约测试。
+输出物：Windows GPU 环境快照、iOS 构建前置条件清单、依赖和许可证记录。
 
-完成条件：不依赖真实播放器，测试可以生成带媒体时间的 PCM chunk 流并验证取消、结束和错误。
+完成条件：可以明确回答 Windows 是否具备 Vulkan 构建和运行条件；可以明确回答 iOS Metal 是否已有可验证的 macOS/Xcode/真机条件。
 
-### Step 3：实现本地视频到 PCM 的 Windows adapter
+### Step 2：定义后端能力与 C ABI/FFI 契约
 
-状态：`已完成（native 构建与真实视频 PCM smoke 已通过）`
-
-任务：
-
-- 实现 Step 1 选定的本地视频音频解码路径。
-- 输出稳定的媒体时间和原始音频规格，不在 decoder 内部偷偷丢弃时间信息。
-- 处理无音轨、损坏文件、过长文件、解码错误、暂停、seek 和停止。
-- 在 native 侧限制单次 chunk 大小，避免把整部视频载入内存。
-- 复用 Phase 5 的 PCM 标准化逻辑，避免 Dart 和 native 各自实现不同的重采样规则。
-- 默认诊断只记录格式、采样率、时长、chunk 数量和错误类型，不记录 PCM 内容。
-
-输出物：Windows audio decoder adapter、本地短视频 PCM smoke 工具或测试入口、依赖和打包说明。
-
-完成条件：本地授权视频可以被分块解码，chunk 的媒体时间连续，取消后不再产生新 chunk，内存占用不随视频总时长线性增长。
-
-### Step 4：实现 AudioWindowPlanner
-
-状态：`已完成`
+状态：`已完成（Windows ABI/FFI）`
 
 任务：
 
-- 将连续 `AudioChunk` 合并为固定上限的识别窗口。
-- 支持前导静音、语音开始、尾部停顿、最大窗口和文件结束。
-- 首版使用确定性的 RMS 或峰值门控，不引入未经验证的复杂 VAD。
-- 纯静音窗口直接跳过，并记录 `silence` 原因。
-- 窗口不足最小长度、解码中断和格式错误必须有明确状态。
-- 保证窗口起点、结束时间、样本数和标准化后样本数可推导。
+- 定义统一的 backend enum，至少包含 `UNKNOWN`、`CPU`、`VULKAN`、`METAL` 和 `UNAVAILABLE`。
+- 定义 requested backend、actual backend、GPU enabled、device name、driver/API 摘要、模型 loaded、fallback reason 和 error code。
+- 增加能力查询、初始化结果查询和最近一次回退原因查询；避免通过 Dart 猜测 DLL 或文件名判断 GPU 状态。
+- 优先新增独立 C 函数，或使用明确的 ABI 版本号和大小字段扩展结构体，避免破坏已有 CPU ABI。
+- 定义字符串缓冲区、释放函数、枚举未知值和错误生命周期；为 Windows 和 iOS 保持同一语义。
+- 在 Dart FFI 层建立不可变 `WhisperBackendStatus` 和转换测试。
 
-建议首版参数：`targetWindow: 8 s`、`minimumSpeechWindow: 400 ms`、`tailSilence: 500-800 ms`、`maximumWindow: 10 s`、`overlap: 0 s`。
+输出物：native 后端状态头文件、实现、Dart FFI 类型和契约测试。
 
-输出物：`AudioWindowPlanner`、窗口边界/静音/尾部停顿/EOF/异常测试。
+完成条件：不启动识别也能查询能力；识别启动后能查询实际后端；旧 Phase 6 CPU 测试仍能编译和通过。
 
-完成条件：同一 chunk 序列多次运行得到相同窗口边界；所有窗口时间单调递增且不重叠。
+### Step 3：建立独立 Windows Vulkan 构建
 
-### Step 5：扩展 Whisper 为持久窗口识别
-
-状态：`已完成`
+状态：`已完成（Windows）`
 
 任务：
 
-- 保留 Phase 5 的整段固定音频接口和回归结果，不直接破坏现有 ABI。
-- 增加窗口识别所需的 native 生命周期或服务级队列接口。
-- 模型只在服务/控制器初始化时加载一次，不为每个窗口重新加载模型。
-- 每个窗口拥有明确的 session/window 标识，回调不得引用已释放的会话。
-- 将窗口相对时间转换为媒体绝对时间，再映射为 `RecognitionEvent`。
-- 取消、重复启动、模型错误和空结果继续使用明确状态；成功但没有 final segment 不能伪装成成功。
-- 验证 `large-v3-turbo-q5_0` 在 6-10 秒窗口上的文本、耗时和实时倍率。
+- 创建独立构建目录 `native/speech_core/build-whisper-vulkan`，不污染 `build-vs`、`build-whisper-optimized` 或既有 CPU 产物。
+- 使用 `SPEECH_CORE_WITH_WHISPER=ON`、`GGML_VULKAN=ON`、`GGML_NATIVE=ON`、`GGML_OPENMP=ON` 配置 Release 构建。
+- 确认 Vulkan 相关符号、shader 资源、运行时 DLL 和 `speech_core` 导出函数均能被正确打包。
+- 保持模型路径由程序目录或显式配置提供，不在 CMake 或源码写入用户机器绝对路径。
+- 让 CPU 构建和 Vulkan 构建可并行存在，并分别运行 CTest。
+- 核对 Vulkan/whisper.cpp/ggml 的许可证和分发说明，不提交 SDK 或驱动文件。
 
-输出物：持久模型/worker 识别实现、窗口识别 C ABI 或稳定 Dart service API、固定窗口回归测试。
+输出物：Windows Vulkan Release 构建、构建配置记录、native CTest 结果和 DLL 依赖检查。
 
-完成条件：连续提交多个窗口时模型只加载一次，结果按窗口顺序返回；取消窗口后无旧回调；固定 WAV 切窗结果可重复。
+完成条件：Vulkan 版本可加载真实模型；但只有运行时完成设备初始化和识别后，才进入 GPU 功能验收。
 
-### Step 6：实现有界 RecognitionQueue 和背压
+### Step 4：实现 Windows Vulkan 运行时选择与 CPU fallback
 
-状态：`已完成`
-
-任务：
-
-- 实现当前窗口 1 个、等待窗口最多 1 个的有界队列。
-- 使用队列索引、双端队列或环形缓冲，禁止 O(n) 头部删除。
-- 识别器繁忙时暂停 decoder 预读或施加反压。
-- 计算播放位置与最后完成窗口之间的识别延迟。
-- 定义队列满、识别落后、窗口跳过和恢复条件。
-- 跳过必须以完整窗口为单位，不能截断窗口后制造错误时间戳。
-
-输出物：`RecognitionQueue`、队列深度/延迟/跳过原因诊断模型、fake recognizer 背压测试。
-
-完成条件：队列有固定内存上限；慢识别器不会导致无界累积；所有跳过和失败都有可读状态。
-
-### Step 7：实现 RecognitionController 播放生命周期
-
-状态：`已完成（fake decoder/recognizer 自动化回归）`
+状态：`部分完成（Windows 代码与 CPU 回退路径；异常注入待验收）`
 
 任务：
 
-- 监听 `PlayerService.snapshots`，协调 decoder、planner、queue 和 Whisper service。
-- `open` 或换片时创建新 `sessionId`，取消并清理旧 decoder、窗口和识别任务。
-- `play` 时开始或恢复音频生产；`pause` 时停止生产并取消或完成当前窗口。
-- `seek` 时使旧 session 失效，清空队列，从新的媒体位置重新建立窗口。
-- `stop` 和 `dispose` 时释放 decoder、worker、native session 和 stream subscription。
-- 所有事件进入字幕时间轴前检查 session、window 和媒体源一致性。
-- 控制器错误不应导致播放器崩溃；必须转为诊断状态或明确的可用性提示。
+- 增加 `Auto`/`Vulkan`/`CPU` 的配置选择，并明确默认策略。
+- Vulkan 请求时初始化 ggml Vulkan 后端，读取真实设备信息并写入后端状态。
+- Vulkan loader 缺失、驱动不兼容、设备初始化失败、模型显存不足或首个窗口运行失败时，记录错误码和阶段。
+- 按策略释放失败的 GPU context 并建立 CPU context；回退成功后更新实际后端为 `CPU`。
+- 回退期间不得重复加载模型、泄漏 native handle 或向 UI 发送无效的旧状态。
+- 验证多个 GPU、无 GPU、禁用 GPU、缺失 loader、错误 DLL 和模型缺失场景。
 
-输出物：`RecognitionController`、播放器/decoder/queue/recognizer 依赖注入、生命周期状态机测试。
+输出物：Windows backend selector、fallback 实现、错误码映射和运行时状态测试。
 
-完成条件：fake decoder 和 fake recognizer 能通过自动化测试证明播放、暂停、seek、换片、停止、重复启动和旧事件隔离均正确。
+完成条件：支持 Vulkan 的机器实际使用 Vulkan；人为禁用或破坏 Vulkan 时应用能明确回退 CPU 或显示不可用，不崩溃、不伪造字幕来源。
 
-### Step 8：接入真实 Provider、模型配置和 Mock 回退
+### Step 5：接入 Dart Provider、诊断页和完整日志
 
-状态：`已完成（配置与降级链路；真实媒体运行待验收）`
-
-任务：
-
-- 定义 Windows 本地模型目录和模型标识配置，不把机器绝对路径写入仓库。
-- 检查 native DLL、模型文件、文件大小/哈希和模型加载结果。
-- 将 `WhisperCppSpeechRecognitionService` 接入 Provider 工厂，而不是在 UI 内直接实例化。
-- 真实 Provider 可用时使用 Whisper；不可用时显示中文状态并回退 Mock，测试环境可显式注入 Mock。
-- 模型加载失败、模型缺失、DLL 缺失和架构不匹配都必须有稳定错误码和诊断摘要。
-- Windows Release 验证 native DLL 的加载位置和模型目录权限。
-- 不把模型路径、音频内容、Cookie 或授权头写入默认日志。
-
-输出物：Provider factory/configuration、Windows 模型安装和缺失状态说明、Release 打包/加载验证。
-
-完成条件：有模型时主应用可以选择真实 Provider；无模型时应用仍可启动并明确显示 Mock/不可用状态；Provider 切换不污染旧 session。
-
-### Step 9：接入诊断状态和播放器字幕
-
-状态：`已完成`
+状态：`部分完成（Windows 代码、自动化测试和 Release 已验证；播放器人工回归待复测）`
 
 任务：
 
-- 在诊断页显示当前 session、音频 decoder 状态、窗口状态、队列深度和识别延迟。
-- 显示最近窗口的媒体起点、持续时间、样本数、推理耗时、实时倍率和结果数量。
-- 显示纯静音、队列满、识别落后、取消、解码错误和模型错误的计数与最近原因。
-- 保持诊断内容脱敏，不显示完整本地路径、PCM、Cookie、授权头或网页请求内容。
-- 播放器下方字幕框消费真实 `RecognitionEvent`，显示 Whisper 原文和媒体时间；完整 Overlay、独立窗口、翻译和字幕样式仍属于 Phase 7/8。
+- 将后端选择和状态接入现有 Whisper Provider 工厂，不在播放器 UI 直接判断平台或 DLL。
+- 诊断页显示 Whisper 是否成功加载、请求后端、实际后端、GPU 是否启用、设备名、模型标识、回退原因和当前状态。
+- 识别日志记录初始化开始/完成、能力查询、输入窗口编号/起点/时长/样本数、native 调用开始/完成、输出段数/文本、推理耗时和实时倍率。
+- 记录队列深度、跳过原因、取消、异常和恢复；确保重复事件不会无限刷屏，可保留计数与最近记录。
+- 播放器下方字幕框继续只消费真实 `RecognitionEvent`，Mock 或 fallback 状态必须可区分。
+- 对本地路径、模型路径、PCM、Cookie 和授权信息继续脱敏。
 
-完成条件：测试人员可以从诊断页判断一个窗口是已解码、已排队、已识别、被跳过、被取消还是失败。
+输出物：诊断状态模型、诊断页字段、日志事件和 Provider 集成测试。
 
-### Step 10：自动化、真实视频回归和文档
+完成条件：用户仅凭诊断页和导出日志即可判断识别模块是否加载、使用何种后端、是否发生 CPU 回退，以及每个窗口输入输出情况。
 
-状态：`已完成`
+### Step 6：完成 iOS Metal 原生路径
+
+状态：`未开始`
 
 任务：
 
-- 对 AudioChunk、窗口边界、RMS 静音门控、时间换算和队列上限增加纯 Dart/native 测试。
-- 对 fake decoder + fake recognizer + controller 覆盖 play/pause/seek/open/stop/dispose。
-- 对 native decoder 增加本地短视频 smoke test；素材只保留在仓库外，并在 manifest 记录许可和元数据。
-- 使用真实 `ggml-large-v3-turbo-q5_0` 对至少一段本地授权视频进行回归。
-- 覆盖含语音、静音、暂停、seek、换片、停止和取消；记录实时倍率但不把当前机器毫秒数作为唯一硬门槛。
-- 运行 `flutter analyze`、Flutter 测试、native CTest、Windows Release 构建和 Phase 3 回归抽查。
-- 更新 `NEW.md` 和本文件，记录 decoder 选型、模型版本、测试素材、已知限制和最终状态。
+- 在 macOS/Xcode 环境配置 `GGML_METAL=ON` 或项目等价的 Metal 构建选项。
+- 确认 Metal shader/resource 的编译、复制和签名流程；链接 `Metal.framework` 及 whisper.cpp 所需的系统框架。
+- 将 iOS 后端状态和错误码接入与 Windows 相同的 C ABI/FFI 语义。
+- 在真实 iPhone 上使用同一类模型、PCM 窗口和 `RecognitionEvent` 契约进行加载、识别、暂停、seek、换片和停止测试。
+- Metal 初始化失败、设备不可用、内存不足或运行时失败时回退 CPU，并在诊断中显示原因。
+- 明确记录设备型号、iOS 版本、Xcode 版本和实际后端；Simulator 结果只能作为辅助构建验证。
 
-完成条件：任何失败都能定位到解码、标准化、窗口、队列、native 识别、session 隔离或诊断层；真实本地视频能够产生至少一个正确媒体时间的 final `RecognitionEvent`。
+输出物：iOS Metal 构建配置、真机 Release/Debug 验证记录、Metal/CPU fallback 结果。
+
+完成条件：真实 iPhone 日志能够确认 `Metal` 或明确的 `CPU` fallback；Windows 本地不能替代这一完成条件。
+
+### Step 7：固定输入和真实视频性能回归
+
+状态：`未开始`
+
+任务：
+
+- 准备仓库外固定 PCM/WAV 和用户允许测试的本地视频，建立脱敏 manifest。
+- 使用同一模型、语言、窗口、线程/批量和输出配置分别跑 CPU、Windows Vulkan、iOS Metal。
+- 记录模型加载耗时、每个窗口推理耗时、总耗时、实时倍率、输出段数、文本和时间轴偏差。
+- 检查 GPU 首次加载成本与后续窗口成本，避免只测 warm-up 或只测单个空窗口。
+- 对同一输入比较文本、段落时间、失败语义和字幕框显示；允许 GPU/CPU 文本存在细微差异，但必须记录并解释。
+- 真实播放器回归覆盖播放、暂停、seek、换片、停止、长静音、短对白和模型加载等待。
+
+输出物：CPU/Vulkan/Metal 性能与结果对照表、真实视频回归日志、已知差异说明。
+
+完成条件：至少 Windows Vulkan 和 CPU 完成可重复对照；iOS 必须在真实 iPhone 完成 Metal 或 CPU fallback 对照，不能只提供编译日志。
+
+### Step 8：异常、回退和生命周期回归
+
+状态：`未开始`
+
+任务：
+
+- 测试 Vulkan loader 缺失、旧驱动、错误架构 DLL、符号缺失、设备不可用、模型加载失败和显存不足。
+- 测试 Metal 不可用、真机内存压力、framework/resource 缺失、模型错误和 native exception。
+- 验证后端失败后只回退一次，重复播放不会叠加 worker、context、stream subscription 或日志监听器。
+- 验证 pause、seek、换片、stop、dispose 后旧 session 不再产生字幕、日志输出或 native 回调。
+- 验证 GPU 与 CPU 两种后端都遵守 Phase 6 的有界队列和时间轴契约。
+- 诊断状态必须从加载中、已加载、识别中、回退、不可用、已停止等状态正确迁移。
+
+输出物：异常注入测试、生命周期测试、内存/handle 释放检查和回退矩阵。
+
+完成条件：所有已知后端失败均有明确可读结果，播放器不会因为识别后端失败而崩溃或卡死。
+
+### Step 9：版本、打包、文档和最终验收
+
+状态：`未开始`
+
+任务：
+
+- 将 `app/pubspec.yaml`、`app/lib/core/app_build_info.dart` 默认值和构建脚本统一更新为 `0.6.5`。
+- Windows Release 注入真实 `APP_VERSION=0.6.5`、带时区的 `APP_BUILD_TIME` 和唯一 `APP_BUILD_ID`。
+- iOS 构建在 macOS/Xcode 注入同样字段，保证诊断页标题和导出日志可确认实际包版本。
+- 更新 `NEW.md`、`PLAN.md`、README/CI 或打包说明中的后端、构建和验证规则。
+- 检查 Release 目录中的 `speech_core`、Vulkan 运行时资源、iOS Metal resources 和模型路径；不把开发 SDK、驱动、视频、模型和 native build 产物加入 Git。
+- 运行完整验收矩阵；未完成 iOS 真机验证时保留为进行中，不标记 Phase 6.5 已完成。
+
+输出物：Windows `0.6.5` Release、iOS `0.6.5` 真机包或明确阻塞记录、完整测试记录、文档更新。
+
+完成条件：所有第 3 节完成定义均满足，且 `git diff --check`、版本检查、日志字段检查和 Git 忽略检查通过。
 
 ## 7. 计划中的测试命令
 
-以下路径均为示例；视频和真实结果文件仍位于仓库外。Windows Release 模型位于 exe 旁的 `models/` 目录，模型二进制不进入普通 Git，分发时使用 Git LFS、Release Asset 或安装包：
+以下命令中的模型、音频和视频路径均为仓库外路径；实际参数以本机工具链和 Step 1 结果为准：
 
 ```powershell
 flutter analyze
 $env:NO_PROXY = 'localhost,127.0.0.1,::1'
 $env:no_proxy = $env:NO_PROXY
 flutter test --concurrency=1
-flutter build windows --release
 
-cmake --build native/speech_core/build-vs --config Release
-cmake --build native/speech_core/build-whisper-vs --config Release
-ctest --test-dir native/speech_core/build-vs -C Release --output-on-failure
-ctest --test-dir native/speech_core/build-whisper-vs -C Release --output-on-failure
+cmake -S native/speech_core -B native/speech_core/build-whisper-vulkan `
+  -D SPEECH_CORE_WITH_WHISPER=ON `
+  -D WHISPER_CPP_SOURCE_DIR=<仓库外 whisper.cpp-v1.7.6> `
+  -D GGML_VULKAN=ON `
+  -D GGML_NATIVE=ON `
+  -D GGML_OPENMP=ON `
+  -D GGML_BUILD_EXAMPLES=OFF `
+  -D GGML_BUILD_TESTS=OFF
 
-native/speech_core/build-whisper-vs/Release/speech_regression.exe `
+cmake --build native/speech_core/build-whisper-vulkan --config Release
+ctest --test-dir native/speech_core/build-whisper-vulkan -C Release --output-on-failure
+
+native/speech_core/build-whisper-vulkan/Release/speech_regression.exe `
   --model <仓库外模型路径> `
   --audio <仓库外固定音频路径> `
-  --language auto `
-  --threads 8 `
-  --output <仓库外结果路径>
-
-dart tool/verify_speech_regression.dart `
-  --manifest ../test_assets/speech/manifest.json `
-  --result <仓库外结果路径> `
-  --asset-id phase5-en-generated
+  --language ja `
+  --threads 16 `
+  --output <仓库外 vulkan-result.jsonl>
 ```
 
-Phase 6 需要另增以下类型的命令或测试入口，实际名称在实现 Step 1 后确定：
+Windows Release 构建示例：
 
 ```powershell
-native/tools/audio_decode_smoke.exe `
-  --input <仓库外授权视频路径> `
-  --output <仓库外 PCM 元数据或 JSONL 路径>
-
-native/tools/player_speech_regression.exe `
-  --model <仓库外模型路径> `
-  --media <仓库外授权视频路径> `
-  --output <仓库外结果路径>
+flutter build windows --release `
+  --dart-define=APP_VERSION=0.6.5 `
+  --dart-define="APP_BUILD_TIME=<真实构建时间和时区>" `
+  --dart-define="APP_BUILD_ID=phase-6.5-windows-<唯一标识>"
 ```
+
+iOS 命令只能在 macOS/Xcode 环境执行：
+
+```bash
+pod install
+xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Release \
+  -sdk iphoneos -destination 'generic/platform=iOS' build
+```
+
+还必须执行真实设备回归，并记录：
+
+- `vulkaninfo --summary` 或等价 Vulkan 设备信息。
+- Windows 日志中的 `actualBackend=Vulkan`、`gpuEnabled=true` 和设备名称。
+- iPhone 日志中的 `actualBackend=Metal`，或 `actualBackend=CPU` 与 fallback 原因。
+- CPU/GPU 相同输入的模型加载耗时、窗口推理耗时、实时倍率和输出对照。
 
 ## 8. 风险与决策门
 
-### 音频帧来源不确定
+### Vulkan 工具链不可用
 
-`media_kit` 当前播放状态 API 不等于 PCM 输出 API。Step 1 必须先确认可用接口；如果 libmpv 音频输出不能稳定提供媒体时间，则采用独立解码 adapter，不能依赖未公开的内部对象。
+如果当前 Windows 缺少 Vulkan headers、loader、shader 工具或兼容驱动，先记录具体缺项并补齐开发环境；不能用 CPU 结果代替 Vulkan 验收。系统驱动文件不随项目提交。
 
-### 解码依赖许可证和体积
+### Vulkan 编译成功但运行失败
 
-FFmpeg 或其他 native 解码依赖必须在选型时核对许可证、编解码器构成、Windows 分发方式和二进制体积。未完成核对前不能把二进制提交到 Git 或打包为默认依赖。
+whisper.cpp/ggml 编译通过只证明构建链路成立。必须在真实设备完成 context 初始化和至少一个真实模型窗口，日志确认实际设备后，才可判定 Vulkan 通过。
 
-### CPU 实时倍率不足
+### 多 GPU 设备选择不确定
 
-Phase 5 当前 Windows CPU 回归约为实时倍率 `1.057`，余量有限。Phase 6 必须支持识别落后、有限队列和窗口跳过；不能把“最终能识别”直接当作“可以实时播放”。
+默认选择策略必须可观察。至少记录枚举到的设备数量、最终设备名和选择原因；不要通过固定显卡序号硬编码验收。
 
-### 时间轴错位
+### CPU fallback 性能不足
 
-解码时间、播放器位置和识别完成时间可能不同。所有字幕事件以音频 chunk/window 的媒体起点为基准；seek 和换片必须通过 session 失效旧事件。
+CPU 回退是可靠性保障，不等于性能达标。若 CPU 实时倍率不足，必须显示识别落后或不可用状态，继续遵守 Phase 6 的有界队列，不无限堆积窗口。
 
-### 网络媒体复杂度
+### iOS 缺少 macOS 或真实 iPhone
 
-Phase 3 的浏览器媒体交接证明播放工作区可用，不证明所有网络媒体都能被独立解码。Phase 6 首轮只验收本地文件，遇到网络媒体时保持现有播放器行为并给出识别不可用状态。
+Windows 无法编译或验证 Metal。若当前没有 macOS/Xcode/真机，本阶段只能完成 Windows 子目标，Phase 6.5 保持未完成，并在最终记录中明确阻塞。
 
-### 模型和应用配置
+### GPU 与 CPU 文本存在差异
 
-模型不进入 Git，也不应依赖开发者机器的固定绝对路径。配置缺失时应用仍要启动，Mock 仅作为明确的测试/降级 Provider，不能把模拟字幕误报为真实 Whisper 结果。
+不同后端可能产生轻微文本、分段或耗时差异。验收重点是语言、时间轴、错误语义、字幕来源和可重复性；所有差异都必须保留测试记录，不能静默改写结果。
 
-## 9. Phase 5 前置结果
+### native 生命周期和资源泄漏
+
+GPU context、模型、shader、FFI 字符串和 worker 必须有清晰释放路径。重复打开、暂停、seek、换片和 dispose 后做 handle/内存检查，防止只在首次播放时工作。
+
+## 9. Phase 6 前置结果
 
 | 项目 | 状态 | 备注 |
 |---|---|---|
-| 固定 WAV -> Whisper | 已完成 | `ggml-large-v3-turbo-q5_0` 真实模型回归通过 |
-| speech_core C ABI | 已完成 | 默认和 whisper.cpp Release/CTest 通过 |
-| Dart FFI Provider | 已完成 | worker isolate 契约和 16 项 Flutter 测试通过 |
-| JSONL/manifest 比较 | 已完成 | 文本、语言、时间、诊断字段自动比较通过 |
-| Phase 3 Windows 回归 | 已完成 | 浏览器交接、工作区切换、会话保持和日志脱敏通过 |
-| 主应用实时 Whisper | 已完成 | `RecognitionController` 已接入持久窗口 Provider；真实日语视频的解码与 Whisper 回归通过，识别结果已进入播放器字幕框 |
+| Windows 本地视频音频解码 | 已完成 | Media Foundation adapter 输出带媒体时间的 PCM |
+| PCM 标准化与窗口规划 | 已完成 | 16 kHz、单声道、Float32；静音和短对白门控已回归 |
+| Whisper 持久窗口识别 | 已完成 | 模型复用，窗口结果转换为媒体绝对时间 |
+| 有界队列与生命周期 | 已完成 | 播放、暂停、seek、换片、停止和 dispose 已覆盖 |
+| 真实日语视频回归 | 已完成 | 识别结果已进入播放器下方字幕框 |
+| Windows CPU 基线 | 已完成 | 作为 Phase 6.5 CPU 对照，不代表其他设备性能 |
+| Windows Vulkan GPU | 已完成 | 实际运行于 NVIDIA GeForce RTX 5060 Laptop GPU |
+| iOS Metal GPU | 待验证 | 必须在 macOS/Xcode 和真实 iPhone 验证后 Phase 6.5 才能结项 |
 
 ## 10. 本阶段最终状态记录
 
-本节在执行过程中逐项更新。Phase 6 已完成，本记录作为结项依据保留；开始下一阶段时再整体替换为下一阶段计划。
+本节记录 Phase 6.5 的当前执行结果；iOS 真机验证完成前，不得写入整体结项结论。
 
 初始状态：
 
-- Phase 5 已完成，Phase 6 尚未开始。
-- 首个实现目标是 Windows 本地视频，不承诺浏览器网络媒体或移动端性能。
-- Release 包使用 exe 旁 `models/ggml-large-v3-turbo-q5_0.bin`；开发或特殊测试时可用 `AI_VIDEO_WHISPER_MODEL` 覆盖。视频、PCM 和真实结果文件不进入 Git，模型二进制继续由普通 Git 忽略。
-- Phase 6 通过前，不把完整字幕 Overlay、翻译 Provider 或移动端音频适配混入本阶段。
+- Windows 目标后端为 Vulkan，CPU 为明确可观察的 fallback；不启用 CUDA 或 OpenGL。
+- 版本为 `0.6.5`，并已生成带真实构建标识的 Windows Release 包。
+- iOS Metal 尚未实现或验证，仍是 Phase 6.5 的未完成验收项；本阶段不将 Windows 结果外推为 iOS GPU 支持。
+- 模型、视频、PCM、测试结果、GPU SDK/驱动和 native build 产物继续保持仓库外或 Git 忽略。
 
-#### Phase 6 执行记录（2026-08-16）
+#### Phase 6.5 执行记录
 
-实现结果：
+| 日期 | 步骤 | 状态 | 说明 |
+|---|---|---|---|
+| 2026-08-17 | 初始化计划 | 进行中 | 已建立 Windows Vulkan 与 CPU fallback 的执行边界；iOS Metal 真机验证仍待完成 |
+| 2026-08-17 | Windows ABI/FFI | 已完成 | 新增 ABI v2、请求/实际后端、GPU 状态、设备名、回退原因和后端说明；旧 CPU 创建函数保持兼容 |
+| 2026-08-17 | Windows fallback | 已完成（代码） | Vulkan 初始化失败或首个窗口运行失败时释放 GPU context、重建 CPU context 并重试一次；失败状态不会伪造为 CPU |
+| 2026-08-17 | Provider/诊断 | 已完成（代码） | Windows 默认请求 Vulkan；支持 `AI_VIDEO_WHISPER_BACKEND=auto|vulkan|cpu`，诊断页和日志显示后端状态；版本默认值更新为 `0.6.5` |
+| 2026-08-17 | Windows 验证 | 已完成（CPU/FFI） | Dart analyze 通过；Flutter 测试 31 项通过；speech_core CPU 与 whisper CPU 构建/CTest 均通过 |
+| 2026-08-17 | Windows 环境快照 | 已完成（运行时） | Vulkan Instance Version `1.4.321`；可见 NVIDIA GeForce RTX 5060 Laptop GPU（driver `591.86`）和 AMD Radeon(TM) 610M（driver `24.30.50`）；设备名称来自 `vulkaninfo`，未写入代码 |
+| 2026-08-17 | CPU 回归复核 | 已完成 | 已生成 CPU 构建的 `speech_core_tests.exe` 与 whisper CPU CTest 均通过；本次重新构建受 Visual Studio Windows SDK 目录访问权限限制，未覆盖已有 Release 产物 |
+| 2026-08-17 | Windows 范围决策 | 已确定 | Windows 只使用 Vulkan 与 CPU fallback；不启用 CUDA 或 OpenGL |
+| 2026-08-17 | Vulkan 构建 | 已完成（Windows） | 安装官方 LunarG Vulkan SDK `1.4.357.0` 后，独立 `build-whisper-vulkan` Release 构建成功；Vulkan CTest `100% tests passed` |
+| 2026-08-17 | Vulkan 真实回归 | 已完成（Windows） | 同一真实模型与 WAV、`en`、8 threads：`requestedBackend=Vulkan`、`actualBackend=Vulkan`、`gpuEnabled=true`、设备 `NVIDIA GeForce RTX 5060 Laptop GPU`；输出 1 段，时间 `0-11000 ms` |
+| 2026-08-17 | CPU/Vulkan 对照 | 已完成（Windows） | 同一模型、输入和参数下文本/语言/时间轴一致；Vulkan `9979 ms` / 实时倍率 `0.907`，CPU `3229 ms` / 实时倍率 `0.294`。短样本当前 CPU 更快，结果只作本机基准，不外推性能 |
+| 2026-08-17 | Flutter 质量门 | 已完成（Windows） | `dart format --set-exit-if-changed`、`dart analyze lib test` 通过；Flutter 测试 `31` 项全部通过 |
+| 2026-08-17 | Windows 0.6.5 Release | 已完成（Windows） | 构建时间 `2026-08-17 01:59:36 +08:00`；构建编号 `phase-6.5-windows-20260817-015936`；Release 包内 `speech_core.dll` 与 Vulkan 构建产物 SHA-256 相同 |
+| 2026-08-17 | Windows Release 启动修复 | 已完成（Windows） | 定位为 media_kit ANGLE 携带的旧 `vulkan-1.dll` 抢先加载，导致 ggml Vulkan 模型初始化时 `0xC0000005`；CMake 已排除该 loader，Release 包改用系统 Vulkan runtime；原始启动命令复测 8 秒稳定，日志确认 `using Vulkan0 backend` |
 
-- Step 1 选用独立 Windows Media Foundation Source Reader adapter。Dart 只依赖 `AudioDecoder` 契约和 FFI 边界；native worker 负责本地媒体读取、Float 输出、媒体时间和取消。当前首轮目标为 Windows 本地文件，网络媒体、HLS、DRM、MSE 和移动端真实音频仍不在验收范围。
-- Step 2-4 已完成：建立 `AudioChunk`、decoder 生命周期/状态、PCM 标准化和 `AudioWindowPlanner`。输入统一为 16 kHz、单声道、Float32；窗口保持媒体时间、样本数和 session 隔离，纯静音与 EOF 尾部静音有明确跳过规则。
-- Step 5 已完成：`WhisperCppPersistentRecognitionWorker` 在 worker isolate 中常驻模型，连续窗口复用模型；窗口识别结果转换为带媒体绝对时间的 `RecognitionEvent`。
-- Step 6-7 已完成：`RecognitionQueue` 限制为 1 个 active 加 1 个 waiting；队列满时暂停 decoder，恢复后继续生产；`RecognitionController` 覆盖 open/play/pause/seek/换片/stop/dispose，并以 session/generation 丢弃旧结果。
-- Step 8-9 已完成：Provider 默认读取程序目录 `models/ggml-large-v3-turbo-q5_0.bin`，支持 `AI_VIDEO_WHISPER_MODEL` 显式覆盖；native DLL 默认从 exe 目录加载。诊断页显示 Whisper 加载状态、decoder、队列、输入窗口、输出数量/文本、跳过/失败、推理耗时和实时倍率；播放器字幕框消费真实 `RecognitionEvent`。
+#### 最终结项记录
 
-验证结果：
-
-- `dart analyze lib`：通过。
-- `dart analyze test`：通过。
-- `flutter test --concurrency=1`：通过 29 项测试；包含短对白不被整段静音均值误跳过，以及暂停时提交剩余尾部窗口的回归。
-- `native/audio_decoder` 的 `audio_decode_smoke.exe`：使用用户提供、明确允许测试的日语本地 MP4 读取前 30 秒成功；输出为 44.1 kHz、双声道 PCM，音量统计确认开头窗口内存在明显对白，且没有解码错误。
-- 仓库外 `ggml-large-v3-turbo-q5_0`：已成功加载，并对上述 30 秒标准化音频产生 2 个日语 final segment；模型推理成功，未将媒体、PCM、完整文本或结果文件加入 Git。
-- Windows Release：通过，版本 `0.6.0`；本次验收构建信息为 `2026-08-16 22:10:04 +08:00`、`phase-6-windows-20260816-221004`。
-- Release 目录已确认包含 `ai_video_player_next.exe`、`ai_audio_decoder.dll`、`speech_core.dll` 和 `models/ggml-large-v3-turbo-q5_0.bin`；模型 SHA-256 为 `394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2`。
-- 最终播放器人工验收：通过。Windows Release `0.6.0`，构建时间 `2026-08-16 23:41:28 +08:00`，构建编号 `phase-6-windows-20260816-234128`；`test.mp4` 在真实播放器中成功产生多个日语字幕事件。4 秒窗口推理耗时约 1.73-1.81 秒，实时倍率约 0.43-0.45，没有出现队列积压。
-- 发现并修复：原先以整个 8 秒窗口的平均音量做静音判断，会把短日语对白与前后安静片段平均为“静音”；现改为 200 ms 短帧门控。暂停时 decoder 的尾部结束标记此前也会被控制器丢弃，现会冲刷已有的部分窗口并让已提交识别完成。
-- `flutter test --concurrency=1`：27 项通过。运行时仅对当前会话设置 `NO_PROXY=localhost,127.0.0.1,::1`。
-- `native/audio_decoder` Visual Studio 2026 Release 构建：通过，生成 `ai_audio_decoder.dll` 和 `audio_decode_smoke.exe`。构建使用 Windows Media Foundation，`/W4 /WX` 下无错误。
-- `native/speech_core` 默认/whisper.cpp Release 构建及两套 CTest：通过。
-- Windows Flutter Release 构建：通过。
-- `git diff --check`：通过。
-
-持续回归项与边界：
-
-- 已完成真实本地视频的 native PCM smoke 和 Whisper 模型回归，识别结果已进入播放器字幕框。播放、暂停、seek、换片、停止和 dispose 的控制器行为由 fake decoder/recognizer 自动化测试覆盖；真实播放器窗口人工复核作为后续持续回归，不再阻塞 Phase 6 结项。
-- 本次日语模型在当前 Windows CPU 上处理 30 秒音频的实测推理时间约 50 秒，实时倍率约 1.67；这是性能观察值，不是准确率或其他设备性能承诺。
-- 视频、PCM、完整识别文本、结果文件和 native build 产物均保持本地忽略；模型已复制到 Release 程序目录，模型二进制不进入普通 Git。
-- GPU 后端、iOS Metal、完整字幕 Overlay、翻译和字幕历史不属于 Phase 6，留待后续 Phase。
-- Phase 6 结项状态（2026-08-17）：已完成。核心实现、自动化测试、native 构建、程序目录模型打包和真实日语回归均已完成。
+- Windows Vulkan 实际设备和运行日志：已完成；NVIDIA GeForce RTX 5060 Laptop GPU，`actualBackend=Vulkan`，`gpuEnabled=true`。
+- Windows CPU/Vulkan 性能与识别结果对照：已完成；同输入文本、语言和时间轴一致，性能数据见执行记录。
+- 版本、构建时间和构建编号：已完成；Windows `0.6.5`，构建时间 `2026-08-17 01:59:36 +08:00`，构建编号 `phase-6.5-windows-20260817-015936`。
+- Windows 子目标状态：已完成（Vulkan + CPU fallback）。
+- Phase 6.5 结项状态：进行中（iOS Metal 及真实 iPhone 验收尚未完成）。
+- 后续产品项：本地媒体预读、首次真实推理预热与网络媒体预读策略待 Phase 6.5 结项后进入下一阶段，服务于字幕和翻译相对播放器时间轴的准时显示。

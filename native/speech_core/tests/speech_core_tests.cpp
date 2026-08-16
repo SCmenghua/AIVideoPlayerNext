@@ -58,6 +58,12 @@ void capture(const speech_core_segment* segment, void* user_data) {
 }  // namespace
 
 int main() {
+  check(speech_core_abi_version() == 2);
+  check(speech_core_model_actual_backend(nullptr) ==
+        SPEECH_CORE_ACTUAL_BACKEND_UNAVAILABLE);
+  check(speech_core_model_gpu_enabled(nullptr) == 0);
+  check(speech_core_model_fallback_reason(nullptr) ==
+        SPEECH_CORE_FALLBACK_MODEL_ERROR);
   const auto wav = make_wav(8000, 2, {0, 32767, -32768, 0, 16384, -16384, 0, 0});
   speech_core_pcm_buffer pcm;
   speech_core_diagnostics diagnostics{};
@@ -81,6 +87,14 @@ int main() {
   }
   speech_core_model* model = nullptr;
   check(speech_core_model_create(model_path.c_str(), &model) == SPEECH_CORE_OK);
+  check(speech_core_model_requested_backend(model) ==
+        SPEECH_CORE_REQUESTED_BACKEND_CPU);
+  check(speech_core_model_actual_backend(model) ==
+        SPEECH_CORE_ACTUAL_BACKEND_CPU);
+  check(speech_core_model_gpu_enabled(model) == 0);
+  check(speech_core_model_fallback_reason(model) == SPEECH_CORE_FALLBACK_NONE);
+  check(std::string(speech_core_model_backend_message(model)) ==
+        "deterministic test model");
   speech_core_session* session = nullptr;
   check(speech_core_session_create(model, "test-session", &session) == SPEECH_CORE_OK);
   const float samples[1600] = {};

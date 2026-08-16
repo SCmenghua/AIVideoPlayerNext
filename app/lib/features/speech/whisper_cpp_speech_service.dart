@@ -5,7 +5,7 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 
 import '../../domain/speech/speech_models.dart';
-import 'speech_core_status.dart';
+import '../../domain/speech/speech_core_status.dart';
 
 typedef SpeechCoreAudioLoader = Future<List<double>> Function(
   RecognitionRequest request,
@@ -32,12 +32,14 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
     required this.modelPath,
     required this.audioLoader,
     this.threads = 4,
+    this.requestedBackend = WhisperRequestedBackend.auto,
   });
 
   final String libraryPath;
   final String modelPath;
   final SpeechCoreAudioLoader audioLoader;
   final int threads;
+  final WhisperRequestedBackend requestedBackend;
   final StreamController<RecognitionEvent> _events =
       StreamController<RecognitionEvent>.broadcast();
   int _generation = 0;
@@ -86,6 +88,7 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
           samples,
           request.language,
           threads,
+          requestedBackend.index,
         ],
       );
       if (!await iterator.moveNext()) {
@@ -190,11 +193,14 @@ class WhisperCppPersistentRecognitionWorker {
     required this.libraryPath,
     required this.modelPath,
     this.threads = 4,
+    this.requestedBackend = WhisperRequestedBackend.auto,
   });
 
   final String libraryPath;
   final String modelPath;
   final int threads;
+  final WhisperRequestedBackend requestedBackend;
+  WhisperBackendStatus _backendStatus = const WhisperBackendStatus.initial();
   _SpeechCoreBindings? _bindings;
   ReceivePort? _receivePort;
   StreamIterator<dynamic>? _iterator;
@@ -208,6 +214,8 @@ class WhisperCppPersistentRecognitionWorker {
   Future<void>? _startup;
 
   Future<void> warmUp() => _ensureWorker();
+
+  WhisperBackendStatus get backendStatus => _backendStatus;
 
   Future<List<RecognitionEvent>> recognize({
     required RecognitionRequest request,
@@ -306,6 +314,7 @@ class WhisperCppPersistentRecognitionWorker {
       throw const SpeechCoreException(
           10, 'invalid speech worker result message');
     }
+    _backendStatus = _backendStatusFromMessage(done['backend']);
     final status = done['status'] as int;
     if (status == 8) return const [];
     if (status != 0) {
@@ -346,7 +355,13 @@ class WhisperCppPersistentRecognitionWorker {
     final iterator = StreamIterator<dynamic>(receivePort);
     final isolate = await Isolate.spawn<List<Object?>>(
       _persistentSpeechWorker,
-      <Object?>[receivePort.sendPort, libraryPath, modelPath, threads],
+      <Object?>[
+        receivePort.sendPort,
+        libraryPath,
+        modelPath,
+        threads,
+        requestedBackend.index,
+      ],
     );
     _receivePort = receivePort;
     _iterator = iterator;
@@ -364,6 +379,7 @@ class WhisperCppPersistentRecognitionWorker {
       throw const SpeechCoreException(
           10, 'invalid speech worker startup message');
     }
+    _backendStatus = _backendStatusFromMessage(ready['backend']);
     _commandPort = ready['commandPort'] as SendPort;
   }
 
@@ -424,14 +440,24 @@ final class _NativeSpeechDiagnostics extends Struct {
 
 typedef _StatusMessageNative = Pointer<Utf8> Function(Int32 status);
 typedef _StatusMessageDart = Pointer<Utf8> Function(int status);
-typedef _ModelCreateNative = Int32 Function(
+typedef _ModelCreateWithBackendNative = Int32 Function(
   Pointer<Utf8> path,
+  Int32 requestedBackend,
   Pointer<Pointer<Void>> model,
 );
-typedef _ModelCreateDart = int Function(
+typedef _ModelCreateWithBackendDart = int Function(
   Pointer<Utf8> path,
+  int requestedBackend,
   Pointer<Pointer<Void>> model,
 );
+typedef _AbiVersionNative = Uint32 Function();
+typedef _AbiVersionDart = int Function();
+typedef _ModelBackendIntNative = Int32 Function(Pointer<Void> model);
+typedef _ModelBackendIntDart = int Function(Pointer<Void> model);
+typedef _ModelGpuEnabledNative = Uint8 Function(Pointer<Void> model);
+typedef _ModelGpuEnabledDart = int Function(Pointer<Void> model);
+typedef _ModelStringNative = Pointer<Utf8> Function(Pointer<Void> model);
+typedef _ModelStringDart = Pointer<Utf8> Function(Pointer<Void> model);
 typedef _ModelDestroyNative = Void Function(Pointer<Void> model);
 typedef _ModelDestroyDart = void Function(Pointer<Void> model);
 typedef _SessionCreateNative = Int32 Function(
@@ -480,9 +506,32 @@ class _SpeechCoreBindings {
       : statusMessage =
             library.lookupFunction<_StatusMessageNative, _StatusMessageDart>(
                 'speech_core_status_message'),
-        createModel =
-            library.lookupFunction<_ModelCreateNative, _ModelCreateDart>(
-                'speech_core_model_create'),
+        createModel = library.lookupFunction<
+            _ModelCreateWithBackendNative, _ModelCreateWithBackendDart>(
+          'speech_core_model_create_with_backend',
+        ),
+        abiVersion = library.lookupFunction<_AbiVersionNative, _AbiVersionDart>(
+            'speech_core_abi_version'),
+        modelRequestedBackend = library.lookupFunction<
+            _ModelBackendIntNative, _ModelBackendIntDart>(
+          'speech_core_model_requested_backend',
+        ),
+        modelActualBackend = library.lookupFunction<
+            _ModelBackendIntNative, _ModelBackendIntDart>(
+          'speech_core_model_actual_backend',
+        ),
+        modelGpuEnabled = library.lookupFunction<
+            _ModelGpuEnabledNative, _ModelGpuEnabledDart>(
+          'speech_core_model_gpu_enabled',
+        ),
+        modelFallbackReason = library.lookupFunction<
+            _ModelBackendIntNative, _ModelBackendIntDart>(
+          'speech_core_model_fallback_reason',
+        ),
+        modelDeviceName = library.lookupFunction<_ModelStringNative,
+            _ModelStringDart>('speech_core_model_device_name'),
+        modelBackendMessage = library.lookupFunction<_ModelStringNative,
+            _ModelStringDart>('speech_core_model_backend_message'),
         destroyModel =
             library.lookupFunction<_ModelDestroyNative, _ModelDestroyDart>(
                 'speech_core_model_destroy'),
@@ -503,7 +552,14 @@ class _SpeechCoreBindings {
 
   final DynamicLibrary library;
   final _StatusMessageDart statusMessage;
-  final _ModelCreateDart createModel;
+  final _ModelCreateWithBackendDart createModel;
+  final _AbiVersionDart abiVersion;
+  final _ModelBackendIntDart modelRequestedBackend;
+  final _ModelBackendIntDart modelActualBackend;
+  final _ModelGpuEnabledDart modelGpuEnabled;
+  final _ModelBackendIntDart modelFallbackReason;
+  final _ModelStringDart modelDeviceName;
+  final _ModelStringDart modelBackendMessage;
   final _ModelDestroyDart destroyModel;
   final _SessionCreateDart createSession;
   final _SessionDestroyDart destroySession;
@@ -511,6 +567,14 @@ class _SpeechCoreBindings {
   final _SessionRecognizeDart recognize;
 
   String message(int status) => statusMessage(status).toDartString();
+  WhisperBackendStatus modelStatus(Pointer<Void> model) => WhisperBackendStatus(
+        requested: _requestedBackend(modelRequestedBackend(model)),
+        actual: _actualBackend(modelActualBackend(model)),
+        gpuEnabled: modelGpuEnabled(model) != 0,
+        deviceName: modelDeviceName(model).toDartString(),
+        fallbackReason: _fallbackReason(modelFallbackReason(model)),
+        message: modelBackendMessage(model).toDartString(),
+      );
   int cancel(Pointer<Void> session) => cancelSession(session);
 }
 
@@ -546,6 +610,50 @@ class _ActiveWorker {
 Map<String, dynamic> _asMessage(dynamic value) =>
     Map<String, dynamic>.from(value as Map<dynamic, dynamic>);
 
+Map<String, dynamic> _backendStatusMessage(
+  _SpeechCoreBindings bindings,
+  Pointer<Void> model,
+) {
+  final status = bindings.modelStatus(model);
+  return <String, dynamic>{
+    'requested': status.requested.index,
+    'actual': status.actual.index,
+    'gpuEnabled': status.gpuEnabled,
+    'deviceName': status.deviceName,
+    'fallbackReason': status.fallbackReason.index,
+    'message': status.message,
+  };
+}
+
+WhisperBackendStatus _backendStatusFromMessage(dynamic value) {
+  final message = _asMessage(value);
+  return WhisperBackendStatus(
+    requested: _requestedBackend(message['requested'] as int? ?? 0),
+    actual: _actualBackend(message['actual'] as int? ?? 0),
+    gpuEnabled: message['gpuEnabled'] == true,
+    deviceName: message['deviceName'] as String? ?? '',
+    fallbackReason: _fallbackReason(message['fallbackReason'] as int? ?? 0),
+    message: message['message'] as String? ?? '',
+  );
+}
+
+WhisperRequestedBackend _requestedBackend(int value) =>
+    WhisperRequestedBackend.values[value.clamp(
+      0,
+      WhisperRequestedBackend.values.length - 1,
+    )];
+
+WhisperActualBackend _actualBackend(int value) =>
+    WhisperActualBackend.values[value.clamp(
+      0,
+      WhisperActualBackend.values.length - 1,
+    )];
+
+WhisperFallbackReason _fallbackReason(int value) => value >= 0 &&
+        value < WhisperFallbackReason.unknown.index
+    ? WhisperFallbackReason.values[value]
+    : WhisperFallbackReason.unknown;
+
 Future<void> _speechWorker(List<Object?> args) async {
   final mainPort = args[0] as SendPort;
   final libraryPath = args[1] as String;
@@ -554,6 +662,7 @@ Future<void> _speechWorker(List<Object?> args) async {
   final samples = (args[4] as List<dynamic>).cast<num>();
   final language = args[5] as String;
   final threads = args[6] as int;
+  final requestedBackend = args[7] as int;
   final bindings = _SpeechCoreBindings.open(libraryPath);
   Pointer<Void> model = nullptr;
   Pointer<Void> session = nullptr;
@@ -572,7 +681,11 @@ Future<void> _speechWorker(List<Object?> args) async {
     final modelPathPointer = modelPath.toNativeUtf8();
     final modelSlot = calloc<Pointer<Void>>();
     try {
-      final status = bindings.createModel(modelPathPointer, modelSlot);
+      final status = bindings.createModel(
+        modelPathPointer,
+        requestedBackend,
+        modelSlot,
+      );
       if (status != 0) {
         sendError(status, bindings.message(status));
         return;
@@ -604,6 +717,7 @@ Future<void> _speechWorker(List<Object?> args) async {
       'type': 'ready',
       'commandPort': workerCommandPort.sendPort,
       'sessionAddress': session.address,
+      'backend': _backendStatusMessage(bindings, model),
     });
     final command = await workerCommandPort.first;
     if (command == 'cancel') {
@@ -652,6 +766,7 @@ Future<void> _speechWorker(List<Object?> args) async {
         'status': status,
         'message': bindings.message(status),
         'segments': segments,
+        'backend': _backendStatusMessage(bindings, model),
       });
     } finally {
       nativeCallback.close();
@@ -673,6 +788,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
   final libraryPath = args[1] as String;
   final modelPath = args[2] as String;
   final threads = args[3] as int;
+  final requestedBackend = args[4] as int;
   final bindings = _SpeechCoreBindings.open(libraryPath);
   Pointer<Void> model = nullptr;
   ReceivePort? commandPort;
@@ -689,7 +805,11 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
     final modelPathPointer = modelPath.toNativeUtf8();
     final modelSlot = calloc<Pointer<Void>>();
     try {
-      final status = bindings.createModel(modelPathPointer, modelSlot);
+      final status = bindings.createModel(
+        modelPathPointer,
+        requestedBackend,
+        modelSlot,
+      );
       if (status != 0) {
         sendError(status, bindings.message(status));
         return;
@@ -704,6 +824,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
     mainPort.send(<String, dynamic>{
       'type': 'ready',
       'commandPort': commandPort.sendPort,
+      'backend': _backendStatusMessage(bindings, model),
     });
     await for (final raw in commandPort) {
       final command = _asMessage(raw);
@@ -783,6 +904,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
         'status': status,
         'message': bindings.message(status),
         'segments': segments,
+        'backend': _backendStatusMessage(bindings, model),
       });
     }
   } on Object catch (error) {

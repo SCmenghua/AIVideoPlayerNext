@@ -12,7 +12,46 @@ namespace {
 
 void usage() {
   std::cerr << "usage: speech_regression --model PATH --audio PATH "
-               "[--language LANG] [--threads N] [--manifest PATH] [--output PATH]\n";
+               "[--backend auto|cpu|vulkan] [--language LANG] [--threads N] "
+               "[--manifest PATH] [--output PATH]\n";
+}
+
+bool parse_backend(const std::string& value,
+                   speech_core_requested_backend* backend) {
+  if (value == "auto") {
+    *backend = SPEECH_CORE_REQUESTED_BACKEND_AUTO;
+    return true;
+  }
+  if (value == "cpu") {
+    *backend = SPEECH_CORE_REQUESTED_BACKEND_CPU;
+    return true;
+  }
+  if (value == "vulkan") {
+    *backend = SPEECH_CORE_REQUESTED_BACKEND_VULKAN;
+    return true;
+  }
+  return false;
+}
+
+const char* requested_backend_name(speech_core_requested_backend backend) {
+  switch (backend) {
+    case SPEECH_CORE_REQUESTED_BACKEND_AUTO: return "Auto";
+    case SPEECH_CORE_REQUESTED_BACKEND_CPU: return "CPU";
+    case SPEECH_CORE_REQUESTED_BACKEND_VULKAN: return "Vulkan";
+    case SPEECH_CORE_REQUESTED_BACKEND_METAL: return "Metal";
+  }
+  return "Unknown";
+}
+
+const char* actual_backend_name(speech_core_actual_backend backend) {
+  switch (backend) {
+    case SPEECH_CORE_ACTUAL_BACKEND_UNKNOWN: return "Unknown";
+    case SPEECH_CORE_ACTUAL_BACKEND_CPU: return "CPU";
+    case SPEECH_CORE_ACTUAL_BACKEND_VULKAN: return "Vulkan";
+    case SPEECH_CORE_ACTUAL_BACKEND_METAL: return "Metal";
+    case SPEECH_CORE_ACTUAL_BACKEND_UNAVAILABLE: return "Unavailable";
+  }
+  return "Unknown";
 }
 
 std::string json_escape(const char* text) {
@@ -76,11 +115,19 @@ int main(int argc, char** argv) {
   std::string language = "auto";
   std::string manifest_path;
   std::string output_path;
+  speech_core_requested_backend requested_backend =
+      SPEECH_CORE_REQUESTED_BACKEND_AUTO;
   int32_t threads = 4;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--model" && i + 1 < argc) model_path = argv[++i];
     else if (argument == "--audio" && i + 1 < argc) audio_path = argv[++i];
+    else if (argument == "--backend" && i + 1 < argc) {
+      if (!parse_backend(argv[++i], &requested_backend)) {
+        usage();
+        return 2;
+      }
+    }
     else if (argument == "--language" && i + 1 < argc) language = argv[++i];
     else if (argument == "--manifest" && i + 1 < argc) manifest_path = argv[++i];
     else if (argument == "--output" && i + 1 < argc) output_path = argv[++i];
@@ -126,7 +173,8 @@ int main(int argc, char** argv) {
   if (status != SPEECH_CORE_OK) return 3;
 
   speech_core_model* model = nullptr;
-  status = speech_core_model_create(model_path.c_str(), &model);
+  status = speech_core_model_create_with_backend(
+      model_path.c_str(), requested_backend, &model);
   if (status != SPEECH_CORE_OK) {
     speech_core_pcm_buffer_free(&pcm);
     return status == SPEECH_CORE_MODEL_NOT_FOUND ||
@@ -145,6 +193,20 @@ int main(int argc, char** argv) {
       session, pcm.samples, pcm.sample_count, pcm.sample_rate,
       language.c_str(), threads, on_segment, &context, &diagnostics);
   if (status == SPEECH_CORE_OK) {
+    *output << "{\"type\":\"backend\",\"sessionId\":\"regression\","
+            << "\"requestedBackend\":\""
+            << requested_backend_name(speech_core_model_requested_backend(model))
+            << "\",\"actualBackend\":\""
+            << actual_backend_name(speech_core_model_actual_backend(model))
+            << "\",\"gpuEnabled\":"
+            << (speech_core_model_gpu_enabled(model) != 0 ? "true" : "false")
+            << ",\"deviceName\":\""
+            << json_escape(speech_core_model_device_name(model))
+            << "\",\"fallbackReason\":"
+            << static_cast<int>(speech_core_model_fallback_reason(model))
+            << ",\"backendMessage\":\""
+            << json_escape(speech_core_model_backend_message(model))
+            << "\"}\n";
     *output << "{\"type\":\"diagnostic\",\"sessionId\":\"regression\","
             << "\"audioSamples\":" << diagnostics.audio_samples
             << ",\"inputSampleRate\":" << diagnostics.input_sample_rate

@@ -4,6 +4,7 @@ project(speech_core LANGUAGES C CXX)
 include(CTest)
 
 option(SPEECH_CORE_WITH_WHISPER "Build the whisper.cpp backend" OFF)
+option(GGML_VULKAN "Build whisper.cpp with the Vulkan backend" OFF)
 set(WHISPER_CPP_SOURCE_DIR "" CACHE PATH
   "Path to the pinned whisper.cpp source tree")
 
@@ -40,6 +41,10 @@ if(SPEECH_CORE_WITH_WHISPER)
   set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+  # Windows Phase 6.5 deliberately ships Vulkan/CPU only. Keep CUDA out of
+  # this target even if a parent build or developer environment enables it.
+  set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+  set(GGML_VULKAN ${GGML_VULKAN} CACHE BOOL "" FORCE)
   add_subdirectory("${WHISPER_CPP_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp")
   target_compile_definitions(speech_core PRIVATE SPEECH_CORE_WITH_WHISPER)
   target_link_libraries(speech_core PRIVATE whisper)

@@ -8,6 +8,8 @@
 
 目标是制作一个以手机为最终交付形态、但能在 Windows PC 上高效编译、运行、调试和回归测试的视频播放器。
 
+产品的核心不是单纯播放视频，而是在视频的权威媒体时间轴上准时显示可读的原文与译文字幕。播放器提供时钟和画面；识别、翻译、预读与缓存都必须服务于字幕在对应时间出现，不能以识别或翻译任务完成的墙钟时间替代媒体时间。
+
 核心体验：
 
 1. 播放本地视频，后续扩展网络媒体与 WebDAV。
@@ -196,13 +198,13 @@ abstract interface class TranslationService {
 
 ### 8.0 编译版本与构建标识规则（强制）
 
-每次编译都必须把当前开发阶段写入软件版本，并把本次编译的真实信息注入应用。版本号统一使用：
+每次编译都必须把当前开发阶段写入软件版本，并把本次编译的真实信息注入应用。整数 Phase 的版本号统一使用：
 
 ```text
 0.<当前 Phase 编号>.0
 ```
 
-例如当前执行 `Phase 6` 时，软件版本必须是 `0.6.0`；进入 `Phase 7` 后必须改为 `0.7.0`。版本号必须同时更新 `app/pubspec.yaml` 的 `version` 和应用默认构建信息，不能继续沿用旧 Phase 的版本号。
+例如执行 `Phase 6` 时，软件版本必须是 `0.6.0`；执行 `Phase 6.5` 时必须是 `0.6.5`；进入 `Phase 7` 后必须改为 `0.7.0`。版本号必须同时更新 `app/pubspec.yaml` 的 `version` 和应用默认构建信息，不能继续沿用旧 Phase 的版本号。
 
 每一次 Windows、iOS 或其他 Release/验收构建都必须注入以下信息：
 
@@ -322,12 +324,32 @@ abstract interface class TranslationService {
 
 验收：视频播放、暂停、seek、换片和停止时任务正确取消；推理落后时状态可见且音频不悄然错位。
 
+### Phase 6.5：Whisper GPU 后端与平台加速
+
+目标：在不改变 Phase 6 播放器音频、分窗和字幕事件契约的前提下，为 Windows 配置 Vulkan GPU 推理，为 iOS 配置 Apple Metal GPU 推理；GPU 不可用时必须安全、明确地回退到 CPU。
+
+- Windows：为 `speech_core` 建立独立的 Vulkan Release 构建，启用 whisper.cpp/ggml Vulkan 后端；不得污染已经通过回归的 CPU 构建目录或把 Vulkan SDK、显卡驱动文件提交到仓库。
+- Windows：在实际有 Vulkan GPU 的设备上运行真实模型和本地视频回归，确认运行时日志显示真实使用的 GPU 后端与设备名称；仅“DLL 编译成功”或代码请求 GPU 不能作为验收依据。
+- iOS：在 macOS/Xcode 上为 `speech_core` 或等价原生桥接启用 whisper.cpp/ggml Metal 后端，链接所需系统框架，并在真机使用同一类 PCM/`RecognitionEvent` 契约验证；Windows 环境不得宣称 Metal 已编译或 IPA 已验证。
+- 原生 C ABI 与 Dart FFI 增加稳定的推理后端状态：至少区分 `Vulkan`、`Metal`、`CPU`、`不可用`，并可提供 GPU 是否启用、设备名称和回退原因；不得只显示“Whisper 已加载”。
+- 诊断页和导出日志必须记录模型加载时请求的后端、最终实际后端、设备标识、GPU 启用状态、CPU 回退原因、输入窗口、输出结果、推理耗时和实时倍率；路径、PCM、Cookie 和授权信息仍须脱敏。
+- Vulkan 或 Metal 初始化、设备不兼容、驱动异常、内存不足或推理失败时，自动回退 CPU 或给出明确不可用状态；不得导致播放器崩溃、卡死或产生无来源的字幕。
+- 保持模型在程序目录或受控发布资产中；GPU 依赖、模型、测试媒体和原生构建产物遵循现有许可证、分发和 Git 忽略规则。
+
+验收：Windows 在支持 Vulkan 的机器上，真实播放器或原生命令行回归能在日志中确认 `Vulkan` 和实际 GPU 设备，并与 CPU 基线比较推理耗时；GPU 不可用时能明确显示并完成 CPU 回退。iOS 必须在 macOS 构建并在真实 iPhone 上确认 `Metal` 或明确 CPU 回退，且播放、识别和字幕事件不受影响。
+
+范围边界：本阶段不重做 AudioWindowPlanner、RecognitionQueue、播放器控制、SubtitleTimeline、字幕样式、翻译、历史或网络媒体支持；这些能力继续按既定 Phase 推进。
+
 ### Phase 7：字幕时间轴、Overlay 与诊断
 
-目标：让字幕结果准确显示且可定位问题。
+目标：让原文和译文字幕按播放器媒体时间轴准确显示、可提前准备且可定位问题。
 
 - 完成纯 Dart `SubtitleTimeline` 与充分单元测试。
 - 实现 final-first、partial 预览、session 隔离、翻译按 ID 回填。
+- 对本地媒体，在打开后启动有界音频预读与识别预热，为 Whisper 首次真实推理和异步翻译留出时间；字幕仍只能在其媒体起止时间内显示。
+- 预读以有限“识别/翻译领先量”、PCM 缓冲和结果缓存为界；暂停、seek、换片、停止与 dispose 必须取消或隔离旧 session 的预读结果。
+- 记录播放位置、已解码位置、已识别位置、已翻译位置、领先/落后秒数、首次真实推理耗时和稳态窗口耗时，避免把 GPU 初始化成本误判为持续识别速度。
+- 网络媒体预读另行设计：普通 HTTP VOD、HLS/DASH、直播、MSE/blob 和 DRM 的数据可得性与授权边界不同，不能沿用本地文件的整段预读方式，也不得绕过受保护媒体。
 - 实现播放器内字幕 Overlay；桌面端可打开独立透明置顶字幕窗口，支持点击穿透作为可选能力。
 - 字幕字体、字号、颜色、背景透明度、位置与显示句数可配置。
 - 诊断页提供音频窗口、识别事件、门控原因、当前队列和时间轴命中记录。
@@ -484,6 +506,19 @@ Phase 9 才首次发现基础集成问题。
 - 用户已完成 Phase 3 Windows 人工回归：内置浏览器媒体交接、播放器/浏览器工作区切换、二次进入浏览器和诊断日志脱敏均正常。
 - Whisper 核心已在 native CLI 和 Dart FFI 测试链路启用并通过验证；主播放器已经改用真实的窗口 Whisper Provider，旧的 `MockSpeechRecognitionService` 只保留给测试和明确的降级场景。
 - Phase 5 已完成验收；中文/多语言准确率、真实媒体噪声鲁棒性、iPhone 性能和主应用实时识别属于后续阶段。
+
+#### Phase 6.5 Windows Release 启动修复（2026-08-17）
+
+- Windows Release 首次启用 Vulkan 时出现 `0xC0000005` 内存写入错误。对照确认 CPU 模式可启动，临时移除程序目录中的 `vulkan-1.dll` 后 Vulkan 模型初始化和应用运行均稳定。
+- 根因是 `media_kit` 的 ANGLE 资源携带了 2022 年旧 Vulkan loader；它会优先于显卡驱动提供的系统 loader 被加载。Windows CMake 现排除该文件，仅保留播放器需要的 EGL/GLES 资源，由系统 Vulkan runtime 提供 Whisper/ggml Vulkan loader。
+- 重新构建后的 Release 包不包含 `vulkan-1.dll`。使用 `AI_VIDEO_WHISPER_BACKEND=vulkan` 的原始启动命令复测通过，日志显示 NVIDIA GeForce RTX 5060 Laptop GPU、`Vulkan0 total size` 和 `using Vulkan0 backend`，且 media_kit 硬件视频纹理仍正常创建。
+
+#### Phase 6.5 当前记录（2026-08-17）
+
+- Windows Vulkan + CPU fallback 子目标已完成。独立 Vulkan Release 构建、C ABI/FFI 后端状态、诊断日志、CPU fallback、真实模型回归和 Windows `0.6.5` Release 启动稳定性均已验证；Windows 不接入 CUDA 或 OpenGL 推理后端。
+- 同一短音频基准中，Vulkan 与 CPU 的文本、语言和时间轴一致；该机器上的短样本 CPU 更快，因此不能把“已启用 Vulkan”误作普遍性能更快的结论。首个真实 Vulkan 推理还有明显预热成本，后续窗口应与首窗口分开观察。
+- iOS Metal 尚未测试，因此 Phase 6.5 整体仍未结项，必须在 macOS/Xcode 和真实 iPhone 上验证实际 `Metal` 或明确的 CPU fallback。
+- Phase 6.5 结项后的下一阶段优先目标是字幕准时性：本地媒体在播放前或播放初期受限预读音频、提前识别并开始翻译，字幕显示始终由视频媒体时间轴裁决。网络媒体预读须作为独立范围设计，遵守数据可得性、会话和 DRM 边界。
 
 #### Phase 6 执行记录（2026-08-16）
 

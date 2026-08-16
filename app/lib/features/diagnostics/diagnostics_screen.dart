@@ -251,6 +251,35 @@ class _RecognitionSummary extends StatelessWidget {
             spacing: 18,
             runSpacing: 6,
             children: [
+              _Metric(
+                label: '请求后端',
+                value: diagnostics.recognizer.backendStatus.requestedLabel,
+              ),
+              _Metric(
+                label: '实际后端',
+                value: diagnostics.recognizer.backendStatus.actualLabel,
+              ),
+              _Metric(
+                label: 'GPU 已启用',
+                value: diagnostics.recognizer.backendStatus.gpuEnabled ? '是' : '否',
+              ),
+              _Metric(
+                label: '设备',
+                value: diagnostics.recognizer.backendStatus.deviceName.isEmpty
+                    ? '未报告'
+                    : diagnostics.recognizer.backendStatus.deviceName,
+              ),
+              _Metric(
+                label: '回退原因',
+                value: diagnostics.recognizer.backendStatus.fallbackLabel,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 18,
+            runSpacing: 6,
+            children: [
               _Metric(label: '队列', value: '${diagnostics.queueDepth}'),
               _Metric(label: '已识别', value: '${diagnostics.windowsRecognized}'),
               _Metric(label: '已跳过', value: '${diagnostics.windowsSkipped}'),

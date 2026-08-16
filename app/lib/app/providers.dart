@@ -9,6 +9,7 @@ import '../domain/browser/browser_service.dart';
 import '../domain/player/player_service.dart';
 import '../domain/audio/audio_models.dart';
 import '../domain/speech/speech_models.dart';
+import '../domain/speech/speech_core_status.dart';
 import '../domain/translation/translation_service.dart';
 import '../features/browser/mobile_browser_service.dart';
 import '../features/browser/windows_browser_service.dart';
@@ -46,6 +47,18 @@ String? _whisperModelPath() {
     'ggml-large-v3-turbo-q5_0.bin',
   );
   return candidate.existsSync() ? candidate.path : null;
+}
+
+WhisperRequestedBackend _whisperRequestedBackend() {
+  final configured = Platform.environment['AI_VIDEO_WHISPER_BACKEND']
+      ?.trim()
+      .toLowerCase();
+  return switch (configured) {
+    'auto' => WhisperRequestedBackend.auto,
+    'cpu' => WhisperRequestedBackend.cpu,
+    'vulkan' || null => WhisperRequestedBackend.vulkan,
+    _ => WhisperRequestedBackend.vulkan,
+  };
 }
 
 final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
@@ -102,6 +115,7 @@ final windowRecognitionServiceProvider =
     'AI_VIDEO_SPEECH_CORE_LIBRARY',
   );
   final model = _whisperModelPath();
+  final requestedBackend = _whisperRequestedBackend();
   final logs = ref.read(diagnosticsLogProvider);
   final WindowRecognitionService service =
       nativeLibrary != null && model != null && File(model).existsSync()
@@ -111,6 +125,7 @@ final windowRecognitionServiceProvider =
               logs: logs,
               language: 'ja',
               threads: 16,
+              requestedBackend: requestedBackend,
             )
           : _UnavailableWindowRecognitionService(
               message: nativeLibrary == null
@@ -121,6 +136,7 @@ final windowRecognitionServiceProvider =
     'speech_core DLL': nativeLibrary == null ? '未找到' : '已找到',
     '模型': model == null ? '未找到' : '已找到',
     '模型位置': model,
+    '请求后端': requestedBackend.name,
   });
   if (service is WhisperWindowRecognitionService) {
     unawaited(service.prepare());

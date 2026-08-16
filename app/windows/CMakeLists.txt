@@ -62,6 +62,13 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# The media_kit ANGLE archive bundles a Vulkan loader from 2022. Keeping that
+# loader beside the executable makes Windows load it before the current loader
+# supplied by the graphics driver, which can crash ggml Vulkan during model
+# initialization. ANGLE still keeps its EGL/GLES libraries; Vulkan comes from
+# the installed driver runtime.
+list(FILTER PLUGIN_BUNDLED_LIBRARIES EXCLUDE REGEX "[/\\\\]vulkan-1\\.dll$")
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
@@ -96,7 +103,7 @@ endif()
 # package. Include locally built Release DLLs when they are available.
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/../../native/audio_decoder/build-vs/Release/ai_audio_decoder.dll"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../native/speech_core/build-whisper-optimized/Release/speech_core.dll"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../native/speech_core/build-whisper-vulkan/Release/speech_core.dll"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   CONFIGURATIONS Release
   OPTIONAL

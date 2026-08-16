@@ -2,6 +2,7 @@ import 'dart:collection';
 
 import '../player/player_service.dart';
 import '../speech/speech_models.dart';
+import '../speech/speech_core_status.dart';
 
 enum AudioDecoderState {
   idle,
@@ -282,9 +283,13 @@ class WindowRecognitionStatus {
     this.lastResultCount = 0,
     this.lastOutput = const [],
     this.lastInference = Duration.zero,
+    this.backendStatus = const WhisperBackendStatus.initial(),
   });
 
-  const WindowRecognitionStatus.notLoaded({this.modelName})
+  const WindowRecognitionStatus.notLoaded({
+    this.modelName,
+    this.backendStatus = const WhisperBackendStatus.initial(),
+  })
       : state = WindowRecognitionState.notLoaded,
         message = null,
         lastWindow = null,
@@ -295,6 +300,7 @@ class WindowRecognitionStatus {
   const WindowRecognitionStatus.unavailable({
     this.message,
     this.modelName,
+    this.backendStatus = const WhisperBackendStatus.initial(),
   })  : state = WindowRecognitionState.unavailable,
         lastWindow = null,
         lastResultCount = 0,
@@ -308,6 +314,7 @@ class WindowRecognitionStatus {
   final int lastResultCount;
   final List<String> lastOutput;
   final Duration lastInference;
+  final WhisperBackendStatus backendStatus;
 
   WindowRecognitionStatus copyWith({
     WindowRecognitionState? state,
@@ -317,6 +324,7 @@ class WindowRecognitionStatus {
     int? lastResultCount,
     List<String>? lastOutput,
     Duration? lastInference,
+    WhisperBackendStatus? backendStatus,
   }) =>
       WindowRecognitionStatus(
         state: state ?? this.state,
@@ -326,6 +334,7 @@ class WindowRecognitionStatus {
         lastResultCount: lastResultCount ?? this.lastResultCount,
         lastOutput: lastOutput ?? this.lastOutput,
         lastInference: lastInference ?? this.lastInference,
+        backendStatus: backendStatus ?? this.backendStatus,
       );
 }
 
