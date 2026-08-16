@@ -37,7 +37,7 @@ jobs:
           echo "APP_BUILD_ID=$app_build_id" >> "$GITHUB_ENV"
       - name: Build iOS application
         run: |
-          flutter build ios --no-codesign \
+          flutter build ios --release --no-codesign \
             --dart-define=APP_VERSION="$APP_VERSION" \
             --dart-define=APP_BUILD_TIME="$APP_BUILD_TIME" \
             --dart-define=APP_BUILD_ID="$APP_BUILD_ID"
