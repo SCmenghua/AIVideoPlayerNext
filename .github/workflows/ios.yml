@@ -19,6 +19,14 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      - name: Apply CI bundle identifier
+        run: |
+          project_file="ios/Runner.xcodeproj/project.pbxproj"
+          default_identifier="com.example.aiVideoPlayerNext"
+          ci_identifier="com.scmenghua.aivideoplayernext"
+
+          test "$(grep -F -c "PRODUCT_BUNDLE_IDENTIFIER = $default_identifier;" "$project_file")" -eq 3
+          sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER = $default_identifier;|PRODUCT_BUNDLE_IDENTIFIER = $ci_identifier;|g" "$project_file"
       - name: Set build identity
         run: |
           app_version="$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml | head -n 1)"
