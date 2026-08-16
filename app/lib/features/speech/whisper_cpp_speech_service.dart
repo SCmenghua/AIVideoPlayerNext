@@ -548,7 +548,9 @@ class _SpeechCoreBindings {
             _SessionRecognizeDart>('speech_core_session_recognize');
 
   factory _SpeechCoreBindings.open(String path) =>
-      _SpeechCoreBindings(DynamicLibrary.open(path));
+      _SpeechCoreBindings(
+        path == '@process' ? DynamicLibrary.process() : DynamicLibrary.open(path),
+      );
 
   final DynamicLibrary library;
   final _StatusMessageDart statusMessage;

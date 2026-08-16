@@ -64,6 +64,15 @@ bool is_vulkan_device(ggml_backend_dev_t device) {
       value.find("vulkan") != std::string_view::npos;
 }
 
+bool is_metal_device(ggml_backend_dev_t device) {
+  if (device == nullptr) return false;
+  const char* name = ggml_backend_dev_name(device);
+  if (name == nullptr) return false;
+  const std::string_view value(name);
+  return value.find("Metal") != std::string_view::npos ||
+      value.find("metal") != std::string_view::npos;
+}
+
 const char* vulkan_device_description(ggml_backend_dev_t device) {
   if (device == nullptr) return "";
   const char* description = ggml_backend_dev_description(device);
@@ -71,10 +80,22 @@ const char* vulkan_device_description(ggml_backend_dev_t device) {
   return ggml_backend_dev_name(device);
 }
 
+const char* backend_device_description(ggml_backend_dev_t device) {
+  return vulkan_device_description(device);
+}
+
 ggml_backend_dev_t find_vulkan_device() {
   for (size_t index = 0; index < ggml_backend_dev_count(); ++index) {
     auto* device = ggml_backend_dev_get(index);
     if (is_vulkan_device(device)) return device;
+  }
+  return nullptr;
+}
+
+ggml_backend_dev_t find_metal_device() {
+  for (size_t index = 0; index < ggml_backend_dev_count(); ++index) {
+    auto* device = ggml_backend_dev_get(index);
+    if (is_metal_device(device)) return device;
   }
   return nullptr;
 }
@@ -147,20 +168,40 @@ extern "C" speech_core_status speech_core_model_create_with_backend(
   }
 #ifdef SPEECH_CORE_WITH_WHISPER
   ggml_backend_load_all();
-  const bool request_gpu = requested_backend == SPEECH_CORE_REQUESTED_BACKEND_AUTO ||
-      requested_backend == SPEECH_CORE_REQUESTED_BACKEND_VULKAN;
-  auto* vulkan_device = find_vulkan_device();
-  if (request_gpu && vulkan_device == nullptr) {
+  const bool request_metal =
+      requested_backend == SPEECH_CORE_REQUESTED_BACKEND_METAL
+#ifdef SPEECH_CORE_GGML_METAL
+      || requested_backend == SPEECH_CORE_REQUESTED_BACKEND_AUTO
+#endif
+      ;
+  const bool request_vulkan =
+      requested_backend == SPEECH_CORE_REQUESTED_BACKEND_VULKAN
+#ifndef SPEECH_CORE_GGML_METAL
+      || requested_backend == SPEECH_CORE_REQUESTED_BACKEND_AUTO
+#endif
+      ;
+  auto* metal_device = request_metal ? find_metal_device() : nullptr;
+  auto* vulkan_device = request_vulkan ? find_vulkan_device() : nullptr;
+  if (request_vulkan && vulkan_device == nullptr) {
     model->fallback_reason = SPEECH_CORE_FALLBACK_DEVICE_UNAVAILABLE;
     model->backend_message = "Vulkan device unavailable";
   }
-  if (requested_backend == SPEECH_CORE_REQUESTED_BACKEND_METAL) {
+#ifndef SPEECH_CORE_GGML_METAL
+  if (request_metal) {
     model->fallback_reason = SPEECH_CORE_FALLBACK_BACKEND_NOT_BUILT;
-    model->backend_message = "Metal is unavailable on this Windows build";
+    model->backend_message = "Metal backend is not built";
   }
-  bool use_gpu = request_gpu && vulkan_device != nullptr;
+#else
+  if (request_metal && metal_device == nullptr) {
+    model->fallback_reason = SPEECH_CORE_FALLBACK_DEVICE_UNAVAILABLE;
+    model->backend_message = "Metal device unavailable";
+  }
+#endif
+  bool use_gpu = (request_vulkan && vulkan_device != nullptr) ||
+      (request_metal && metal_device != nullptr);
   if (use_gpu) {
-    model->device_name = vulkan_device_description(vulkan_device);
+    model->device_name = backend_device_description(
+        metal_device != nullptr ? metal_device : vulkan_device);
     model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_UNKNOWN;
   } else {
     model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_CPU;
@@ -170,7 +211,9 @@ extern "C" speech_core_status speech_core_model_create_with_backend(
   if (model->whisper == nullptr) {
     if (use_gpu) {
       model->fallback_reason = SPEECH_CORE_FALLBACK_INIT_FAILED;
-      model->backend_message = "Vulkan initialization failed; retrying with CPU";
+      model->backend_message = metal_device != nullptr
+          ? "Metal initialization failed; retrying with CPU"
+          : "Vulkan initialization failed; retrying with CPU";
       use_gpu = false;
       model->whisper = initialize_whisper_context(model_path, false);
       model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_CPU;
@@ -187,7 +230,9 @@ extern "C" speech_core_status speech_core_model_create_with_backend(
   model->gpu_enabled = use_gpu;
   if (use_gpu) {
     model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_UNKNOWN;
-    model->backend_message = "Vulkan backend initialized; awaiting inference";
+    model->backend_message = metal_device != nullptr
+        ? "Metal backend initialized; awaiting inference"
+        : "Vulkan backend initialized; awaiting inference";
   }
   model->backend = speech_core_model::Backend::whisper;
   *out_model = model.release();
@@ -333,16 +378,25 @@ extern "C" speech_core_status speech_core_session_recognize(
     if (result != 0) {
       if (session->model->gpu_enabled) {
         session->model->fallback_reason = SPEECH_CORE_FALLBACK_RUNTIME_FAILED;
-        session->model->backend_message =
-            "Vulkan runtime failed; rebuilding CPU context";
+        const bool was_metal = session->model->actual_backend ==
+            SPEECH_CORE_ACTUAL_BACKEND_METAL ||
+            (session->model->requested_backend == SPEECH_CORE_REQUESTED_BACKEND_METAL
+#ifdef SPEECH_CORE_GGML_METAL
+             || session->model->requested_backend == SPEECH_CORE_REQUESTED_BACKEND_AUTO
+#endif
+            );
+        session->model->backend_message = was_metal
+            ? "Metal runtime failed; rebuilding CPU context"
+            : "Vulkan runtime failed; rebuilding CPU context";
         whisper_free(session->model->whisper);
         session->model->whisper = initialize_whisper_context(
             session->model->model_path.c_str(), false);
         if (session->model->whisper == nullptr) {
           session->model->gpu_enabled = false;
           session->model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_UNAVAILABLE;
-          session->model->backend_message =
-              "Vulkan runtime failed and CPU fallback initialization failed";
+          session->model->backend_message = was_metal
+              ? "Metal runtime failed and CPU fallback initialization failed"
+              : "Vulkan runtime failed and CPU fallback initialization failed";
           return SPEECH_CORE_BACKEND_UNAVAILABLE;
         }
         session->model->gpu_enabled = false;
@@ -354,8 +408,17 @@ extern "C" speech_core_status speech_core_session_recognize(
       if (result != 0) return SPEECH_CORE_RECOGNITION_FAILED;
     }
     if (session->model->actual_backend == SPEECH_CORE_ACTUAL_BACKEND_UNKNOWN) {
-      session->model->actual_backend = SPEECH_CORE_ACTUAL_BACKEND_VULKAN;
-      session->model->backend_message = "Vulkan recognition completed";
+      session->model->actual_backend =
+          session->model->requested_backend == SPEECH_CORE_REQUESTED_BACKEND_METAL
+#ifdef SPEECH_CORE_GGML_METAL
+              || session->model->requested_backend == SPEECH_CORE_REQUESTED_BACKEND_AUTO
+#endif
+              ? SPEECH_CORE_ACTUAL_BACKEND_METAL
+              : SPEECH_CORE_ACTUAL_BACKEND_VULKAN;
+      session->model->backend_message =
+          session->model->actual_backend == SPEECH_CORE_ACTUAL_BACKEND_METAL
+              ? "Metal recognition completed"
+              : "Vulkan recognition completed";
     }
     const int count = whisper_full_n_segments(session->model->whisper);
     if (count <= 0) return SPEECH_CORE_RECOGNITION_FAILED;

@@ -29,6 +29,19 @@ jobs:
         with:
           channel: stable
 
+      - name: Prepare pinned whisper.cpp source
+        env:
+          WHISPER_CPP_COMMIT: a8d002cfd879315632a579e73f0148d06959de36
+        run: |
+          whisper_dir="$RUNNER_TEMP/whisper.cpp"
+          git init "$whisper_dir"
+          git -C "$whisper_dir" remote add origin https://github.com/ggerganov/whisper.cpp.git
+          git -C "$whisper_dir" fetch --depth 1 origin "$WHISPER_CPP_COMMIT"
+          git -C "$whisper_dir" checkout --detach FETCH_HEAD
+          git -C "$whisper_dir" submodule update --init --recursive --depth 1
+          echo "AI_VIDEO_WHISPER_CPP_SOURCE_DIR=$whisper_dir" >> "$GITHUB_ENV"
+          echo "Using whisper.cpp commit: $(git -C "$whisper_dir" rev-parse HEAD)"
+
       - name: Validate bundle identifier
         env:
           BUNDLE_IDENTIFIER: ${{ inputs.bundle_identifier }}
@@ -57,6 +70,11 @@ jobs:
 
       - name: Install iOS native dependencies
         run: pod install --project-directory=ios
+
+      - name: Verify native speech_core inputs
+        run: |
+          test -f "$AI_VIDEO_WHISPER_CPP_SOURCE_DIR/CMakeLists.txt"
+          test -f "../native/speech_core/ios/build_speech_core_ios.sh"
 
       - name: Set build identity
         run: |

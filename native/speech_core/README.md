@@ -50,6 +50,26 @@ metadata and SHA-256 recorded in the manifest. On the Windows CPU backend,
 the local English fixture produced seven final segments with automatic language
 detection. This is a regression baseline, not a device-performance target.
 
+## iOS Phase 6.5 integration
+
+iOS uses the same C ABI as Windows, with a static `speech_core` archive linked
+into the Runner executable. The archive is built on macOS by the Xcode build
+phase from `ios/build_speech_core_ios.sh`; set
+`AI_VIDEO_WHISPER_CPP_SOURCE_DIR` to the repository-external whisper.cpp
+v1.7.6 checkout before opening Xcode. The script uses the `iphoneos` or
+`iphonesimulator` SDK selected by Xcode, enables `GGML_METAL`, and merges the
+whisper.cpp/ggml static archives before Runner force-loads the result.
+
+The iOS app looks for `ggml-large-v3-turbo-q5_0.bin` in
+`Application Support/models/`. The Flutter MethodChannel also exposes a
+controlled `installModel` operation for an import/settings flow; a model may
+instead be supplied as an explicitly bundled release asset. No model binary,
+Metal SDK, generated archive, or Xcode build directory is committed.
+
+Windows cannot validate this path. A macOS/Xcode build must still verify the
+Swift bridge, archive link, model load, and actual Metal or CPU fallback on a
+real iPhone before Phase 6 and Phase 6.5 iOS acceptance can be closed.
+
 ## Exit codes
 
 `speech_regression.exe` returns `0` for success, `2` for argument/output

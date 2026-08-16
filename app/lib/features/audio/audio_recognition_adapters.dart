@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/services.dart';
 
 import '../../domain/audio/audio_models.dart';
 import '../../domain/speech/speech_models.dart';
@@ -289,4 +292,107 @@ class WhisperWindowRecognitionService
 
   static String _normalizeForHallucinationCheck(String text) =>
       text.replaceAll(RegExp(r'[\s。、！？!?.,，．・]+'), '').trim();
+}
+
+/// iOS adapter which resolves the sandbox model path before constructing the
+/// shared persistent FFI worker. This keeps platform path policy out of the
+/// recognition controller and lets the native process expose speech_core.
+class IosWhisperWindowRecognitionService
+    implements WindowRecognitionService, WindowRecognitionStatusProvider {
+  IosWhisperWindowRecognitionService({
+    this.logs,
+    this.threads = 4,
+    this.language = 'ja',
+    this.requestedBackend = WhisperRequestedBackend.metal,
+  });
+
+  static const _channel = MethodChannel('ai_video_player/ios_speech_core');
+  static const modelFileName = 'ggml-large-v3-turbo-q5_0.bin';
+  final DiagnosticLogService? logs;
+  final int threads;
+  final String language;
+  final WhisperRequestedBackend requestedBackend;
+  final StreamController<WindowRecognitionStatus> _statuses =
+      StreamController<WindowRecognitionStatus>.broadcast();
+  late WindowRecognitionStatus _status = WindowRecognitionStatus.notLoaded(
+    modelName: modelFileName,
+    backendStatus: WhisperBackendStatus.initial(
+      requested: requestedBackend,
+    ),
+  );
+  WhisperWindowRecognitionService? _delegate;
+  bool _disposed = false;
+
+  @override
+  WindowRecognitionStatus get status => _delegate?.status ?? _status;
+
+  @override
+  Stream<WindowRecognitionStatus> get statuses => _statuses.stream;
+
+  /// Installs a user-provided model into the app sandbox. The binary remains
+  /// outside Git and can be supplied by a future import/settings workflow.
+  static Future<String?> installModel(Uint8List bytes) =>
+      _channel.invokeMethod<String>('installModel', bytes);
+
+  Future<void> prepare() async {
+    if (_disposed || _delegate != null) return;
+    _setStatus(_status.copyWith(state: WindowRecognitionState.loading));
+    try {
+      final path = await _channel.invokeMethod<String>('modelPath');
+      if (path == null || !File(path).existsSync()) {
+        throw StateError('iOS Application Support 中未找到 Whisper 模型。');
+      }
+      final delegate = WhisperWindowRecognitionService(
+        libraryPath: '@process',
+        modelPath: path,
+        logs: logs,
+        threads: threads,
+        language: language,
+        requestedBackend: requestedBackend,
+      );
+      _delegate = delegate;
+      delegate.statuses.listen(_setStatus);
+      await delegate.prepare();
+      _setStatus(delegate.status);
+    } on Object catch (error) {
+      _setStatus(_status.copyWith(
+        state: WindowRecognitionState.unavailable,
+        message: error.toString(),
+      ));
+      logs?.error('识别音频', 'iOS Whisper 模型不可用', {
+        '错误类型': error.runtimeType,
+        '错误信息': error,
+      });
+    }
+  }
+
+  @override
+  Future<WindowRecognitionResult> recognize(RecognitionWindow window) {
+    final delegate = _delegate;
+    if (delegate == null) {
+      return Future.value(WindowRecognitionResult(
+        window: window,
+        events: const [],
+        error: _status.message ?? 'iOS Whisper 尚未加载。',
+      ));
+    }
+    return delegate.recognize(window);
+  }
+
+  @override
+  Future<void> stop() => _delegate?.stop() ?? Future<void>.value();
+
+  @override
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    await _delegate?.dispose();
+    await _statuses.close();
+  }
+
+  void _setStatus(WindowRecognitionStatus value) {
+    if (_disposed) return;
+    _status = value;
+    if (!_statuses.isClosed) _statuses.add(value);
+  }
 }

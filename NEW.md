@@ -518,6 +518,8 @@ Phase 9 才首次发现基础集成问题。
 - Windows Vulkan + CPU fallback 子目标已完成。独立 Vulkan Release 构建、C ABI/FFI 后端状态、诊断日志、CPU fallback、真实模型回归和 Windows `0.6.5` Release 启动稳定性均已验证；Windows 不接入 CUDA 或 OpenGL 推理后端。
 - 同一短音频基准中，Vulkan 与 CPU 的文本、语言和时间轴一致；该机器上的短样本 CPU 更快，因此不能把“已启用 Vulkan”误作普遍性能更快的结论。首个真实 Vulkan 推理还有明显预热成本，后续窗口应与首窗口分开观察。
 - iOS Metal 尚未测试，因此 Phase 6.5 整体仍未结项，必须在 macOS/Xcode 和真实 iPhone 上验证实际 `Metal` 或明确的 CPU fallback。
+- iOS 开发决策（2026-08-17）：暂缓 Phase 6 原定的 iOS 单独验收，先补齐 Phase 6.5 的 iOS Metal/CPU fallback、speech_core 原生集成、Dart 平台装配和本地媒体 PCM 适配；Phase 6 与 Phase 6.5 的 iOS 播放、识别、字幕时间轴和生命周期统一在真实 iPhone 上回归。代码补齐不等于 iOS 验收通过。
+- iOS Phase 6.5 代码补齐记录（2026-08-17）：已完成 Dart、Swift、CMake 和 Xcode 工程接入；当前仅表示代码路径和构建准备完成，不表示 macOS/Xcode、Metal、PCM、播放或真实 iPhone 验收通过。
 - Phase 6.5 结项后的下一阶段优先目标是字幕准时性：本地媒体在播放前或播放初期受限预读音频、提前识别并开始翻译，字幕显示始终由视频媒体时间轴裁决。网络媒体预读须作为独立范围设计，遵守数据可得性、会话和 DRM 边界。
 
 #### Phase 6 执行记录（2026-08-16）

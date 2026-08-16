@@ -1,0 +1,5 @@
+// speech_core is built locally from the pinned, repository-external whisper.cpp
+// source. The archive is intentionally ignored by Git.
+IOS_SPEECH_CORE_ARCHIVE = $(PROJECT_DIR)/../../native/speech_core/build-ios/$(PLATFORM_NAME)/Release/libspeech_core.a
+HEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../../native/speech_core/include
+OTHER_LDFLAGS = $(inherited) -Wl,-force_load,$(IOS_SPEECH_CORE_ARCHIVE) -Wl,-export_dynamic -framework Metal -framework Foundation -framework Accelerate

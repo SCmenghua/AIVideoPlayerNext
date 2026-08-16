@@ -5,10 +5,19 @@ include(CTest)
 
 option(SPEECH_CORE_WITH_WHISPER "Build the whisper.cpp backend" OFF)
 option(GGML_VULKAN "Build whisper.cpp with the Vulkan backend" OFF)
+option(GGML_METAL "Build whisper.cpp with the Metal backend" OFF)
+option(SPEECH_CORE_BUILD_SHARED "Build speech_core as a shared library" ON)
+option(SPEECH_CORE_BUILD_TOOLS "Build the regression CLI and CTest targets" ON)
 set(WHISPER_CPP_SOURCE_DIR "" CACHE PATH
   "Path to the pinned whisper.cpp source tree")
 
-add_library(speech_core SHARED
+if(SPEECH_CORE_BUILD_SHARED)
+  set(SPEECH_CORE_LIBRARY_TYPE SHARED)
+else()
+  set(SPEECH_CORE_LIBRARY_TYPE STATIC)
+endif()
+
+add_library(speech_core ${SPEECH_CORE_LIBRARY_TYPE}
   src/pcm.cpp
   src/speech_core.cpp
 )
@@ -45,28 +54,49 @@ if(SPEECH_CORE_WITH_WHISPER)
   # this target even if a parent build or developer environment enables it.
   set(GGML_CUDA OFF CACHE BOOL "" FORCE)
   set(GGML_VULKAN ${GGML_VULKAN} CACHE BOOL "" FORCE)
+  set(GGML_METAL ${GGML_METAL} CACHE BOOL "" FORCE)
+  if(GGML_METAL)
+    target_compile_definitions(speech_core PRIVATE SPEECH_CORE_GGML_METAL)
+  endif()
+  if(APPLE AND NOT IOS)
+    # Desktop Apple builds are useful for local smoke tests, but the product
+    # Metal target is the iOS build below.
+    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+  elseif(IOS)
+    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
+  endif()
   add_subdirectory("${WHISPER_CPP_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp")
   target_compile_definitions(speech_core PRIVATE SPEECH_CORE_WITH_WHISPER)
   target_link_libraries(speech_core PRIVATE whisper)
   target_include_directories(speech_core PRIVATE "${WHISPER_CPP_SOURCE_DIR}/include")
 endif()
 
-add_executable(speech_regression
-  ../tools/speech_regression.cpp
-)
-target_compile_features(speech_regression PRIVATE cxx_std_17)
-target_link_libraries(speech_regression PRIVATE speech_core)
-target_include_directories(speech_regression PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-if(MSVC)
-  target_compile_options(speech_regression PRIVATE /W4 /WX)
-else()
-  target_compile_options(speech_regression PRIVATE -Wall -Wextra -Wpedantic -Werror)
+if(APPLE AND GGML_METAL)
+  target_link_libraries(speech_core PUBLIC
+    "-framework Foundation"
+    "-framework Metal"
+    "-framework Accelerate"
+  )
 endif()
 
-if(BUILD_TESTING)
+if(SPEECH_CORE_BUILD_TOOLS)
+  add_executable(speech_regression
+    ../tools/speech_regression.cpp
+  )
+  target_compile_features(speech_regression PRIVATE cxx_std_17)
+  target_link_libraries(speech_regression PRIVATE speech_core)
+  target_include_directories(speech_regression PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  )
+
+  if(MSVC)
+    target_compile_options(speech_regression PRIVATE /W4 /WX)
+  else()
+    target_compile_options(speech_regression PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
+
+if(SPEECH_CORE_BUILD_TOOLS AND BUILD_TESTING)
   add_executable(speech_core_tests
     tests/speech_core_tests.cpp
   )
@@ -83,9 +113,12 @@ if(BUILD_TESTING)
   add_test(NAME speech_core_tests COMMAND speech_core_tests)
 endif()
 
-install(TARGETS speech_core speech_regression
+install(TARGETS speech_core
   RUNTIME DESTINATION bin
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
 )
+if(SPEECH_CORE_BUILD_TOOLS)
+  install(TARGETS speech_regression RUNTIME DESTINATION bin)
+endif()
 install(DIRECTORY include/ DESTINATION include)

@@ -17,6 +17,7 @@ import '../features/player/media_kit_player_service.dart';
 import '../features/player/media_picker.dart';
 import '../features/player/mock_services.dart';
 import '../features/audio/audio_recognition_adapters.dart';
+import '../features/audio/ios_audio_decoder.dart';
 import '../features/audio/recognition_controller.dart';
 import '../features/audio/windows_audio_decoder.dart';
 
@@ -54,10 +55,16 @@ WhisperRequestedBackend _whisperRequestedBackend() {
       ?.trim()
       .toLowerCase();
   return switch (configured) {
-    'auto' => WhisperRequestedBackend.auto,
     'cpu' => WhisperRequestedBackend.cpu,
-    'vulkan' || null => WhisperRequestedBackend.vulkan,
-    _ => WhisperRequestedBackend.vulkan,
+    'metal' => WhisperRequestedBackend.metal,
+    'vulkan' => WhisperRequestedBackend.vulkan,
+    'auto' => WhisperRequestedBackend.auto,
+    null => Platform.isIOS
+        ? WhisperRequestedBackend.metal
+        : WhisperRequestedBackend.vulkan,
+    _ => Platform.isIOS
+        ? WhisperRequestedBackend.metal
+        : WhisperRequestedBackend.vulkan,
   };
 }
 
@@ -97,6 +104,11 @@ final speechRecognitionServiceProvider =
 });
 
 final audioDecoderProvider = Provider<AudioDecoder>((ref) {
+  if (Platform.isIOS) {
+    final decoder = IosAudioDecoder();
+    ref.onDispose(decoder.dispose);
+    return decoder;
+  }
   final library = _windowsArtifact(
     'audio_decoder.dll',
     'AI_VIDEO_AUDIO_DECODER_LIBRARY',
@@ -110,12 +122,27 @@ final audioDecoderProvider = Provider<AudioDecoder>((ref) {
 
 final windowRecognitionServiceProvider =
     Provider<WindowRecognitionService>((ref) {
+  final requestedBackend = _whisperRequestedBackend();
+  if (Platform.isIOS) {
+    final service = IosWhisperWindowRecognitionService(
+      logs: ref.read(diagnosticsLogProvider),
+      threads: 4,
+      language: 'ja',
+      requestedBackend: requestedBackend,
+    );
+    ref.read(diagnosticsLogProvider).info('识别音频', 'iOS Whisper 模块初始化', {
+      '请求后端': requestedBackend.name,
+      '模型位置': 'Application Support/models/ggml-large-v3-turbo-q5_0.bin',
+    });
+    unawaited(service.prepare());
+    ref.onDispose(service.dispose);
+    return service;
+  }
   final nativeLibrary = _windowsArtifact(
     'speech_core.dll',
     'AI_VIDEO_SPEECH_CORE_LIBRARY',
   );
   final model = _whisperModelPath();
-  final requestedBackend = _whisperRequestedBackend();
   final logs = ref.read(diagnosticsLogProvider);
   final WindowRecognitionService service =
       nativeLibrary != null && model != null && File(model).existsSync()
