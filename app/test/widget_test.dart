@@ -92,7 +92,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('浏览器视频'), findsOneWidget);
-    expect(find.byIcon(Icons.volume_up_outlined), findsOneWidget);
+    expect(find.byTooltip('播放速度'), findsOneWidget);
 
     await tester.tap(find.text('内置浏览器').first);
     await tester.pump();

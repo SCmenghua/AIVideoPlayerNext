@@ -19,4 +19,17 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build windows --debug
+      - name: Set build identity
+        shell: pwsh
+        run: |
+          $appVersion = (Select-String -Path pubspec.yaml -Pattern '^version:\s*([^+\s]+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $appBuildTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'
+          $appBuildId = "${{ github.run_number }}-${{ github.sha }}"
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_BUILD_TIME=$appBuildTime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_BUILD_ID=$appBuildId" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: >
+          flutter build windows --release
+          --dart-define=APP_VERSION="${{ env.APP_VERSION }}"
+          --dart-define=APP_BUILD_TIME="${{ env.APP_BUILD_TIME }}"
+          --dart-define=APP_BUILD_ID="${{ env.APP_BUILD_ID }}"

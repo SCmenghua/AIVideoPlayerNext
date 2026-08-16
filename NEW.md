@@ -194,6 +194,24 @@ abstract interface class TranslationService {
 
 ## 8. Phase 路线
 
+### 8.0 编译版本与构建标识规则（强制）
+
+每次编译都必须把当前开发阶段写入软件版本，并把本次编译的真实信息注入应用。版本号统一使用：
+
+```text
+0.<当前 Phase 编号>.0
+```
+
+例如当前执行 `Phase 6` 时，软件版本必须是 `0.6.0`；进入 `Phase 7` 后必须改为 `0.7.0`。版本号必须同时更新 `app/pubspec.yaml` 的 `version` 和应用默认构建信息，不能继续沿用旧 Phase 的版本号。
+
+每一次 Windows、iOS 或其他 Release/验收构建都必须注入以下信息：
+
+- `APP_VERSION`：当前 Phase 对应的软件版本，例如 `0.6.0`。
+- `APP_BUILD_TIME`：实际编译开始或完成时间，必须包含日期、时间和时区，不能使用“开发构建”。
+- `APP_BUILD_ID`：本次构建的唯一标识，例如 CI 运行号、提交号或本地构建时间戳，不能使用“未指定”。
+
+诊断页标题和诊断日志导出文件的头部必须显示这三个字段，方便确认用户测试的确切程序。Release 包不得显示默认占位值；Debug/本地开发运行可以使用默认值，但正式测试前必须使用带真实构建信息的包。每次版本或构建标识规则发生变化时，必须同步更新构建脚本、CI 配置和本文件中的执行记录。
+
 ### Phase 1：新仓库与 Windows 工具链
 
 目标：让独立工程在 Windows 上可重复构建与测试。
@@ -435,3 +453,68 @@ Phase 9 才首次发现基础集成问题。
 6. 只有音频、识别事件、时间轴与诊断闭环通过后，才接入翻译和移动端平台能力。
 
 首轮完成定义：Windows 上可打开本地视频，并通过独立、可诊断、可回归的流程显示至少一条本地识别字幕；任何层的失败都能定位，且不依赖当前仓库的任何文件。
+
+#### Phase 5 执行记录（2026-08-16）
+
+本轮按 `PLAN.md` 执行 Windows 固定音频识别核心尖峰，范围限定为：固定 WAV/PCM -> 16 kHz 单声道 Float32 PCM -> whisper.cpp/speech_core C ABI -> Dart FFI -> `RecognitionEvent`。未接入播放器实时音频、字幕 UI、翻译、移动端真实音频或 Phase 6 内容。
+
+已完成：
+
+- 建立 `native/speech_core`，实现 WAV/PCM 标准化、模型/会话 C ABI、识别回调、取消、生命周期、错误状态和非敏感诊断字段。
+- whisper.cpp 使用仓库外固定缓存 v1.7.6、commit `a8d002cfd879315632a579e73f0148d06959de36`；没有提交第三方源码、模型或音频。
+- 建立 `native/tools/speech_regression.cpp`，输出带 session、时间戳、语言、来源、采样规格、推理耗时和实时倍率的 JSONL；支持 `--threads`、`--manifest` 和 `--output`。`tool/verify_speech_regression.dart` 使用 manifest 自动比较归一化文本、语言、分段时间和诊断字段。
+- 建立 Dart `WhisperCppSpeechRecognitionService`，在 worker isolate 中调用 native，映射统一 `RecognitionEvent`。Mock Provider 仍保留用于通用契约测试和依赖缺失时的明确降级，不驱动主播放器的真实字幕。
+- `test_assets/speech/` 只包含 manifest 和素材准备说明，不包含未经确认授权的真实音频或模型。
+
+验证结果：
+
+- 默认 speech_core Release 构建通过。
+- 启用 whisper.cpp 的 speech_core Release 构建通过。
+- 两套构建的 CTest 均通过，结果为 `100% tests passed`。
+- deterministic test model 的 CLI JSONL smoke 通过，且验证了 `--manifest`、`--language en` 和 `--threads 1`。
+- `flutter analyze` 通过。
+- 设置当前 PowerShell 会话的 `NO_PROXY=localhost,127.0.0.1,::1` 后，`flutter test --concurrency=1` 通过 16 项测试，其中包含 Dart FFI -> worker isolate -> native C ABI -> `RecognitionEvent` 的 focused 契约测试。
+- Windows Release 构建通过。
+- 真实模型回归已通过：本地 `ggml-large-v3-turbo-q5_0` 成功加载，使用项目自有的 Windows SAPI 生成英语 WAV 进行 `--language auto --threads 8` 回归，自动检测为 `en`，输出 7 个带毫秒时间戳的 final segment；耗时 50,637 ms，实时倍率 1.05725。模型、WAV、结果文件和本地路径均未进入 Git。
+
+限制与未完成验收：
+
+- 真实模型/英语 WAV 已通过 manifest 驱动的文本、分段时间和诊断比较，但仅覆盖一个项目自有的合成英语素材，不能据此宣布中文或多语言准确率、真实媒体鲁棒性或设备性能门槛。
+- 全局 HTTP(S) 代理会使 `flutter_tester` 的本机 WebSocket 握手失败；运行 Flutter 测试前仅需在当前会话设置 `NO_PROXY=localhost,127.0.0.1,::1`，不修改用户的永久代理设置。
+- 用户已完成 Phase 3 Windows 人工回归：内置浏览器媒体交接、播放器/浏览器工作区切换、二次进入浏览器和诊断日志脱敏均正常。
+- Whisper 核心已在 native CLI 和 Dart FFI 测试链路启用并通过验证；主播放器已经改用真实的窗口 Whisper Provider，旧的 `MockSpeechRecognitionService` 只保留给测试和明确的降级场景。
+- Phase 5 已完成验收；中文/多语言准确率、真实媒体噪声鲁棒性、iPhone 性能和主应用实时识别属于后续阶段。
+
+#### Phase 6 执行记录（2026-08-16）
+
+本轮开始执行 `PLAN.md` 中的 Phase 6“播放器音频、分窗与背压”。范围限定为 Windows 本地媒体音频、带媒体时间的 PCM、有限识别窗口、Whisper 持久 worker、播放器生命周期、播放器字幕框和诊断状态；不扩展网络媒体、HLS、DRM、MSE、移动端真实音频或完整字幕 Overlay。
+
+已完成：
+
+- 建立 Windows Media Foundation Source Reader 音频 adapter。native 侧在 worker 线程读取本地媒体并输出带媒体起点、采样率、声道数、样本数和结束标记的 PCM chunk；Dart 侧通过 FFI 管理 open/start/pause/seek/stop/dispose。
+- 建立 `AudioChunk`、PCM 标准化、`AudioWindowPlanner`、`RecognitionQueue` 和诊断模型。标准化目标为 16 kHz、单声道、Float32；窗口固定上限、静音跳过、EOF 尾部静音裁剪和媒体时间映射均有测试。
+- 建立持久 Whisper window worker。模型在 worker isolate 中保持长生命周期，窗口按顺序识别，不为每个窗口重复加载模型。
+- 建立 `RecognitionController`。播放、暂停、seek、换片、停止和 dispose 会清理或隔离旧 session；识别落后时 decoder 受队列背压暂停，队列恢复后继续。
+- 主播放器和诊断页已接入识别控制器。Provider 默认从程序目录 `models\\ggml-large-v3-turbo-q5_0.bin` 加载模型，`AI_VIDEO_WHISPER_MODEL` 仅作为显式覆盖；native DLL 默认从 exe 目录加载，依赖缺失时保留可启动的明确降级状态。
+- 播放器下方字幕框已经消费真实的 `RecognitionEvent`，显示 Whisper 输出的日语原文和媒体时间；没有识别结果时显示加载中、识别中、不可用或失败状态，不使用 Mock 文本冒充真实字幕。
+- 诊断界面显示 Whisper 是否成功加载，并记录识别模块状态、输入窗口的起点/时长/采样数、队列深度、跳过与失败原因、推理耗时、实时倍率、输出数量和输出文本。
+
+验证结果：
+
+- `dart analyze lib` 和 `dart analyze test` 均通过。
+- `flutter test --concurrency=1` 通过 29 项测试，包含 AudioChunk、分窗、队列、控制器 session 隔离/暂停竞态和 Whisper FFI 契约测试；新增短对白静音门控和暂停尾部窗口回归。
+- `native/audio_decoder` Visual Studio 2026 Release 构建通过，生成 `ai_audio_decoder.dll` 和 `audio_decode_smoke.exe`。
+- `native/speech_core` 两套 Release 构建和 CTest 通过；Windows Flutter Release 构建通过；`git diff --check` 通过。
+- 用户明确允许的日语本地 MP4 已完成真实回归：native decoder 成功读取前 30 秒的 44.1 kHz 双声道 PCM，音量统计确认存在语音；仓库外 `ggml-large-v3-turbo-q5_0` 成功输出 2 个日语 final segment。媒体、PCM、完整文本和结果文件均未进入 Git。
+- 修复短对白被误判为静音的问题：8 秒整窗 RMS 会把对白前后的安静部分平均进去，现以 200 ms 短帧进行门控。修复暂停时 decoder 结束标记被忽略的问题，暂停会冲刷已有尾部窗口，并允许已提交的识别完成。
+- 此前 Windows Release 验收构建：版本 `0.6.0`，构建时间 `2026-08-16 22:10:04 +08:00`，构建编号 `phase-6-windows-20260816-221004`。
+- Release 程序目录已包含 `ai_audio_decoder.dll`、`speech_core.dll` 和 `models\\ggml-large-v3-turbo-q5_0.bin`。模型 SHA-256 为 `394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2`；模型二进制约 574 MB，继续由普通 Git 忽略，后续应使用 Git LFS、Release Asset 或安装包分发。
+- 最终播放器人工验收通过：Windows Release `0.6.0`，构建时间 `2026-08-16 23:41:28 +08:00`，构建编号 `phase-6-windows-20260816-234128`。`test.mp4` 在真实播放器中成功产生多个日语字幕事件；4 秒窗口的推理耗时约 1.73-1.81 秒，实时倍率约 0.43-0.45，没有出现队列积压。
+
+当前限制与持续回归项：
+
+- 真实 native decoder 和仓库外 Whisper 模型回归已经完成，识别结果已接入播放器字幕框。播放、暂停、seek、换片、停止和 dispose 的控制器行为已由自动化 fake decoder/recognizer 回归覆盖；真实播放器窗口的人工复核作为后续持续回归，不再阻塞 Phase 6 结项。
+- 当前 Windows CPU 处理这段日语素材的 30 秒窗口约需 50 秒，实时倍率约 1.67；它只是当前机器的性能观察值，不能外推到其他设备。
+- 模型、视频、PCM、结果和 native build 产物继续保持本地忽略，不会写入 Git。
+
+Phase 6 结项状态（2026-08-17）：已完成。核心音频识别链路、播放器字幕接入、诊断可观察性、Windows native 构建、程序目录模型打包、自动化生命周期测试和真实日语视频解码/Whisper 回归均已完成。GPU 后端、iOS Metal、完整字幕 Overlay、翻译和字幕历史不属于 Phase 6，留待后续 Phase。

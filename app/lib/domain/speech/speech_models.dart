@@ -9,10 +9,15 @@ enum RecognitionSource {
 }
 
 class RecognitionRequest {
-  const RecognitionRequest({required this.sessionId, required this.from});
+  const RecognitionRequest({
+    required this.sessionId,
+    required this.from,
+    this.language = 'auto',
+  });
 
   final String sessionId;
   final Duration from;
+  final String language;
 }
 
 class RecognitionEvent {

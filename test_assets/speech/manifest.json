@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": 5,
+  "models": [
+    {
+      "modelId": "ggml-large-v3-turbo-q5_0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+      "sourceRevision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "license": "MIT",
+      "sha256": "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2",
+      "sizeBytes": 574041195
+    }
+  ],
+  "assets": [
+    {
+      "assetId": "phase5-en-generated",
+      "license": "Project-owned local Windows SAPI generated speech; not distributed.",
+      "language": "en",
+      "inputSampleRate": 16000,
+      "inputChannels": 1,
+      "durationMs": 47895,
+      "backgroundNoise": "None intentionally added; synthetic local voice.",
+      "expectedText": "This is a fixed local speech recognition benchmark for the AI Video Player Next project. The audio is generated locally for engineering tests and is not uploaded. We are testing timestamp, transcription, language detection, and the complete path from a WAV file to a native speech event. The first sentence is short. The second sentence is longer and contains several pauses, so the recognizer must preserve useful segment boundaries. The final sentence confirms that cancellation, session isolation, and diagnostic fields will be checked after the basic recognition path is stable.",
+      "allowedTimingErrorMs": 1200,
+      "knownLimitations": "The local WAV and its absolute path are intentionally excluded from Git. The 2026-08-16 CPU regression with auto language detection produced seven final segments, detected en, and completed at a realtime factor of 1.05725."
+    }
+  ],
+  "requirements": {
+    "license": "Record explicit ownership or permission for every local asset.",
+    "audio": "Use a 30 second to 2 minute authorized speech WAV; normalized output is 16 kHz, mono, Float32 PCM.",
+    "metadata": [
+      "assetId",
+      "license",
+      "language",
+      "inputSampleRate",
+      "inputChannels",
+      "durationMs",
+      "backgroundNoise",
+      "expectedText",
+      "allowedTimingErrorMs",
+      "knownLimitations"
+    ],
+    "comparison": {
+      "text": "Trim each segment, normalize contiguous whitespace and ASCII case, then compare the concatenated transcript.",
+      "language": "The detected language must equal the asset language.",
+      "timing": "Every emitted segment must have startMs >= 0, endMs > startMs, and endMs <= durationMs + allowedTimingErrorMs.",
+      "segments": "At least one final segment is required. Adjacent short segments may merge or split."
+    }
+  }
+}

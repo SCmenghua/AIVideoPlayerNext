@@ -6,11 +6,14 @@ import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../app/providers.dart';
+import '../../domain/audio/audio_models.dart';
 import '../../domain/player/browser_media_handoff.dart';
 import '../../domain/player/player_service.dart';
+import '../../domain/speech/speech_models.dart';
 import '../../domain/subtitles/subtitle_timeline.dart';
 import '../browser/browser_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
+import '../audio/recognition_controller.dart';
 import 'media_kit_player_service.dart';
 
 enum _WorkbenchView { player, browser, diagnostics }
@@ -25,7 +28,13 @@ class PlayerScreen extends ConsumerStatefulWidget {
 class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   final SubtitleTimeline _timeline = SubtitleTimeline();
   StreamSubscription<PlaybackSnapshot>? _playbackSubscription;
+  StreamSubscription<RecognitionEvent>? _recognitionSubscription;
+  StreamSubscription<RecognitionDiagnostics>?
+      _recognitionDiagnosticsSubscription;
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
+  RecognitionDiagnostics _recognitionDiagnostics =
+      const RecognitionDiagnostics.idle();
+  String? _recognitionSessionId;
   _WorkbenchView _activeView = _WorkbenchView.player;
   bool _browserHasBeenOpened = false;
   bool _isOpeningBrowserMedia = false;
@@ -39,6 +48,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ref.read(playerServiceProvider).snapshots.listen((snapshot) {
       if (mounted) setState(() => _snapshot = snapshot);
     });
+    final recognition = ref.read(recognitionControllerProvider);
+    _recognitionDiagnostics = recognition.diagnostic;
+    _recognitionSubscription = recognition.events.listen(_onRecognitionEvent);
+    _recognitionDiagnosticsSubscription =
+        recognition.diagnostics.listen(_onRecognitionDiagnostics);
+  }
+
+  void _onRecognitionDiagnostics(RecognitionDiagnostics diagnostics) {
+    if (!mounted) return;
+    final sessionId = diagnostics.sessionId;
+    if (sessionId != null && sessionId != _recognitionSessionId) {
+      _recognitionSessionId = sessionId;
+      _timeline.reset(sessionId: sessionId);
+    }
+    setState(() => _recognitionDiagnostics = diagnostics);
+  }
+
+  void _onRecognitionEvent(RecognitionEvent event) {
+    if (!mounted || event.sessionId != _recognitionSessionId) return;
+    _timeline.apply(event);
+    setState(() {});
   }
 
   Future<void> _openLocalMedia() async {
@@ -68,7 +98,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _seekBy(Duration offset) =>
-      ref.read(playerServiceProvider).seek(_snapshot.position + offset);
+      ref.read(recognitionControllerProvider).seek(_snapshot.position + offset);
 
   void _showView(_WorkbenchView view) {
     if (_activeView == view &&
@@ -126,7 +156,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     try {
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => _FullscreenPlayerScreen(player: player),
+          builder: (_) => _FullscreenPlayerScreen(
+            player: player,
+            recognition: ref.read(recognitionControllerProvider),
+          ),
         ),
       );
     } finally {
@@ -140,6 +173,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void dispose() {
     _playbackSubscription?.cancel();
+    _recognitionSubscription?.cancel();
+    _recognitionDiagnosticsSubscription?.cancel();
     super.dispose();
   }
 
@@ -175,7 +210,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     );
     if (!_browserHasBeenOpened) {
       return _activeView == _WorkbenchView.diagnostics
-          ? DiagnosticsWorkspace(logs: ref.read(diagnosticsLogProvider))
+          ? DiagnosticsWorkspace(
+              logs: ref.read(diagnosticsLogProvider),
+              recognition: _recognitionDiagnostics,
+            )
           : playerWorkspace;
     }
     return IndexedStack(
@@ -183,7 +221,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       children: [
         playerWorkspace,
         BrowserWorkspace(onMediaDetected: _openBrowserMedia),
-        DiagnosticsWorkspace(logs: ref.read(diagnosticsLogProvider)),
+        DiagnosticsWorkspace(
+          logs: ref.read(diagnosticsLogProvider),
+          recognition: _recognitionDiagnostics,
+        ),
       ],
     );
   }
@@ -396,7 +437,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             max: durationMs > 0 ? durationMs.toDouble() : 1,
             onChanged: canControl && durationMs > 0
                 ? (value) => ref
-                    .read(playerServiceProvider)
+                    .read(recognitionControllerProvider)
                     .seek(Duration(milliseconds: value.round()))
                 : null,
           ),
@@ -504,9 +545,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               child: Slider(
                 value: _snapshot.volume,
                 max: 100,
-                onChanged: hasMedia
-                    ? ref.read(playerServiceProvider).setVolume
-                    : null,
+                onChanged:
+                    hasMedia ? ref.read(playerServiceProvider).setVolume : null,
               ),
             ),
           ],
@@ -521,22 +561,62 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
       );
 
-  Widget _subtitlePanel() => _Panel(
-        title: '字幕',
-        icon: Icons.subtitles_outlined,
-        child: _timeline.finals.isEmpty
-            ? const Text('尚无字幕', style: TextStyle(color: Color(0xFF9EA7AC)))
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: _timeline.finals.reversed
-                    .take(3)
-                    .map((entry) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Text(entry.original),
-                        ))
-                    .toList(),
-              ),
-      );
+  Widget _subtitlePanel() {
+    final active = _timeline.at(_snapshot.position);
+    final latest = _timeline.finals.isEmpty ? null : _timeline.finals.last;
+    final lag = latest == null
+        ? null
+        : _snapshot.position > latest.end
+            ? _snapshot.position - latest.end
+            : Duration.zero;
+    final entries =
+        active.isNotEmpty ? active : (latest == null ? const [] : [latest]);
+    return _Panel(
+      title: '字幕',
+      icon: Icons.subtitles_outlined,
+      child: _timeline.finals.isEmpty
+          ? Text(
+              _subtitleWaitingLabel(),
+              style: const TextStyle(color: Color(0xFF9EA7AC)),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (active.isEmpty &&
+                    lag != null &&
+                    lag > const Duration(seconds: 2))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      '识别结果落后当前播放位置 ${_formatDuration(lag)}',
+                      style: const TextStyle(
+                          color: Color(0xFFFFD166), fontSize: 12),
+                    ),
+                  ),
+                ...entries.map((entry) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        '${_format(entry.start)} - ${_format(entry.end)}\n${entry.original}',
+                      ),
+                    )),
+              ],
+            ),
+    );
+  }
+
+  String _formatDuration(Duration duration) =>
+      '${duration.inMinutes.toString().padLeft(2, '0')}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
+
+  String _subtitleWaitingLabel() =>
+      switch (_recognitionDiagnostics.recognizer.state) {
+        WindowRecognitionState.unavailable =>
+          'Whisper 不可用：${_recognitionDiagnostics.recognizer.message ?? '缺少模型或 DLL'}',
+        WindowRecognitionState.loading => 'Whisper 正在加载模型',
+        WindowRecognitionState.recognizing => 'Whisper 正在识别音频',
+        WindowRecognitionState.error =>
+          'Whisper 识别失败：${_recognitionDiagnostics.recognizer.message ?? '请查看诊断日志'}',
+        _ => '尚无真实识别字幕',
+      };
 
   String _format(Duration duration) =>
       '${duration.inMinutes.toString().padLeft(2, '0')}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
@@ -549,12 +629,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 }
 
 class _FullscreenPlayerScreen extends StatefulWidget {
-  const _FullscreenPlayerScreen({required this.player});
+  const _FullscreenPlayerScreen({
+    required this.player,
+    required this.recognition,
+  });
 
   final MediaKitPlayerService player;
+  final RecognitionController recognition;
 
   @override
-  State<_FullscreenPlayerScreen> createState() => _FullscreenPlayerScreenState();
+  State<_FullscreenPlayerScreen> createState() =>
+      _FullscreenPlayerScreenState();
 }
 
 class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
@@ -657,7 +742,7 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                       ? _snapshot.duration.inMilliseconds.toDouble()
                       : 1,
                   onChanged: _snapshot.duration > Duration.zero
-                      ? (value) => widget.player
+                      ? (value) => widget.recognition
                           .seek(Duration(milliseconds: value.round()))
                       : null,
                 ),

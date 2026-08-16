@@ -7,12 +7,18 @@ coverage/
 
 # Native build output
 app/windows/flutter/ephemeral/
+native/speech_core/build*/
+native/audio_decoder/build*/
+native/whisper-cli-build/
+phase5-*.jsonl
 app/android/.gradle/
 app/android/app/build/
 app/ios/Pods/
 
 # Local-only models and media
 models/
+!app/windows/models/
+!app/windows/models/README.md
 test_assets/media/
 *.gguf
 *.bin
