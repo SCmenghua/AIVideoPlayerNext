@@ -89,6 +89,25 @@ jobs:
           echo "构建时间：$app_build_time"
           echo "构建编号：$app_build_id"
 
+      - name: Download and verify bundled Whisper model
+        env:
+          WHISPER_MODEL_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+          WHISPER_MODEL_SHA256: 394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2
+          WHISPER_MODEL_SIZE: 574041195
+        run: |
+          model_path="$RUNNER_TEMP/ggml-large-v3-turbo-q5_0.bin"
+          curl --fail --location --retry 3 --retry-delay 5 --output "$model_path" "$WHISPER_MODEL_URL"
+
+          actual_size="$(stat -f '%z' "$model_path")"
+          test "$actual_size" = "$WHISPER_MODEL_SIZE"
+
+          actual_sha256="$(shasum -a 256 "$model_path" | awk '{print toupper($1)}')"
+          test "$actual_sha256" = "$WHISPER_MODEL_SHA256"
+
+          echo "WHISPER_MODEL_PATH=$model_path" >> "$GITHUB_ENV"
+          echo "Whisper model downloaded"
+          echo "Whisper model SHA-256 verified: $actual_sha256"
+
       - name: Build unsigned iOS application
         run: |
           flutter build ios --release --no-codesign \
@@ -102,6 +121,23 @@ jobs:
           test -d "$framework_path"
           test -f "$framework_path/Mpv"
           file "$framework_path/Mpv"
+
+      - name: Embed and verify bundled Whisper model
+        run: |
+          app_path="build/ios/iphoneos/Runner.app"
+          bundled_model="$app_path/ggml-large-v3-turbo-q5_0.bin"
+
+          cp "$WHISPER_MODEL_PATH" "$bundled_model"
+          test -f "$bundled_model"
+
+          actual_size="$(stat -f '%z' "$bundled_model")"
+          test "$actual_size" = "574041195"
+          actual_sha256="$(shasum -a 256 "$bundled_model" | awk '{print toupper($1)}')"
+          test "$actual_sha256" = "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2"
+
+          echo "Whisper model embedded in Runner.app"
+          echo "Embedded model size: $actual_size bytes"
+          echo "Embedded model SHA-256 verified: $actual_sha256"
 
       - name: Package unsigned IPA
         env:
@@ -118,6 +154,16 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$package_root/Payload" "build/$artifact_name"
           test -f "build/$artifact_name"
 
+          ipa_size="$(stat -f '%z' "build/$artifact_name")"
+          echo "Unsigned IPA size: $ipa_size bytes"
+          test "$ipa_size" -gt 500000000
+
+          bundled_model="Payload/Runner.app/ggml-large-v3-turbo-q5_0.bin"
+          unzip -Z1 "build/$artifact_name" | grep -Fx "$bundled_model"
+          packaged_sha256="$(unzip -p "build/$artifact_name" "$bundled_model" | shasum -a 256 | awk '{print toupper($1)}')"
+          test "$packaged_sha256" = "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2"
+          echo "Whisper model verified inside IPA: $packaged_sha256"
+
           echo "IPA_PATH=app/build/$artifact_name" >> "$GITHUB_ENV"
 
       - name: Upload unsigned IPA
@@ -127,3 +173,4 @@ jobs:
           path: ${{ env.IPA_PATH }}
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
