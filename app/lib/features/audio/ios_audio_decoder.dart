@@ -88,6 +88,7 @@ class IosAudioDecoder implements AudioDecoder {
       ));
     } on PlatformException catch (error) {
       _onError(error);
+      _sessionId = null;
       throw IosAudioDecoderException(error.message ?? 'iOS 音频解码初始化失败');
     }
   }
@@ -95,7 +96,7 @@ class IosAudioDecoder implements AudioDecoder {
   @override
   Future<void> start() async {
     _ensureUsable();
-    if (_sessionId == null) return;
+    if (_sessionId == null || _status.state == AudioDecoderState.error) return;
     await _methods.invokeMethod<void>('start');
     _emit(_status.copyWith(state: AudioDecoderState.running));
   }
@@ -112,10 +113,16 @@ class IosAudioDecoder implements AudioDecoder {
     _ensureUsable();
     if (_sessionId == null) return;
     _emit(_status.copyWith(state: AudioDecoderState.seeking));
-    await _methods.invokeMethod<void>('seek', <String, Object?>{
-      'positionMs': position.inMilliseconds,
-    });
-    _emit(_status.copyWith(state: AudioDecoderState.ready));
+    try {
+      await _methods.invokeMethod<void>('seek', <String, Object?>{
+        'positionMs': position.inMilliseconds,
+      });
+      _emit(_status.copyWith(state: AudioDecoderState.ready));
+    } on PlatformException catch (error) {
+      _onError(error);
+      _sessionId = null;
+      throw IosAudioDecoderException(error.message ?? 'iOS 音频跳转失败');
+    }
   }
 
   @override

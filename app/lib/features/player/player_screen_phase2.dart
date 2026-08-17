@@ -39,6 +39,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _browserHasBeenOpened = false;
   bool _isOpeningBrowserMedia = false;
   bool _isFullscreenOpen = false;
+  double? _scrubPositionMs;
 
   @override
   void initState() {
@@ -99,6 +100,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Future<void> _seekBy(Duration offset) =>
       ref.read(recognitionControllerProvider).seek(_snapshot.position + offset);
+
+  void _previewSeek(double value) => setState(() => _scrubPositionMs = value);
+
+  void _commitSeek(double value) {
+    setState(() => _scrubPositionMs = null);
+    unawaited(
+      ref
+          .read(recognitionControllerProvider)
+          .seek(Duration(milliseconds: value.round())),
+    );
+  }
 
   void _showView(_WorkbenchView view) {
     if (_activeView == view &&
@@ -433,13 +445,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
           const SizedBox(height: 8),
           Slider(
-            value: positionMs,
+            value: (_scrubPositionMs ?? positionMs)
+                .clamp(0, durationMs > 0 ? durationMs.toDouble() : 1),
             max: durationMs > 0 ? durationMs.toDouble() : 1,
             onChanged: canControl && durationMs > 0
-                ? (value) => ref
-                    .read(recognitionControllerProvider)
-                    .seek(Duration(milliseconds: value.round()))
+                ? _previewSeek
                 : null,
+            onChangeEnd: canControl && durationMs > 0 ? _commitSeek : null,
           ),
           _playerControls(canControl: canControl, hasMedia: hasMedia),
           _subtitlePanel(),
@@ -645,6 +657,7 @@ class _FullscreenPlayerScreen extends StatefulWidget {
 class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
   StreamSubscription<PlaybackSnapshot>? _subscription;
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
+  double? _scrubPositionMs;
 
   @override
   void initState() {
@@ -673,6 +686,15 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
   }
 
   Future<void> _close() => Navigator.of(context).maybePop();
+
+  void _previewSeek(double value) => setState(() => _scrubPositionMs = value);
+
+  void _commitSeek(double value) {
+    setState(() => _scrubPositionMs = null);
+    unawaited(
+      widget.recognition.seek(Duration(milliseconds: value.round())),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -732,7 +754,9 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                 right: 20,
                 bottom: 56,
                 child: Slider(
-                  value: _snapshot.position.inMilliseconds.toDouble().clamp(
+                  value: (_scrubPositionMs ??
+                          _snapshot.position.inMilliseconds.toDouble())
+                      .clamp(
                         0,
                         _snapshot.duration.inMilliseconds > 0
                             ? _snapshot.duration.inMilliseconds.toDouble()
@@ -742,8 +766,10 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                       ? _snapshot.duration.inMilliseconds.toDouble()
                       : 1,
                   onChanged: _snapshot.duration > Duration.zero
-                      ? (value) => widget.recognition
-                          .seek(Duration(milliseconds: value.round()))
+                      ? _previewSeek
+                      : null,
+                  onChangeEnd: _snapshot.duration > Duration.zero
+                      ? _commitSeek
                       : null,
                 ),
               ),

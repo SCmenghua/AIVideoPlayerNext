@@ -17,6 +17,8 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var sourcePath = ""
   private var accepting = false
   private var generation = 0
+  private var securityScopedURL: URL?
+  private var securityScopeActive = false
 
   func register(with registrar: FlutterApplicationRegistrar) {
     let methods = FlutterMethodChannel(
@@ -39,8 +41,14 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
         case "pause": self.pause(); result(nil)
         case "seek":
           let args = call.arguments as? [String: Any]
-          self.seek(milliseconds: args?["positionMs"] as? Int ?? 0)
-          result(nil)
+          do {
+            try self.seek(milliseconds: args?["positionMs"] as? Int ?? 0)
+            result(nil)
+          } catch let error as BridgeError {
+            result(FlutterError(code: "AUDIO", message: error.description, details: nil))
+          } catch {
+            result(FlutterError(code: "AUDIO", message: error.localizedDescription, details: nil))
+          }
         case "stop": self.stop(); result(nil)
         default: result(FlutterMethodNotImplemented)
         }
@@ -71,8 +79,15 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private func open(path: String, sessionID: String, startMilliseconds: Int = 0) throws {
     stop()
     guard path.hasPrefix("/") else { throw BridgeError.message("iOS 识别目前只支持本地文件") }
-    let url = URL(fileURLWithPath: path)
-    guard FileManager.default.fileExists(atPath: path) else { throw BridgeError.message("本地媒体文件不存在") }
+    guard let url = acquireReadableURL(path: path) else {
+      throw BridgeError.message("本地媒体文件不存在")
+    }
+    var keepSecurityScope = false
+    defer {
+      if !keepSecurityScope {
+        releaseSecurityScopedAccess()
+      }
+    }
     let asset = AVURLAsset(url: url)
     guard let track = asset.tracks(withMediaType: .audio).first else {
       throw BridgeError.message("媒体没有可读取的音频轨道")
@@ -97,9 +112,32 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     self.reader = reader
     self.output = output
     self.sessionID = sessionID
-    self.sourcePath = path
+    self.sourcePath = url.path
     self.accepting = false
     self.generation += 1
+    keepSecurityScope = true
+  }
+
+  /// A document-picker URL may be security-scoped. Keep access alive for the
+  /// complete decoder session so a later seek can reopen the same file.
+  private func acquireReadableURL(path: String) -> URL? {
+    let directURL = URL(fileURLWithPath: path)
+    var candidates = [directURL]
+    if let decodedPath = path.removingPercentEncoding,
+       decodedPath != path {
+      candidates.append(URL(fileURLWithPath: decodedPath))
+    }
+
+    for candidate in candidates {
+      let acquired = candidate.startAccessingSecurityScopedResource()
+      if FileManager.default.fileExists(atPath: candidate.path) {
+        securityScopedURL = candidate
+        securityScopeActive = acquired
+        return candidate
+      }
+      if acquired { candidate.stopAccessingSecurityScopedResource() }
+    }
+    return nil
   }
 
   private func start() {
@@ -153,21 +191,30 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     if shouldFlush { sendTail(sessionID: session, ended: false) }
   }
 
-  private func seek(milliseconds: Int) {
-    guard !sourcePath.isEmpty, !sessionID.isEmpty else { return }
+  private func seek(milliseconds: Int) throws {
+    guard !sourcePath.isEmpty, !sessionID.isEmpty else {
+      throw BridgeError.message("iOS 音频解码器尚未打开")
+    }
     let path = sourcePath
     let session = sessionID
-    do {
-      try open(path: path, sessionID: session, startMilliseconds: milliseconds)
-    } catch {
-      send(["type": "error", "message": error.localizedDescription])
-    }
+    try open(path: path, sessionID: session, startMilliseconds: milliseconds)
   }
 
   private func stop() {
     lock.lock(); accepting = false; generation += 1; lock.unlock()
     worker?.cancel(); worker = nil
     reader?.cancelReading(); reader = nil; output = nil
+    sessionID = ""
+    sourcePath = ""
+    releaseSecurityScopedAccess()
+  }
+
+  private func releaseSecurityScopedAccess() {
+    if securityScopeActive {
+      securityScopedURL?.stopAccessingSecurityScopedResource()
+    }
+    securityScopedURL = nil
+    securityScopeActive = false
   }
 
   private func waitForTimeline(
