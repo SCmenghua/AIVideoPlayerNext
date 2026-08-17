@@ -4,7 +4,7 @@
 >
 > 当前项目：`AIVideoPlayerNext`
 > 当前阶段：`Phase 6.5`
-> 计划状态：进行中（Windows Vulkan + CPU fallback 已完成；iOS 代码补齐中，真机验收暂缓）
+> 计划状态：已完成（Windows Vulkan + CPU fallback、iOS Metal 真机验收和 IPA 回归均已完成）
 > 软件版本目标：`0.6.5`
 > 更新日期：2026-08-17
 
@@ -40,7 +40,7 @@ AudioWindow / RecognitionEvent
 
 ## 3. 本阶段完成定义
 
-Phase 6.5 的 Windows 子目标在以下条件全部满足后算完成；整个 Phase 6.5 仍必须追加 iOS Metal 真机验证：
+Phase 6.5 的 Windows 和 iOS 子目标均已完成以下验收；后续预读、翻译提前处理和网络媒体音频获取不属于本阶段结项范围。
 
 1. Windows 建立独立的 whisper.cpp/ggml Vulkan Release 构建，且不破坏已经通过回归的 CPU 构建。
 2. Windows 在支持 Vulkan 的真实设备上，用真实模型和固定音频或本地视频完成识别；日志能够证明实际后端为 `Vulkan`，并显示实际 GPU 设备名。
@@ -108,7 +108,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 1：盘点构建工具链和 GPU 运行环境
 
-状态：`已完成（Windows；iOS 前置条件待 macOS 环境确认）`
+状态：`已完成（Windows Vulkan；iOS Metal 构建条件与真机环境已确认）`
 
 任务：
 
@@ -159,7 +159,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 4：实现 Windows Vulkan 运行时选择与 CPU fallback
 
-状态：`部分完成（Windows 代码与 CPU 回退路径；异常注入待验收）`
+状态：`已完成（Windows Vulkan、CPU fallback 和明确失败状态已验证）`
 
 任务：
 
@@ -176,7 +176,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 5：接入 Dart Provider、诊断页和完整日志
 
-状态：`部分完成（Windows 代码、自动化测试和 Release 已验证；播放器人工回归待复测）`
+状态：`已完成（Windows/iOS 诊断、日志和播放器回归已验证）`
 
 任务：
 
@@ -193,7 +193,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 6：完成 iOS Metal 原生路径
 
-状态：`进行中（代码补齐阶段，未真机验证）`
+状态：`已完成（真实 iPhone Metal、模型加载、识别和生命周期回归已验证）`
 
 任务：
 
@@ -207,11 +207,11 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 输出物：iOS Metal 构建配置、真机 Release/Debug 验证记录、Metal/CPU fallback 结果。
 
-完成条件：代码路径和 macOS/Xcode 集成准备完成；真实 iPhone 日志能够确认 `Metal` 或明确的 `CPU` fallback 后，才可把本步骤和 Phase 6.5 标为完成。Windows 本地不能替代这一完成条件。
+完成条件：已满足。macOS/Xcode Release 构建和未签名 IPA 通过，真实 iPhone 日志确认实际后端为 `Metal`，设备为 `Apple A19 GPU`，模型加载和日语字幕识别成功；暂停、拖动进度、继续识别和重复操作完成回归。
 
 ### Step 7：固定输入和真实视频性能回归
 
-状态：`未开始`
+状态：`已完成（Windows Vulkan/CPU 对照和 iOS 真实视频识别完成；性能优化项留作后续）`
 
 任务：
 
@@ -228,7 +228,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 8：异常、回退和生命周期回归
 
-状态：`未开始`
+状态：`已完成（Windows fallback、iOS 生命周期和 seek 恢复回归完成）`
 
 任务：
 
@@ -245,7 +245,7 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 
 ### Step 9：版本、打包、文档和最终验收
 
-状态：`未开始`
+状态：`已完成（0.6.5 Release、未签名 IPA、模型内置和文档结项完成）`
 
 任务：
 
@@ -254,13 +254,23 @@ CPU、Vulkan、Metal 对照必须使用相同模型文件、相同 PCM、相同�
 - iOS 构建在 macOS/Xcode 注入同样字段，保证诊断页标题和导出日志可确认实际包版本。
 - 更新 `NEW.md`、`PLAN.md`、README/CI 或打包说明中的后端、构建和验证规则。
 - 检查 Release 目录中的 `speech_core`、Vulkan 运行时资源、iOS Metal resources 和模型路径；不把开发 SDK、驱动、视频、模型和 native build 产物加入 Git。
-- 运行完整验收矩阵；未完成 iOS 真机验证时保留为进行中，不标记 Phase 6.5 已完成。
+- 运行完整验收矩阵；iOS 真机验证已完成，Phase 6.5 可以结项。
 
 输出物：Windows `0.6.5` Release、iOS `0.6.5` 真机包或明确阻塞记录、完整测试记录、文档更新。
 
-完成条件：所有第 3 节完成定义均满足，且 `git diff --check`、版本检查、日志字段检查和 Git 忽略检查通过。
+完成条件：已满足。Windows Vulkan/CPU、iOS Metal、版本与打包、诊断字段、生命周期和真实播放器回归均已完成；`git diff --check`、版本检查、日志字段检查和 Git 忽略检查通过。
 
-## 7. 计划中的测试命令
+## 7. 阶段结项记录
+
+Phase 6.5 结项日期：2026-08-17。
+
+- Windows 使用 Vulkan，保留 CPU fallback；未接入 CUDA 或 OpenGL 推理后端。
+- Windows 真实模型、Vulkan 设备识别、CPU 对照、fallback、Release 启动和播放器字幕回归完成。
+- iOS 未签名 IPA 通过 GitHub Actions 构建并内置约 574 MB Whisper 模型；真实 iPhone 日志确认 `Metal`、`GPU: true`、设备 `Apple A19 GPU`，并成功输出日语字幕。
+- iOS 播放、暂停、拖动进度、继续播放、重复 seek、识别窗口和字幕时间轴完成回归；首次 seek 暴露的文件访问/reader 重建问题已修复并复测。
+- 当前已知的优化方向是本地视频预读和识别/翻译提前处理；字幕显示仍以视频媒体时间轴为准。网络视频预读另行设计，不作为本阶段范围。
+
+## 8. 计划中的测试命令
 
 以下命令中的模型、音频和视频路径均为仓库外路径；实际参数以本机工具链和 Step 1 结果为准：
 
@@ -314,7 +324,7 @@ xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Release \
 - iPhone 日志中的 `actualBackend=Metal`，或 `actualBackend=CPU` 与 fallback 原因。
 - CPU/GPU 相同输入的模型加载耗时、窗口推理耗时、实时倍率和输出对照。
 
-## 8. 风险与决策门
+## 9. 风险与决策门
 
 ### Vulkan 工具链不可用
 
@@ -344,7 +354,7 @@ Windows 无法编译或验证 Metal。若当前没有 macOS/Xcode/真机，本�
 
 GPU context、模型、shader、FFI 字符串和 worker 必须有清晰释放路径。重复打开、暂停、seek、换片和 dispose 后做 handle/内存检查，防止只在首次播放时工作。
 
-## 9. Phase 6 前置结果
+## 10. Phase 6 前置结果
 
 | 项目 | 状态 | 备注 |
 |---|---|---|
@@ -355,24 +365,24 @@ GPU context、模型、shader、FFI 字符串和 worker 必须有清晰释放路
 | 真实日语视频回归 | 已完成 | 识别结果已进入播放器下方字幕框 |
 | Windows CPU 基线 | 已完成 | 作为 Phase 6.5 CPU 对照，不代表其他设备性能 |
 | Windows Vulkan GPU | 已完成 | 实际运行于 NVIDIA GeForce RTX 5060 Laptop GPU |
-| iOS Metal GPU | 待验证 | 必须在 macOS/Xcode 和真实 iPhone 验证后 Phase 6.5 才能结项 |
+| iOS Metal GPU | 已完成 | 真实 iPhone 日志确认 `Metal`、`GPU: true` 和 `Apple A19 GPU` |
 
-## 10. 本阶段最终状态记录
+## 11. 本阶段最终状态记录
 
-本节记录 Phase 6.5 的当前执行结果；iOS 真机验证完成前，不得写入整体结项结论。
+本节记录 Phase 6.5 的执行结果；历史条目保留当时状态，最终结项记录以本节末和“阶段结项记录”为准。
 
 初始状态：
 
 - Windows 目标后端为 Vulkan，CPU 为明确可观察的 fallback；不启用 CUDA 或 OpenGL。
 - 版本为 `0.6.5`，并已生成带真实构建标识的 Windows Release 包。
-- iOS Metal 尚未实现或验证，仍是 Phase 6.5 的未完成验收项；本阶段不将 Windows 结果外推为 iOS GPU 支持。
+- iOS Metal 已在 macOS/Xcode 和真实 iPhone 上完成验证；本阶段不将 Windows 结果外推为 iOS GPU 支持，两个平台分别保留各自的运行时日志。
 - 模型、视频、PCM、测试结果、GPU SDK/驱动和 native build 产物继续保持仓库外或 Git 忽略。
 
 #### Phase 6.5 执行记录
 
 | 日期 | 步骤 | 状态 | 说明 |
 |---|---|---|---|
-| 2026-08-17 | 初始化计划 | 进行中 | 已建立 Windows Vulkan 与 CPU fallback 的执行边界；iOS Metal 真机验证仍待完成 |
+| 2026-08-17 | 初始化计划（历史快照） | 已完成 | 当时已建立 Windows Vulkan 与 CPU fallback 的执行边界；iOS Metal 真机验证随后已完成 |
 | 2026-08-17 | Windows ABI/FFI | 已完成 | 新增 ABI v2、请求/实际后端、GPU 状态、设备名、回退原因和后端说明；旧 CPU 创建函数保持兼容 |
 | 2026-08-17 | Windows fallback | 已完成（代码） | Vulkan 初始化失败或首个窗口运行失败时释放 GPU context、重建 CPU context 并重试一次；失败状态不会伪造为 CPU |
 | 2026-08-17 | Provider/诊断 | 已完成（代码） | Windows 默认请求 Vulkan；支持 `AI_VIDEO_WHISPER_BACKEND=auto|vulkan|cpu`，诊断页和日志显示后端状态；版本默认值更新为 `0.6.5` |
@@ -387,6 +397,8 @@ GPU context、模型、shader、FFI 字符串和 worker 必须有清晰释放路
 | 2026-08-17 | Windows 0.6.5 Release | 已完成（Windows） | 构建时间 `2026-08-17 01:59:36 +08:00`；构建编号 `phase-6.5-windows-20260817-015936`；Release 包内 `speech_core.dll` 与 Vulkan 构建产物 SHA-256 相同 |
 | 2026-08-17 | Windows Release 启动修复 | 已完成（Windows） | 定位为 media_kit ANGLE 携带的旧 `vulkan-1.dll` 抢先加载，导致 ggml Vulkan 模型初始化时 `0xC0000005`；CMake 已排除该 loader，Release 包改用系统 Vulkan runtime；原始启动命令复测 8 秒稳定，日志确认 `using Vulkan0 backend` |
 | 2026-08-17 | iOS Phase 6.5 跨平台代码补齐 | 已完成（代码，未验证） | 已接入 iOS `AVAssetReader` 本地文件 PCM、媒体时间戳、暂停/seek/停止生命周期、`DynamicLibrary.process()`、Metal/CPU backend 请求与 fallback C ABI，以及 Xcode/CMake 构建脚本；macOS/Xcode、Simulator 和真实 iPhone 尚未验证 |
+| 2026-08-17 | iOS Metal 与真实设备验收 | 已完成 | GitHub Actions 未签名 IPA 内置 Whisper 模型；真实 iPhone 确认 `Metal`、`GPU: true`、`Apple A19 GPU`，模型加载和日语字幕输出成功 |
+| 2026-08-17 | iOS seek 生命周期回归 | 已完成 | 修复稳定媒体副本、security-scoped 访问、AVAssetReader 重建错误清理和拖动结束后单次提交；暂停、拖动、继续识别和重复 seek 基本稳定 |
 
 #### 最终结项记录
 
@@ -394,7 +406,7 @@ GPU context、模型、shader、FFI 字符串和 worker 必须有清晰释放路
 - Windows CPU/Vulkan 性能与识别结果对照：已完成；同输入文本、语言和时间轴一致，性能数据见执行记录。
 - 版本、构建时间和构建编号：已完成；Windows `0.6.5`，构建时间 `2026-08-17 01:59:36 +08:00`，构建编号 `phase-6.5-windows-20260817-015936`。
 - Windows 子目标状态：已完成（Vulkan + CPU fallback）。
-- iOS Phase 6/6.5 代码状态：跨平台代码和 Xcode 集成准备已完成；Phase 6 iOS 单独验收暂缓，待统一 iPhone 回归。
-- iOS Phase 6/6.5 验收状态：未完成；本 Windows 环境无法验证 Swift、Xcode、Metal、iOS PCM 或真实设备生命周期。
-- Phase 6.5 结项状态：进行中（iOS Metal 及真实 iPhone 验收尚未完成）。
+- iOS Phase 6/6.5 代码状态：跨平台代码、Xcode 集成、未签名 IPA 和内置模型均已完成。
+- iOS Phase 6/6.5 验收状态：已完成；真实 iPhone 已验证 Swift、Metal、iOS PCM、播放时间轴、字幕识别和生命周期。
+- Phase 6.5 结项状态：已完成（2026-08-17）。
 - 后续产品项：本地媒体预读、首次真实推理预热与网络媒体预读策略待 Phase 6.5 结项后进入下一阶段，服务于字幕和翻译相对播放器时间轴的准时显示。
