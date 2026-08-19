@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_video_player_next/domain/audio/audio_models.dart';
+import 'package:ai_video_player_next/domain/audio/recognition_media_source.dart';
 import 'package:ai_video_player_next/domain/audio/audio_window_planner.dart';
 import 'package:ai_video_player_next/domain/audio/recognition_queue.dart';
 import 'package:ai_video_player_next/domain/player/player_service.dart';
@@ -339,6 +340,44 @@ void main() {
     await player.dispose();
   });
 
+  test('iOS network recognition fully caches media before opening decoder',
+      () async {
+    final player = MockPlayerService();
+    final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
+    _IosCacheRecordingWorker? worker;
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: FakeWindowRecognitionService(),
+      planner: _planner(),
+      isIosPlatform: () => true,
+      mediaCacheWorkerFactory: ({required source, required sessionId}) {
+        return worker = _IosCacheRecordingWorker(
+          source: source,
+          sessionId: sessionId,
+        );
+      },
+    );
+
+    await player.open(
+      MediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+    );
+    await player.play();
+    await _settle();
+
+    expect(worker, isNotNull);
+    expect(worker!.prepareCalls, 1);
+    expect(worker!.proxyCalls, 0);
+    expect(decoder.openRequest?.source.uri, Uri.file(r'C:\cache\media.mp4'));
+
+    await controller.dispose();
+    await player.dispose();
+  });
+
   test('high watermark pauses and low watermark resumes the decoder', () async {
     final player = MockPlayerService();
     final decoder = FakeAudioDecoder(
@@ -564,5 +603,49 @@ class _RecordingMediaCacheWorker extends RecognitionMediaCacheWorker {
     required int epoch,
   }) {
     priorityPositions.add(playbackPosition);
+  }
+}
+
+class _IosCacheRecordingWorker extends RecognitionMediaCacheWorker {
+  _IosCacheRecordingWorker({
+    required super.source,
+    required super.sessionId,
+  });
+
+  int prepareCalls = 0;
+  int proxyCalls = 0;
+
+  @override
+  Future<RecognitionMediaCacheSnapshot> prepare() async {
+    ++prepareCalls;
+    return RecognitionMediaCacheSnapshot(
+      sessionId: sessionId,
+      mode: RecognitionMediaReadMode.localFile,
+      state: RecognitionMediaCacheState.complete,
+      cursor: RecognitionMediaCursor(
+        sessionId: sessionId,
+        mode: RecognitionMediaReadMode.localFile,
+      ),
+      path: r'C:\cache\media.mp4',
+      contentLength: 1234,
+    );
+  }
+
+  @override
+  Future<RecognitionMediaCacheSnapshot> startProxy() async {
+    ++proxyCalls;
+    throw StateError('iOS must not start the recognition proxy');
+  }
+}
+
+class _RecordingAudioDecoder extends FakeAudioDecoder {
+  _RecordingAudioDecoder({required super.chunks});
+
+  AudioDecoderRequest? openRequest;
+
+  @override
+  Future<void> open(AudioDecoderRequest request) async {
+    openRequest = request;
+    await super.open(request);
   }
 }

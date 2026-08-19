@@ -323,7 +323,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     if (!session.recognitionReady) {
       final status = _recognitionDiagnostics.recognizer;
-      if (status.state == WindowRecognitionState.unavailable) {
+      final decoder = _recognitionDiagnostics.decoder;
+      if (decoder.state == AudioDecoderState.error) {
+        reasons.add(
+          '音频解码失败，Whisper 尚未收到可识别的 PCM：${decoder.message ?? '请查看诊断日志'}',
+        );
+      } else if (_recognitionDiagnostics.mediaPreparationState == 'failed') {
+        reasons.add(
+          '识别媒体缓存失败：${_recognitionDiagnostics.mediaPreparationMessage ?? '请查看诊断日志'}',
+        );
+      } else if (status.state == WindowRecognitionState.unavailable) {
         reasons.add(
           'Whisper 没有可用的识别服务：${status.message ?? '未找到识别运行时或模型'}',
         );
@@ -372,7 +381,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _userPlay() async {
     final session = _startup;
     if (session != null) {
-      await _releaseStartup(session, reason: '用户主动点击播放');
+      ref.read(diagnosticsLogProvider).info('播放器', '启动预备期间忽略播放请求', {
+        '已等待': widget.now().difference(session.startedAt),
+      });
       return;
     }
     await ref.read(playerServiceProvider).play();
@@ -615,7 +626,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Widget _playerPanel() {
     final hasMedia = _snapshot.source != null;
-    final canControl = hasMedia && _snapshot.status != PlaybackStatus.loading;
+    final canControl = hasMedia &&
+        _snapshot.status != PlaybackStatus.loading &&
+        _startup == null;
     final durationMs = _snapshot.duration.inMilliseconds;
     final positionMs = _snapshot.position.inMilliseconds
         .clamp(0, durationMs > 0 ? durationMs : 0)
@@ -656,6 +669,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                             .round(),
                       ),
                     ),
+                  ),
+                if (_startup != null)
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    right: player is MediaKitPlayerService ? 56 : 8,
+                    child: _startupStatusPanel(_startup!, compact: true),
                   ),
                 if (hasMedia && player is MediaKitPlayerService) ...[
                   Positioned(
@@ -705,10 +725,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               _snapshot.message!,
               style: const TextStyle(color: Color(0xFFFFAA8A)),
             ),
-          ],
-          if (_startup != null) ...[
-            const SizedBox(height: 12),
-            _startupStatusPanel(_startup!),
           ],
           const SizedBox(height: 8),
           Slider(
@@ -837,43 +853,60 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
       );
 
-  Widget _startupStatusPanel(_StartupSession session) => Container(
-        padding: const EdgeInsets.all(12),
+  Widget _startupStatusPanel(
+    _StartupSession session, {
+    bool compact = false,
+  }) =>
+      Container(
+        padding: EdgeInsets.all(compact ? 8 : 12),
         decoration: BoxDecoration(
-          color: const Color(0xFF191C1E),
+          color: const Color(0xE6191C1E),
           border: Border.all(color: const Color(0xFF3A4448)),
           borderRadius: BorderRadius.circular(6),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
+            Text(
               '正在准备播放',
-              style: TextStyle(fontWeight: FontWeight.w600),
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: compact ? 12 : null,
+              ),
             ),
-            const SizedBox(height: 8),
-            _startupStatusRows(session),
+            SizedBox(height: compact ? 3 : 8),
+            _startupStatusRows(session, compact: compact),
           ],
         ),
       );
 
-  Widget _startupStatusRows(_StartupSession session) => Column(
+  Widget _startupStatusRows(
+    _StartupSession session, {
+    bool compact = false,
+  }) =>
+      Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _startupStatusRow(
             label: '网络缓冲',
             completedAt: session.networkReadyAt,
             session: session,
+            detail: _networkStartupDetail(),
+            compact: compact,
           ),
           _startupStatusRow(
             label: '字幕识别',
             completedAt: session.recognitionReadyAt,
             session: session,
+            detail: _recognitionStartupDetail(),
+            compact: compact,
           ),
           _startupStatusRow(
             label: '翻译字幕返回',
             completedAt: session.translationReadyAt,
             session: session,
+            detail: _translationStartupDetail(),
+            compact: compact,
           ),
         ],
       );
@@ -882,6 +915,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     required String label,
     required DateTime? completedAt,
     required _StartupSession session,
+    required String detail,
+    required bool compact,
   }) {
     final completed = completedAt != null;
     final elapsed = completed
@@ -889,12 +924,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         : widget.now().difference(session.startedAt);
     final seconds = elapsed.inMicroseconds / Duration.microsecondsPerSecond;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: EdgeInsets.symmetric(vertical: compact ? 1 : 3),
       child: Row(
         children: [
           Icon(
             completed ? Icons.check_circle_outline : Icons.hourglass_top,
-            size: 17,
+            size: compact ? 14 : 17,
             color:
                 completed ? const Color(0xFF5ED6A0) : const Color(0xFFFF6B6B),
           ),
@@ -902,18 +937,64 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           Expanded(
             child: Text(
               completed
-                  ? '$label　已完成　${seconds.toStringAsFixed(2)}s'
-                  : '$label　等待中',
+                  ? '$label 已完成 ${seconds.toStringAsFixed(2)}s'
+                  : '$label 等待中: $detail',
               style: TextStyle(
                 color: completed
                     ? const Color(0xFF5ED6A0)
                     : const Color(0xFFFF6B6B),
+                fontSize: compact ? 11 : null,
               ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _networkStartupDetail() {
+    if (_snapshot.status == PlaybackStatus.error) return '播放器打开媒体失败';
+    if (_snapshot.isBuffering || _snapshot.status == PlaybackStatus.loading) {
+      return '播放器正在缓冲媒体';
+    }
+    return '等待播放器缓冲状态就绪';
+  }
+
+  String _recognitionStartupDetail() {
+    final decoder = _recognitionDiagnostics.decoder;
+    if (decoder.state == AudioDecoderState.error) {
+      return '音频解码失败: ${decoder.message ?? '未知错误'}';
+    }
+    switch (_recognitionDiagnostics.mediaPreparationState) {
+      case 'downloading':
+        return 'iOS 正在下载完整识别媒体缓存';
+      case 'failed':
+        return '识别媒体缓存失败';
+    }
+    if (decoder.state == AudioDecoderState.opening) return '正在打开音频解码器';
+    if (decoder.state == AudioDecoderState.ready) return '等待首个 PCM 音频块';
+    if (_recognitionDiagnostics.windowsSkipped > 0) {
+      return '已跳过 ${_recognitionDiagnostics.windowsSkipped}/4 个静音窗口';
+    }
+    return 'Whisper 正在等待可识别的音频窗口';
+  }
+
+  String _translationStartupDetail() {
+    final translations = _recognitionResults.document?.translations
+            .where((translation) =>
+                translation.targetLanguage == 'zh-CN' &&
+                translation.status == TranscriptTranslationStatus.translated &&
+                translation.text.trim().isNotEmpty)
+            .length ??
+        0;
+    final failures = _recognitionResults.document?.translations
+            .where((translation) =>
+                translation.targetLanguage == 'zh-CN' &&
+                translation.status == TranscriptTranslationStatus.failed)
+            .length ??
+        0;
+    if (failures > 0) return '已有 $failures 条翻译失败，等待其他字幕返回';
+    return '已返回 $translations/2 条完整翻译字幕';
   }
 
   String _format(Duration duration) =>

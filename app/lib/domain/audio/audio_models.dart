@@ -356,6 +356,8 @@ class RecognitionDiagnostics {
     required this.processedThrough,
     required this.recognizedThrough,
     required this.recognizer,
+    this.mediaPreparationState,
+    this.mediaPreparationMessage,
   });
 
   const RecognitionDiagnostics.idle()
@@ -375,7 +377,9 @@ class RecognitionDiagnostics {
         decodedThrough = Duration.zero,
         processedThrough = Duration.zero,
         recognizedThrough = Duration.zero,
-        recognizer = const WindowRecognitionStatus.notLoaded();
+        recognizer = const WindowRecognitionStatus.notLoaded(),
+        mediaPreparationState = null,
+        mediaPreparationMessage = null;
 
   final String? sessionId;
   final AudioDecoderStatus decoder;
@@ -402,6 +406,11 @@ class RecognitionDiagnostics {
   final Duration recognizedThrough;
   final WindowRecognitionStatus recognizer;
 
+  /// Recognition-side network media preparation, separate from player
+  /// buffering. It is populated when a platform needs a local cache first.
+  final String? mediaPreparationState;
+  final String? mediaPreparationMessage;
+
   RecognitionDiagnostics copyWith({
     String? sessionId,
     AudioDecoderStatus? decoder,
@@ -420,7 +429,10 @@ class RecognitionDiagnostics {
     Duration? processedThrough,
     Duration? recognizedThrough,
     WindowRecognitionStatus? recognizer,
+    String? mediaPreparationState,
+    String? mediaPreparationMessage,
     bool clearReason = false,
+    bool clearMediaPreparation = false,
   }) =>
       RecognitionDiagnostics(
         sessionId: sessionId ?? this.sessionId,
@@ -440,6 +452,12 @@ class RecognitionDiagnostics {
         processedThrough: processedThrough ?? this.processedThrough,
         recognizedThrough: recognizedThrough ?? this.recognizedThrough,
         recognizer: recognizer ?? this.recognizer,
+        mediaPreparationState: clearMediaPreparation
+            ? null
+            : mediaPreparationState ?? this.mediaPreparationState,
+        mediaPreparationMessage: clearMediaPreparation
+            ? null
+            : mediaPreparationMessage ?? this.mediaPreparationMessage,
       );
 }
 

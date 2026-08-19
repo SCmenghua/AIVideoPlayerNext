@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import '../../core/diagnostics/diagnostic_log_service.dart';
 import '../../domain/audio/audio_models.dart';
@@ -29,6 +30,7 @@ class RecognitionController {
       required RecognitionMediaSource source,
       required String sessionId,
     })? mediaCacheWorkerFactory,
+    bool Function()? isIosPlatform,
     RecognitionPrefetchMode prefetchMode = RecognitionPrefetchMode.fullMedia,
     this.lowWatermark = const Duration(seconds: 20),
     this.highWatermark = const Duration(seconds: 45),
@@ -43,6 +45,7 @@ class RecognitionController {
         _logs = logs,
         _mediaCacheWorkerFactory =
             mediaCacheWorkerFactory ?? _defaultMediaCacheWorker,
+        _isIosPlatform = isIosPlatform ?? _defaultIsIosPlatform,
         _prefetchMode = prefetchMode,
         seekPriorityLead = priorityLead ?? highWatermark {
     if (lowWatermark.isNegative || highWatermark <= lowWatermark) {
@@ -77,6 +80,7 @@ class RecognitionController {
     required RecognitionMediaSource source,
     required String sessionId,
   }) _mediaCacheWorkerFactory;
+  final bool Function() _isIosPlatform;
   RecognitionPrefetchMode _prefetchMode;
   final Duration lowWatermark;
   final Duration highWatermark;
@@ -142,6 +146,8 @@ class RecognitionController {
     required String sessionId,
   }) =>
       RecognitionMediaCacheWorker(source: source, sessionId: sessionId);
+
+  static bool _defaultIsIosPlatform() => Platform.isIOS;
 
   Future<void> seek(Duration position) async {
     if (_disposed || _sessionId == null) return;
@@ -475,6 +481,27 @@ class RecognitionController {
     _hasLoggedAudioChunk = false;
     _hasLoggedRecognition = false;
     _decoderOpenRequestedAt = DateTime.now();
+    _setDiagnostic(RecognitionDiagnostics(
+      sessionId: sessionId,
+      decoder: _decoder.status,
+      queueDepth: 0,
+      lastWindow: null,
+      windowsRecognized: 0,
+      windowsSkipped: 0,
+      windowsFailed: 0,
+      lastReason: null,
+      playbackPosition: position,
+      lastInference: Duration.zero,
+      lastRealtimeFactor: 0,
+      lastResultCount: 0,
+      recognitionLag: Duration.zero,
+      decodedThrough: Duration.zero,
+      processedThrough: Duration.zero,
+      recognizedThrough: Duration.zero,
+      recognizer: _recognizer is WindowRecognitionStatusProvider
+          ? (_recognizer as WindowRecognitionStatusProvider).status
+          : _diagnostic.recognizer,
+    ));
     _logs?.info('识别音频', '请求打开识别解码器', {
       '会话 ID': sessionId,
       '起始位置': position,
@@ -537,6 +564,8 @@ class RecognitionController {
       recognizer: _recognizer is WindowRecognitionStatusProvider
           ? (_recognizer as WindowRecognitionStatusProvider).status
           : _diagnostic.recognizer,
+      mediaPreparationState: _diagnostic.mediaPreparationState,
+      mediaPreparationMessage: _diagnostic.mediaPreparationMessage,
     ));
     await _decoder.start();
   }
@@ -560,6 +589,38 @@ class RecognitionController {
     _mediaCacheRequestSubscription = worker.requestEvents.listen(
       _onMediaCacheRequestEvent,
     );
+    if (_isIosPlatform()) {
+      _logs?.info('识别媒体缓存', 'iOS 网络媒体开始完整缓存', {
+        '会话 ID': sessionId,
+        '原始地址': source.uri,
+        '缓存上限字节': worker.policy.maxBytes,
+      });
+      final snapshot = await worker.prepare();
+      if (generation != _generation ||
+          _disposed ||
+          !identical(worker, _mediaCacheWorker)) {
+        return source;
+      }
+      if (snapshot.state != RecognitionMediaCacheState.complete ||
+          snapshot.path == null) {
+        throw StateError(snapshot.message ?? 'iOS 识别媒体缓存未完成。');
+      }
+      final localUri = Uri.file(snapshot.path!);
+      _logs?.info('识别媒体缓存', 'iOS 识别媒体缓存完成', {
+        '会话 ID': sessionId,
+        '本地地址': localUri,
+        '媒体总字节': snapshot.contentLength,
+        '顺序下载回退': snapshot.usedSequentialDownload,
+      });
+      return MediaSource(
+        uri: localUri,
+        title: source.title,
+        kind: source.kind,
+        originPage: source.originPage,
+        browserSessionId: source.browserSessionId,
+      );
+    }
+
     final snapshot = await worker.startProxy();
     if (generation != _generation ||
         _disposed ||
@@ -645,6 +706,12 @@ class RecognitionController {
   }
 
   void _onMediaCacheSnapshot(RecognitionMediaCacheSnapshot snapshot) {
+    if (snapshot.sessionId == _sessionId) {
+      _setDiagnostic(_diagnostic.copyWith(
+        mediaPreparationState: snapshot.state.name,
+        mediaPreparationMessage: snapshot.message,
+      ));
+    }
     final now = DateTime.now();
     final shouldLog =
         snapshot.state != RecognitionMediaCacheState.downloading ||
