@@ -10,7 +10,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-unsigned-ipa:
@@ -174,3 +174,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-unsigned-v${{ env.APP_VERSION }}-${{ github.run_number }}
+          name: AI Video Player Next iOS unsigned v${{ env.APP_VERSION }} (build ${{ github.run_number }})
+          body: |
+            Windows and iOS acceptance build.
+
+            This IPA is intentionally unsigned. Install it only with a sideloading workflow that signs it for your device.
+
+            - Version: `${{ env.APP_VERSION }}`
+            - Build time: `${{ env.APP_BUILD_TIME }}`
+            - Build id: `${{ env.APP_BUILD_ID }}`
+            - Bundle identifier: `${{ inputs.bundle_identifier }}`
+            - Whisper model: `ggml-large-v3-turbo-q5_0.bin`
+          files: ${{ env.IPA_PATH }}
+          fail_on_unmatched_files: true
+          generate_release_notes: false

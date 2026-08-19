@@ -29,7 +29,8 @@ class FileSelectorMediaPicker implements MediaPicker {
 
   Future<String> _copyForIosPlayback(XFile file) async {
     final support = await getApplicationSupportDirectory();
-    final directory = Directory('${support.path}${Platform.pathSeparator}media');
+    final directory =
+        Directory('${support.path}${Platform.pathSeparator}media');
     await directory.create(recursive: true);
     final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     final target = File(

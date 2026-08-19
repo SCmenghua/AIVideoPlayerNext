@@ -9,6 +9,8 @@ coverage/
 app/windows/flutter/ephemeral/
 native/speech_core/build*/
 native/audio_decoder/build*/
+native/translation_core/build*/
+native/translation_core/.cache/
 native/whisper-cli-build/
 phase5-*.jsonl
 app/android/.gradle/
@@ -19,8 +21,12 @@ app/ios/Pods/
 models/
 !app/windows/models/
 !app/windows/models/README.md
+!app/ios/Runner/Models/
+!app/ios/Runner/Models/README.md
 test_assets/media/
 *.gguf
 *.bin
+*.safetensors
+*.safetensors.index.json
 *.mp4
 *.wav

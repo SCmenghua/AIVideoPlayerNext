@@ -27,9 +27,13 @@ class DiagnosticLogEntry {
   final Map<String, String> details;
 }
 
-/// In-memory, privacy-aware diagnostic timeline for user initiated export.
+/// In-memory diagnostic timeline for user initiated export.
 class DiagnosticLogService extends ChangeNotifier {
+  DiagnosticLogService({bool? preserveSensitiveDetails})
+      : preserveSensitiveDetails = preserveSensitiveDetails ?? !kReleaseMode;
+
   static const _maximumEntries = 800;
+  final bool preserveSensitiveDetails;
   final List<DiagnosticLogEntry> _entries = [];
 
   UnmodifiableListView<DiagnosticLogEntry> get entries =>
@@ -68,7 +72,9 @@ class DiagnosticLogService extends ChangeNotifier {
     final safeDetails = <String, String>{};
     details.forEach((key, value) {
       if (value == null) return;
-      safeDetails[key] = _sanitize(key, value.toString());
+      safeDetails[key] = preserveSensitiveDetails
+          ? value.toString()
+          : _sanitize(key, value.toString());
     });
     _entries.add(DiagnosticLogEntry(
       timestamp: DateTime.now(),
@@ -94,7 +100,9 @@ class DiagnosticLogService extends ChangeNotifier {
       ..writeln('构建编号：${AppBuildInfo.buildId}')
       ..writeln('导出时间：${_formatTime(DateTime.now())}')
       ..writeln('日志条数：${_entries.length}')
-      ..writeln('隐私说明：URL 查询参数、Cookie、授权信息和本地完整路径已脱敏。')
+      ..writeln(preserveSensitiveDetails
+          ? '隐私说明：测试日志保留完整本机媒体、请求与会话信息；不会自动上传，请勿提交到 Git。'
+          : '隐私说明：URL 查询参数、Cookie、授权信息和本地完整路径已脱敏。')
       ..writeln();
     for (final entry in _entries) {
       buffer.writeln(
@@ -173,12 +181,16 @@ class DiagnosticLogService extends ChangeNotifier {
 
   static String _sanitize(String key, String value) {
     final lowerKey = key.toLowerCase();
-    if (lowerKey.contains('cookie') || lowerKey.contains('authorization') ||
-        lowerKey.contains('token') || lowerKey.contains('header')) {
+    if (lowerKey.contains('cookie') ||
+        lowerKey.contains('authorization') ||
+        lowerKey.contains('token') ||
+        lowerKey.contains('header')) {
       return '[已脱敏]';
     }
-    if (lowerKey.contains('url') || lowerKey.contains('uri') ||
-        lowerKey.contains('source') || lowerKey.contains('page')) {
+    if (lowerKey.contains('url') ||
+        lowerKey.contains('uri') ||
+        lowerKey.contains('source') ||
+        lowerKey.contains('page')) {
       return _sanitizeUrl(value);
     }
     if (value.startsWith('file:') ||

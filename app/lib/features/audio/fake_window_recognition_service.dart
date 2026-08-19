@@ -16,7 +16,8 @@ class FakeWindowRecognitionService implements WindowRecognitionService {
     final generation = _generation;
     await Future<void>.delayed(delay);
     if (generation != _generation || disposed) {
-      return WindowRecognitionResult(window: window, events: const [], error: 'cancelled');
+      return WindowRecognitionResult(
+          window: window, events: const [], error: 'cancelled');
     }
     return WindowRecognitionResult(
       window: window,

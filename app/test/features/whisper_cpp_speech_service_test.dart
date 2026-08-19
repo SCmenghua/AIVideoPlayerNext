@@ -11,7 +11,8 @@ void main() {
     '${Directory.current.parent.path}\\native\\speech_core\\build-vs\\Release\\speech_core.dll',
   );
 
-  test('backend status keeps requested, actual and fallback values distinct', () {
+  test('backend status keeps requested, actual and fallback values distinct',
+      () {
     const status = WhisperBackendStatus(
       requested: WhisperRequestedBackend.vulkan,
       actual: WhisperActualBackend.cpu,
@@ -57,7 +58,9 @@ void main() {
 
       expect(events, hasLength(1));
       expect(events.single.sessionId, 'ffi-test');
-      expect(events.single.segmentId, 'ffi-test-segment-0');
+      expect(events.single.segmentId, 'ffi-test-window-000000002000-segment-0');
+      expect(events.single.sourceWindowId, isNull);
+      expect(events.single.sourceSegmentIndex, 0);
       expect(events.single.start, const Duration(seconds: 2));
       expect(events.single.end, const Duration(seconds: 2, milliseconds: 100));
       expect(events.single.text, 'speech_core test transcript');
@@ -67,4 +70,25 @@ void main() {
     },
     skip: !nativeLibrary.existsSync(),
   );
+
+  test('raw segment IDs remain unique when each window starts at zero', () {
+    expect(
+      whisperRawSegmentId(
+        sessionId: 'session-1',
+        from: const Duration(seconds: 4),
+        segmentIndex: 0,
+        sourceWindowId: 'session-1-window-1',
+      ),
+      'session-1-window-1-segment-0',
+    );
+    expect(
+      whisperRawSegmentId(
+        sessionId: 'session-1',
+        from: const Duration(seconds: 8),
+        segmentIndex: 0,
+        sourceWindowId: 'session-1-window-2',
+      ),
+      'session-1-window-2-segment-0',
+    );
+  });
 }

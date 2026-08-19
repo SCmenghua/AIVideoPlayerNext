@@ -289,8 +289,7 @@ class WindowRecognitionStatus {
   const WindowRecognitionStatus.notLoaded({
     this.modelName,
     this.backendStatus = const WhisperBackendStatus.initial(),
-  })
-      : state = WindowRecognitionState.notLoaded,
+  })  : state = WindowRecognitionState.notLoaded,
         message = null,
         lastWindow = null,
         lastResultCount = 0,
@@ -353,6 +352,9 @@ class RecognitionDiagnostics {
     required this.lastRealtimeFactor,
     required this.lastResultCount,
     required this.recognitionLag,
+    required this.decodedThrough,
+    required this.processedThrough,
+    required this.recognizedThrough,
     required this.recognizer,
   });
 
@@ -370,6 +372,9 @@ class RecognitionDiagnostics {
         lastRealtimeFactor = 0,
         lastResultCount = 0,
         recognitionLag = Duration.zero,
+        decodedThrough = Duration.zero,
+        processedThrough = Duration.zero,
+        recognizedThrough = Duration.zero,
         recognizer = const WindowRecognitionStatus.notLoaded();
 
   final String? sessionId;
@@ -385,6 +390,16 @@ class RecognitionDiagnostics {
   final double lastRealtimeFactor;
   final int lastResultCount;
   final Duration recognitionLag;
+  final Duration decodedThrough;
+
+  /// The end of media windows that have completed recognition processing.
+  ///
+  /// This advances for successful, silent, and failed windows so the bounded
+  /// prefetch scheduler cannot decode indefinitely through a quiet passage.
+  final Duration processedThrough;
+
+  /// The end of actual final subtitle output, excluding silence and failures.
+  final Duration recognizedThrough;
   final WindowRecognitionStatus recognizer;
 
   RecognitionDiagnostics copyWith({
@@ -401,6 +416,9 @@ class RecognitionDiagnostics {
     double? lastRealtimeFactor,
     int? lastResultCount,
     Duration? recognitionLag,
+    Duration? decodedThrough,
+    Duration? processedThrough,
+    Duration? recognizedThrough,
     WindowRecognitionStatus? recognizer,
     bool clearReason = false,
   }) =>
@@ -418,6 +436,9 @@ class RecognitionDiagnostics {
         lastRealtimeFactor: lastRealtimeFactor ?? this.lastRealtimeFactor,
         lastResultCount: lastResultCount ?? this.lastResultCount,
         recognitionLag: recognitionLag ?? this.recognitionLag,
+        decodedThrough: decodedThrough ?? this.decodedThrough,
+        processedThrough: processedThrough ?? this.processedThrough,
+        recognizedThrough: recognizedThrough ?? this.recognizedThrough,
         recognizer: recognizer ?? this.recognizer,
       );
 }

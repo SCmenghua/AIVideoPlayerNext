@@ -111,8 +111,8 @@ class MobileBrowserService extends BrowserServiceBase {
   void _handleJavaScriptMessage(JavaScriptMessage message) {
     try {
       final payload = jsonDecode(message.message) as Map<String, dynamic>;
-      final page = currentState.url ??
-          Uri.tryParse(payload['page']?.toString() ?? '');
+      final page =
+          currentState.url ?? Uri.tryParse(payload['page']?.toString() ?? '');
       if (payload['kind'] == 'trace') {
         logs?.info('网页媒体桥接', payload['action']?.toString() ?? '网页事件', {
           '序号': payload['sequence'],
@@ -160,7 +160,8 @@ class MobileBrowserService extends BrowserServiceBase {
     final platform = controller.platform;
     if (platform is! WebKitWebViewController) return;
     try {
-      await const MethodChannel('ai_video_player/ios_webview').invokeMethod<void>(
+      await const MethodChannel('ai_video_player/ios_webview')
+          .invokeMethod<void>(
         'installUserScript',
         <String, Object>{
           'identifier': platform.webViewIdentifier,

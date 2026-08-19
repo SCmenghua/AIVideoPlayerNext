@@ -99,7 +99,8 @@ class WindowsBrowserService extends BrowserServiceBase {
   void _handleWebMessage(dynamic message) {
     if (message is! Map) return;
     final kind = message['kind'];
-    final page = currentState.url ?? Uri.tryParse(message['page']?.toString() ?? '');
+    final page =
+        currentState.url ?? Uri.tryParse(message['page']?.toString() ?? '');
     if (kind == 'trace') {
       logs?.info('网页媒体桥接', message['action']?.toString() ?? '网页事件', {
         '序号': message['sequence'],

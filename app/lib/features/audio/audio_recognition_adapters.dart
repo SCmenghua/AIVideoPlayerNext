@@ -157,6 +157,7 @@ class WhisperWindowRecognitionService
           sessionId: window.sessionId,
           from: window.mediaStart,
           language: language,
+          sourceWindowId: window.windowId,
         ),
         samples: window.samples,
       );
@@ -195,6 +196,8 @@ class WhisperWindowRecognitionService
           kind: event.kind,
           source: event.source,
           confidence: event.confidence,
+          sourceWindowId: event.sourceWindowId,
+          sourceSegmentIndex: event.sourceSegmentIndex,
         ));
       }
       events = List<RecognitionEvent>.unmodifiable(filteredEvents);

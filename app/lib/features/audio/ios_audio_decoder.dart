@@ -200,8 +200,8 @@ class IosAudioDecoder implements AudioDecoder {
       final count = value.lengthInBytes ~/ Float32List.bytesPerElement;
       return List<double>.generate(
         count,
-        (index) => bytes.getFloat32(index * Float32List.bytesPerElement,
-            Endian.little),
+        (index) => bytes.getFloat32(
+            index * Float32List.bytesPerElement, Endian.little),
         growable: false,
       );
     }

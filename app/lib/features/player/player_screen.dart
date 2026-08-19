@@ -52,6 +52,7 @@ class _LegacyPlayerScreenState extends ConsumerState<LegacyPlayerScreen> {
           .translate(TranslationRequest(
             segmentId: event.segmentId,
             text: event.text,
+            sourceLanguage: event.language,
             targetLanguage: 'en',
           ))
           .then((result) {

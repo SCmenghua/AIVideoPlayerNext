@@ -16,7 +16,18 @@ class FakeAudioDecoder implements AudioDecoder {
   Timer? _timer;
   int _index = 0;
   int _generation = 0;
+  int _openCount = 0;
+  int _startCount = 0;
+  int _pauseCount = 0;
+  int _seekCount = 0;
+  final List<Duration> _seekPositions = [];
   bool _disposed = false;
+
+  int get openCount => _openCount;
+  int get startCount => _startCount;
+  int get pauseCount => _pauseCount;
+  int get seekCount => _seekCount;
+  List<Duration> get seekPositions => List.unmodifiable(_seekPositions);
 
   @override
   AudioDecoderStatus get status => _status;
@@ -30,6 +41,7 @@ class FakeAudioDecoder implements AudioDecoder {
   @override
   Future<void> open(AudioDecoderRequest request) async {
     _ensureOpen();
+    ++_openCount;
     await stop();
     _request = request;
     _index = _chunks.indexWhere((chunk) => chunk.mediaStart >= request.start);
@@ -47,6 +59,7 @@ class FakeAudioDecoder implements AudioDecoder {
     _ensureOpen();
     if (_request == null) return;
     if (_status.state == AudioDecoderState.running) return;
+    ++_startCount;
     final generation = ++_generation;
     _emit(_status.copyWith(state: AudioDecoderState.running));
     Future<void>(() async {
@@ -71,6 +84,7 @@ class FakeAudioDecoder implements AudioDecoder {
   @override
   Future<void> pause() async {
     if (_disposed) return;
+    ++_pauseCount;
     ++_generation;
     final request = _request;
     if (request != null &&
@@ -91,6 +105,8 @@ class FakeAudioDecoder implements AudioDecoder {
   @override
   Future<void> seek(Duration position) async {
     _ensureOpen();
+    ++_seekCount;
+    _seekPositions.add(position);
     ++_generation;
     _emit(_status.copyWith(state: AudioDecoderState.seeking));
     _index = _chunks.indexWhere((chunk) => chunk.mediaStart >= position);

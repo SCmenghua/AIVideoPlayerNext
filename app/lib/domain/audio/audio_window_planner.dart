@@ -32,13 +32,16 @@ class AudioWindowPlanner {
   Duration? _nextStart;
   int _windowIndex = 0;
 
-  void reset({required String sessionId}) {
+  void reset({
+    required String sessionId,
+    bool preserveWindowIndex = false,
+  }) {
     _pending.clear();
     _pendingSamples = 0;
     _sourceChunkCount = 0;
     _sessionId = sessionId;
     _nextStart = null;
-    _windowIndex = 0;
+    if (!preserveWindowIndex) _windowIndex = 0;
   }
 
   List<WindowPlanResult> add(AudioChunk chunk) {

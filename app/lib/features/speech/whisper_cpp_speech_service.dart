@@ -21,6 +21,20 @@ class SpeechCoreException implements Exception {
   String toString() => 'SpeechCoreException($status): $message';
 }
 
+/// The native segment index starts at zero for every Whisper input window.
+/// Prefix it with the source window so diagnostics and later timeline assembly
+/// can distinguish raw segments from adjacent overlapping windows.
+String whisperRawSegmentId({
+  required String sessionId,
+  required Duration from,
+  required int segmentIndex,
+  String? sourceWindowId,
+}) {
+  final windowId = sourceWindowId ??
+      '$sessionId-window-${from.inMilliseconds.toString().padLeft(12, '0')}';
+  return '$windowId-segment-$segmentIndex';
+}
+
 /// FFI provider for a fixed, normalized PCM recognition input.
 ///
 /// The model and recognition call live in a worker isolate. The native session
@@ -134,7 +148,12 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
         final segment = _asMessage(raw);
         _events.add(RecognitionEvent(
           sessionId: request.sessionId,
-          segmentId: '${request.sessionId}-segment-${segment['index']}',
+          segmentId: whisperRawSegmentId(
+            sessionId: request.sessionId,
+            from: request.from,
+            segmentIndex: segment['index'] as int,
+            sourceWindowId: request.sourceWindowId,
+          ),
           start:
               request.from + Duration(milliseconds: segment['startMs'] as int),
           end: request.from + Duration(milliseconds: segment['endMs'] as int),
@@ -143,6 +162,8 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
           kind: RecognitionKind.finalResult,
           source: RecognitionSource.whisperCpp,
           confidence: (segment['confidence'] as num?)?.toDouble(),
+          sourceWindowId: request.sourceWindowId,
+          sourceSegmentIndex: segment['index'] as int,
         ));
       }
     } catch (_) {
@@ -325,7 +346,12 @@ class WhisperCppPersistentRecognitionWorker {
       final segment = _asMessage(raw);
       return RecognitionEvent(
         sessionId: request.sessionId,
-        segmentId: '${request.sessionId}-segment-${segment['index']}',
+        segmentId: whisperRawSegmentId(
+          sessionId: request.sessionId,
+          from: request.from,
+          segmentIndex: segment['index'] as int,
+          sourceWindowId: request.sourceWindowId,
+        ),
         start: from + Duration(milliseconds: segment['startMs'] as int),
         end: from + Duration(milliseconds: segment['endMs'] as int),
         text: segment['text'] as String,
@@ -333,6 +359,8 @@ class WhisperCppPersistentRecognitionWorker {
         kind: RecognitionKind.finalResult,
         source: RecognitionSource.whisperCpp,
         confidence: (segment['confidence'] as num?)?.toDouble(),
+        sourceWindowId: request.sourceWindowId,
+        sourceSegmentIndex: segment['index'] as int,
       );
     }).toList(growable: false);
   }
@@ -506,32 +534,34 @@ class _SpeechCoreBindings {
       : statusMessage =
             library.lookupFunction<_StatusMessageNative, _StatusMessageDart>(
                 'speech_core_status_message'),
-        createModel = library.lookupFunction<
-            _ModelCreateWithBackendNative, _ModelCreateWithBackendDart>(
+        createModel = library.lookupFunction<_ModelCreateWithBackendNative,
+            _ModelCreateWithBackendDart>(
           'speech_core_model_create_with_backend',
         ),
         abiVersion = library.lookupFunction<_AbiVersionNative, _AbiVersionDart>(
             'speech_core_abi_version'),
-        modelRequestedBackend = library.lookupFunction<
-            _ModelBackendIntNative, _ModelBackendIntDart>(
+        modelRequestedBackend = library
+            .lookupFunction<_ModelBackendIntNative, _ModelBackendIntDart>(
           'speech_core_model_requested_backend',
         ),
-        modelActualBackend = library.lookupFunction<
-            _ModelBackendIntNative, _ModelBackendIntDart>(
+        modelActualBackend = library
+            .lookupFunction<_ModelBackendIntNative, _ModelBackendIntDart>(
           'speech_core_model_actual_backend',
         ),
-        modelGpuEnabled = library.lookupFunction<
-            _ModelGpuEnabledNative, _ModelGpuEnabledDart>(
+        modelGpuEnabled = library
+            .lookupFunction<_ModelGpuEnabledNative, _ModelGpuEnabledDart>(
           'speech_core_model_gpu_enabled',
         ),
-        modelFallbackReason = library.lookupFunction<
-            _ModelBackendIntNative, _ModelBackendIntDart>(
+        modelFallbackReason = library
+            .lookupFunction<_ModelBackendIntNative, _ModelBackendIntDart>(
           'speech_core_model_fallback_reason',
         ),
-        modelDeviceName = library.lookupFunction<_ModelStringNative,
-            _ModelStringDart>('speech_core_model_device_name'),
-        modelBackendMessage = library.lookupFunction<_ModelStringNative,
-            _ModelStringDart>('speech_core_model_backend_message'),
+        modelDeviceName =
+            library.lookupFunction<_ModelStringNative, _ModelStringDart>(
+                'speech_core_model_device_name'),
+        modelBackendMessage =
+            library.lookupFunction<_ModelStringNative, _ModelStringDart>(
+                'speech_core_model_backend_message'),
         destroyModel =
             library.lookupFunction<_ModelDestroyNative, _ModelDestroyDart>(
                 'speech_core_model_destroy'),
@@ -547,9 +577,10 @@ class _SpeechCoreBindings {
         recognize = library.lookupFunction<_SessionRecognizeNative,
             _SessionRecognizeDart>('speech_core_session_recognize');
 
-  factory _SpeechCoreBindings.open(String path) =>
-      _SpeechCoreBindings(
-        path == '@process' ? DynamicLibrary.process() : DynamicLibrary.open(path),
+  factory _SpeechCoreBindings.open(String path) => _SpeechCoreBindings(
+        path == '@process'
+            ? DynamicLibrary.process()
+            : DynamicLibrary.open(path),
       );
 
   final DynamicLibrary library;
@@ -651,10 +682,10 @@ WhisperActualBackend _actualBackend(int value) =>
       WhisperActualBackend.values.length - 1,
     )];
 
-WhisperFallbackReason _fallbackReason(int value) => value >= 0 &&
-        value < WhisperFallbackReason.unknown.index
-    ? WhisperFallbackReason.values[value]
-    : WhisperFallbackReason.unknown;
+WhisperFallbackReason _fallbackReason(int value) =>
+    value >= 0 && value < WhisperFallbackReason.unknown.index
+        ? WhisperFallbackReason.values[value]
+        : WhisperFallbackReason.unknown;
 
 Future<void> _speechWorker(List<Object?> args) async {
   final mainPort = args[0] as SendPort;

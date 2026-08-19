@@ -61,12 +61,14 @@ class MediaKitPlayerService implements PlayerService {
 
   @override
   Future<void> open(MediaSource source) async {
+    final elapsed = Stopwatch()..start();
     _logs?.info('播放器', '开始打开媒体', {
       '标题': source.title,
       '地址': source.uri,
       '来源类型': source.kind.name,
       '来源页面': source.originPage,
       '请求头数量': source.requestHeaders.length,
+      '请求头': source.requestHeaders,
     });
     _emit(PlaybackSnapshot(
       status: PlaybackStatus.loading,
@@ -95,12 +97,14 @@ class MediaKitPlayerService implements PlayerService {
       _logs?.info('播放器', '媒体打开成功', {
         '标题': source.title,
         '地址': source.uri,
+        '调用耗时': elapsed.elapsed,
       });
     } catch (error) {
       _logs?.error('播放器', '媒体打开失败', {
         '标题': source.title,
         '地址': source.uri,
         '错误': error,
+        '调用耗时': elapsed.elapsed,
       });
       _emit(_snapshot.copyWith(
         status: PlaybackStatus.error,
@@ -116,14 +120,19 @@ class MediaKitPlayerService implements PlayerService {
       _logs?.warning('播放器', '忽略播放操作：没有媒体');
       return;
     }
+    final elapsed = Stopwatch()..start();
     _logs?.info('播放器', '用户点击播放', {
       '标题': _snapshot.source?.title,
       '状态': _snapshot.status.name,
     });
     try {
       await _player.play();
+      _logs?.info('播放器', '播放调用返回', {'调用耗时': elapsed.elapsed});
     } catch (error) {
-      _logs?.error('播放器', '播放调用失败', {'错误': error});
+      _logs?.error('播放器', '播放调用失败', {
+        '错误': error,
+        '调用耗时': elapsed.elapsed,
+      });
       _emit(_snapshot.copyWith(
         status: PlaybackStatus.error,
         message: '播放失败，请检查媒体格式。',
@@ -137,8 +146,10 @@ class MediaKitPlayerService implements PlayerService {
       _logs?.warning('播放器', '忽略暂停操作：没有媒体');
       return;
     }
+    final elapsed = Stopwatch()..start();
     _logs?.info('播放器', '用户点击暂停', {'标题': _snapshot.source?.title});
     await _player.pause();
+    _logs?.info('播放器', '暂停调用返回', {'调用耗时': elapsed.elapsed});
   }
 
   @override
@@ -153,10 +164,12 @@ class MediaKitPlayerService implements PlayerService {
         : duration > Duration.zero && position > duration
             ? duration
             : position;
+    final elapsed = Stopwatch()..start();
     await _player.seek(bounded);
     _logs?.info('播放器', '用户调整播放进度', {
       '目标位置': bounded,
       '媒体标题': _snapshot.source?.title,
+      '调用耗时': elapsed.elapsed,
     });
   }
 

@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart';
 import '../features/player/player_screen.dart';
 
 class AIVideoPlayerApp extends StatelessWidget {
-  const AIVideoPlayerApp({super.key});
+  const AIVideoPlayerApp({super.key, this.now = DateTime.now});
+
+  final DateTime Function() now;
 
   String? get _fontFamily => switch (defaultTargetPlatform) {
         TargetPlatform.windows => 'Microsoft YaHei UI',
@@ -39,7 +41,7 @@ class AIVideoPlayerApp extends StatelessWidget {
             ),
         useMaterial3: true,
       ),
-      home: const PlayerScreen(),
+      home: PlayerScreen(now: now),
     );
   }
 }

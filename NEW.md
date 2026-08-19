@@ -340,9 +340,11 @@ abstract interface class TranslationService {
 
 范围边界：本阶段不重做 AudioWindowPlanner、RecognitionQueue、播放器控制、SubtitleTimeline、字幕样式、翻译、历史或网络媒体支持；这些能力继续按既定 Phase 推进。
 
-### Phase 7：网络媒体识别、字幕时间轴、翻译与 Overlay
+### Phase 7：字幕优先的连续预取、网络媒体识别、翻译与 Overlay
 
-目标：解决当前已支持网络视频的字幕识别不稳定问题，并完成本地视频的预读/预热、至少一个真实翻译 Provider 和双语字幕显示。所有原文与译文都必须服从播放器媒体时间轴，不能用识别或翻译完成的墙钟时间替代字幕时间。
+目标：解决当前已支持网络视频的识别与播放器控制卡顿问题，建立以字幕识别、翻译和媒体时间准确显示为第一优先级的连续预取管线，并完成真实翻译 Provider 和双语字幕显示。播放器提供画面和权威时钟，但暂停、seek、换片和打开不得同步等待后台网络读取、解码或识别 worker 清理。
+
+网络媒体采用两个逻辑独立的消费者：播放器直接播放网络源；识别侧独立读取同一授权媒体会话，并优先使用顺序临时缓存或分段缓存持续解码。默认不完整下载两份完整视频；仅在来源、会话与用户选择适合时才使用完整缓存。识别、翻译和显示的所有字幕时间仍服从播放器媒体时间轴。
 
 #### 7.1 网络视频识别闭环
 
@@ -352,12 +354,15 @@ abstract interface class TranslationService {
 - 每个网络视频识别失败都要能定位在媒体交接、授权/会话、播放器音频输出、PCM 时间映射、分窗、Whisper、质量门控或时间轴显示中的具体层级。
 - Phase 7 先支持可合法取得音频并且当前播放器已能播放的普通网络媒体；HLS/DASH 的复杂变体、直播、MSE/blob、DRM 和受保护媒体仍须单独评估，不得绕过授权或保护机制。
 
-#### 7.2 本地媒体预读与识别/翻译提前处理
+#### 7.2 连续前瞻、启动预备与有限资源调度
 
-- 对本地媒体，在打开后启动有界音频预读与识别预热，为 Whisper 首次真实推理和异步翻译留出时间；字幕仍只能在其媒体起止时间内显示。
-- 预读以有限“识别/翻译领先量”、PCM 缓冲和结果缓存为界；暂停、seek、换片、停止与 dispose 必须取消或隔离旧 session 的预读结果。
-- 记录播放位置、已解码位置、已识别位置、已翻译位置、领先/落后秒数、首次真实推理耗时和稳态窗口耗时，避免把 GPU 初始化成本误判为持续识别速度。
-- 网络媒体预读不与本地整段预读混为一谈；只有在媒体数据、会话和授权边界明确后，才为具体网络媒体类型设计有限预读。
+- 识别和翻译可以持续领先播放，不能采用“前瞻到 30 秒后停住，播放接近时才突发处理下一批”的走停式实现。协调器维护 `playbackPosition`、`downloadedThrough`、`decodedThrough`、`recognizedThrough`、`translatedThrough` 五个媒体时间游标，以低/高水位连续调度。
+- Windows 首轮参数以启动预备 `8-15 秒或 2-4 个已翻译窗口`、目标领先 `30 秒`、低水位 `20 秒`、高水位 `45 秒` 为基准，最终值由真实网络与设备回归确定。达到高水位后仅在自然窗口边界暂停，低于低水位后由同一常驻 worker 恢复。
+- 识别窗口保持连续媒体时间，并保留约 `0.5-1.5 秒`输入上下文重叠；结果按媒体时间、文本和稳定 `segmentId` 合并去重，避免句子被窗口边界切断。
+- 下载/缓存、解码、Whisper 和翻译使用固定数量的长期 worker 与有界队列，禁止每秒新建线程、isolate 或模型。Whisper 原生线程数可配置但固定；翻译仅使用有限并发。
+- 媒体打开后先预热并形成有限的正确原文/译文，再自动开始播放；网络慢、翻译失败或超时时提供立即播放降级，绝不无限阻塞播放器。
+- pause、seek、换片、停止与 dispose 先递增 `sessionId`/generation 并立即返回 UI；旧任务可以后台退出，但其迟到 PCM、识别和翻译结果必须被丢弃。seek 只在拖动提交后建立一次新会话。
+- iOS 实现相同的有界队列、取消与相对优先级语义，可使用 `OperationQueue`、Swift `Task`、`DispatchQueue`、QoS 和固定 Whisper 线程数；iOS 不承诺 CPU 核绑定、绝对 CPU 百分比或后台长期运行。
 
 #### 7.3 翻译 MVP 与字幕 Overlay
 
@@ -478,7 +483,7 @@ Phase 9 才首次发现基础集成问题。
 - partial 不得触发全量字幕历史列表刷新。
 - 翻译不得阻塞原文字幕、播放器控制或时间轴更新。
 - 每个异步任务有 owner、取消路径与 `sessionId`/generation 守卫。
-- 默认日志轻量，详细诊断由用户主动开启；本地媒体和音频默认不上传。
+- 测试/诊断构建在本机保留完整媒体和网络诊断，包括 URL、查询参数、请求头、Cookie、Referer、重定向、缓存路径和会话关联字段；不自动上传、不提交 Git。正式发布构建默认脱敏或省略敏感字段，并提供本机日志清理能力。
 
 ## 11. 首轮执行清单
 
@@ -539,6 +544,21 @@ Phase 9 才首次发现基础集成问题。
 - Phase 6.5 已结项（2026-08-17）。本阶段未包含本地媒体预读、识别/翻译提前处理和网络媒体音频预读；这些内容进入下一阶段，并继续以视频媒体时间轴裁决字幕显示。
 - Phase 6.5 结项后的下一阶段优先目标是字幕准时性和网络视频识别稳定性：先修复当前支持网络视频的音频取得、时间映射和识别闭环，再对本地媒体进行受限预读、提前识别并开始翻译；字幕显示始终由视频媒体时间轴裁决。网络媒体预读须作为独立子范围设计，遵守数据可得性、会话和 DRM 边界。
 
+#### Phase 7 Step 1 网络媒体日志诊断（2026-08-17）
+
+- 已分析一份 Windows `0.6.5` 的测试诊断日志；原始日志保留在用户本机且不写入 Git。测试构建允许保留媒体完整地址、查询参数、Cookie、授权信息和用户内容；正式发布构建另行执行脱敏策略。
+- 浏览器 `video` 元素成功发现普通 HTTPS MP4，媒体分类、浏览器交接与 `media_kit` 播放器打开均通过。音频解码器在 `opening` 状态、输出任何 PCM 之前失败，故 Whisper、质量门控、时间轴、翻译和 Overlay 均未开始，不能将其判为“Whisper 无字幕”。
+- 根因已确认在 Windows Dart FFI adapter：它对浏览器交接的 HTTPS URI 调用 `Uri.toFilePath()`，抛出 `UnsupportedError`，native Media Foundation decoder 并未收到媒体 URL。现已改为本地 `file:` 传 Windows 路径、HTTP(S) 传 URL，并用单元测试覆盖两种输入和不支持 scheme。
+- 已用用户允许的同类资源确认网络识别恢复，并发现打开、pause 与 seek 被网络 decoder 的同步停止等待显著拖慢。下一步将把旧 worker 的停止/回收移出 UI 调用链，并实施字幕优先的连续前瞻调度。若资源仍要求瞬态 `Referer` 才可取得音频，可在测试构建完整记录、在运行时最小范围传递；正式发布构建不得默认保留或导出该值，也不得绕过 DRM 或受保护会话。
+
+#### Phase 7 Step 2 非阻塞 decoder 验证包（2026-08-17）
+
+- Windows native audio decoder 已拆分为异步打开 worker 与解码 worker。`pause`/`stop` 只请求取消，不会在 UI 调用链同步等待网络 `ReadSample()` 返回；seek 通过新 decoder handle 与新 generation 建立，初始定位也在打开 worker 中执行。
+- native reader、采样格式和 callback 生命周期已收紧为短锁发布：打开 worker 只在成功时发布局部 `IMFSourceReader`，解码 worker 复制本地 reader 与格式快照后才执行阻塞读取，回调元数据在锁内移交后于锁外调用。此修复不以取消领先识别或降低识别速度换取控制响应。
+- 自动验证已通过：`dart analyze lib test` 无问题，`flutter test --concurrency=1` 通过 `36/36`，native Windows Release `/W4 /WX` 构建无警告、无错误，`git diff --check` 无空白错误（仅有既有 CRLF 提示）。
+- 已生成 Windows `0.7.0` Release 验证构建：`APP_BUILD_TIME=2026-08-17 16:36:25 +08:00`，`APP_BUILD_ID=phase-7-nonblocking-decoder-20260817-163625`。Release 目录已确认包含应用、`ai_audio_decoder.dll`、`speech_core.dll`、Whisper 模型及 Flutter data。
+- 此构建尚未替代真实网络回归。下一次测试须覆盖短视频、5 分钟和约 1 小时的普通 HTTPS 视频，重点观察打开、暂停、连续 seek、换片的 UI 响应，旧 worker 实际退出时刻，以及识别/翻译领先量是否持续而非在水位边界突发跳跃。
+
 #### Phase 6 执行记录（2026-08-16）
 
 本轮开始执行 `PLAN.md` 中的 Phase 6“播放器音频、分窗与背压”。范围限定为 Windows 本地媒体音频、带媒体时间的 PCM、有限识别窗口、Whisper 持久 worker、播放器生命周期、播放器字幕框和诊断状态；不扩展网络媒体、HLS、DRM、MSE、移动端真实音频或完整字幕 Overlay。
@@ -572,3 +592,68 @@ Phase 9 才首次发现基础集成问题。
 - 模型、视频、PCM、结果和 native build 产物继续保持本地忽略，不会写入 Git。
 
 Phase 6 结项状态（2026-08-17）：已完成。核心音频识别链路、播放器字幕接入、诊断可观察性、Windows native 构建、程序目录模型打包、自动化生命周期测试和真实日语视频解码/Whisper 回归均已完成。GPU 后端、iOS Metal、完整字幕 Overlay、翻译和字幕历史不属于 Phase 6，留待后续 Phase。
+
+#### Phase 7 当前推进记录（2026-08-17）
+
+- 诊断工作区已调整为三栏：左侧保留完整诊断日志，中间显示后台持续推进的 final 识别结果，右侧预留翻译结果。三栏均可独立复制和 TXT 导出，移动端可分享；识别和翻译结果按媒体时间排序，不按播放器当前位置筛选。播放器页不再显示旧的字幕结果列表，`SubtitleTimeline` 仍保留给未来 Overlay 消费。
+- 后续架构已收束为当前媒体会话的 `TranscriptDocument`：Whisper 原始窗口结果先保留为诊断证据，再由时间轴整理器去重、合并并生成稳定片段；原文与译文通过稳定 `segmentId` 关联。内存文档负责 Overlay 查询，`transcript.json` 只作为会话期临时快照、导出和诊断交换格式，换片或退出后清理，不作为永久历史缓存。
+- 当前诊断发现窗口级 `segment_index` 会在每个 Whisper 窗口重新从零开始，而后台识别结果仓库曾将其用作覆盖式 Map key。这会使原始输出互相覆盖，表现为本地或网络视频只显示少数条结果；这不是 Whisper 只识别一条。修复前不得把当前三栏中的原始 event 数量视为最终识别数量。
+- 识别会话语义已收紧：普通 seek 只改变播放器权威时钟，不重开 decoder/session，也不请求 recognizer stop；暂停只暂停播放器，不暂停后台识别。只有换片、停止和 dispose 才建立或终止识别生命周期。
+- 连续预取现在有低/高水位调度。Windows 识别 decoder 关闭 native realtime pacing，由有界队列和水位控制领先量，避免播放 10 秒时停在 30 秒、到 29 秒才突发处理到 60 秒。识别 worker、模型和队列仍为固定且有界的长期资源。
+- 修正了水位游标语义：`processedThrough` 表示窗口已经完成处理，成功、静音、失败都必须推进；`recognizedThrough` 表示实际 final 字幕覆盖位置，只在有非空 final 结果时推进。这样长静音或失败段不会导致后台无界预读，同时诊断仍能区分“处理完成”和“有字幕”。
+- 新增 `RecognitionMediaCacheWorker` 作为 Step 3 第一层实现。它为识别消费者创建独立 HTTP 客户端、请求头和 session 临时目录，优先顺序 Range 下载，Range 不可用时退回一次顺序下载；缓存有字节数、分段数、连续下载游标和取消边界。
+- 当前缓存 worker 只在完整副本落盘后交给平台 decoder。Media Foundation 尚未接入可边下载边读取的分段消费接口，因此本轮不能宣称“独立缓存消费者”完整完成，也未改变现有网络 decoder 的真实回归路径。
+
+验证状态：`D:\Software\flutter\bin\cache\dart-sdk\bin\dart.exe analyze lib test` 已通过；`git diff --check` 无空白错误。两次设置 `NO_PROXY=localhost,127.0.0.1,::1` 的 Flutter 定向测试均在启动后超过 90 秒无 runner 输出，已停止，完整 Flutter 测试和 Windows Release 构建暂不能标记为本轮通过。新增缓存 worker 的 Flutter 测试文件已加入，待 Flutter runner 恢复后执行。
+
+#### Phase 7 网络代理真实回归与局部回退（2026-08-18）
+
+- `phase-7-network-segmented-proxy-warmup` 的真实大网络视频验收失败：识别 decoder 打开、首个 PCM 和首条字幕均比透明代理基线明显变慢，但 Whisper 对首个约 4 秒窗口的推理仅约 `80ms`，因此不是 GPU 或 Whisper 算力问题。
+- 日志确认容器头部预热在取得首字节前即被真实 decoder 请求取消，既没有实际提供容器索引，又额外建立了竞争连接；同时默认将 Media Foundation 的开放 `Range: bytes=0-` 重写为 2 MB 上游分段，改变了其可观察到的 MP4 流式读取语义。
+- 不回退已完成的 Phase 7 能力。网络播放器与识别器继续保持独立消费者，授权上下文、会话隔离、seek 目标优先、字幕文档和三栏诊断均保留；仅将默认网络读取恢复为透明流式 loopback 代理，decoder 的 Range、上游 Range、状态码和 Content-Range 均记录到测试日志。
+- 分段上游读取和容器头尾预热保留为显式实验开关，不能再作为默认策略，须在真实站点上单独证明首 PCM、首字幕和长时稳定性均优于透明流式代理后才可重新启用。
+- 自动验证：`dart analyze lib test` 无问题，`flutter test --concurrency=1` 通过 `72/72`。下一包仍需使用相同大网络视频，比较“识别解码器打开完成”“首个 PCM 已到达”“首条字幕已识别”和“上游实际 Range 已响应”。
+
+## 2026-08-18 回退基线与工作冻结
+
+- 已恢复并确认 `phase-7-network-proxy-full-prefetch-20260817-234000` 为当前网络行为基线：短视频应立即响应，长网络视频允许短暂落后后追赶。
+- 其后的网络代理、分段缓存、容器预热与 seek 性能实验不视为已验收源码，暂时冻结，不再与当前翻译工作交叉修改。
+- 后续网络诊断必须从这份已验收二进制和重新设计的生命周期汇总日志开始；当前优先完成 Step 5 翻译 MVP。
+
+## 未来 1.x 候选优化（不纳入当前 Phase）
+
+长距离前跳时，当前 0.x 的默认方案仍是一个持久、有限并发的 Whisper 调度器：播放器立即跳转；识别网络缓存把新目标区域的实际 Range 请求提升为最高优先级；目标区域覆盖后再回填历史缺口。它不等待字幕，也不复用播放器的 reader。
+
+待 1.x 正式版之后，只有实测证明单链路在特定网络下仍无法在短超时内取得目标区域的首个 PCM，且网络、内存、GPU/显存预算均有余量并且用户已经停止连续拖动时，才可评估短生命周期的“优先识别 lane”：
+
+- 该 lane 必须拥有自己的 priority decoder 和 priority network/cache lane，只共享媒体 URL 与合法的授权上下文；不得直接读取或复用播放器的 reader。
+- 原始结果统一汇入 `TranscriptDocument`，按媒体时间、文本重叠与稳定 `segmentId` 去重，不能产生两套竞争的字幕时间轴。
+- 默认仍只有一个共享且有界的 Whisper 调度器。只有设备实测确认 GPU 与显存有余量时，才允许创建第二个模型 context 并行推理。
+- 目标区域达到可显示覆盖并领先既有链路超过阈值后，优先 lane 必须停止或接管，既有链路降为历史缺口回填，避免长期双重推理和重复下载。
+
+这是正式 1.x 之后的候选优化方向，当前不实现，也不写入 `PLAN.md` 的 0.x Phase。
+## 2026-08-18 本地翻译模型选择更正（历史记录）
+
+- Gemma 4 本地 LLM 目标更正为 `google/gemma-4-E2B-it-qat-mobile-transformers`。
+- 该仓库是面向移动硬件的 QAT `wNa8o8` 版本，不能按原始 BF16 Gemma 权重的加载方式处理；需要 mobile-transformers 兼容的原生推理运行时。
+- 当前工程仍未下载 NLLB 或 Gemma 权重，Windows Release/未来 IPA 也尚未包含翻译模型。
+- 当前只有模型选择、目录约定和能力检测代码；翻译模型加载器及实际推理 runtime 尚未接入。现有 `speech_core` 只负责 Whisper，不能加载 NLLB 或 Gemma。
+
+### 2026-08-18 NLLB runtime 技术尖峰执行记录
+
+- NLLB 先采用独立的 ONNX Runtime 路线，native 模块为 `native/translation_core`，与 Whisper 的 ggml/`speech_core` 完全分离。
+- C ABI 已建立并通过 Windows MinGW 编译及 CTest；修复了 C++ 中枚举类型与查询函数重名的问题，并增加 `manifest.json`、SentencePiece tokenizer、encoder、decoder 和 decoder-with-past 的包完整性校验。
+- Flutter Windows 已接入 `translation_core.dll` 探测；当前只报告准确的资源/runtime 状态，真实 NLLB 翻译仍明确显示为未实现。
+- 新增 `native/translation_core/tools/New-NllbManifest.ps1`，为模型文件生成 SHA-256 manifest；新增 iOS 静态库构建脚本，要求外部提供固定版本的 ONNX Runtime。
+- 当前尚未下载 NLLB 权重、SentencePiece 或 ONNX Runtime 开发包；本机 Python 环境缺少 PyTorch、Transformers、ONNX、ONNX Runtime 和 SentencePiece。其他软件目录中的 ORT DLL 未被复用。
+- 验证：Dart `analyze lib test` 通过；native CTest `1/1` 通过；Flutter 定向测试启动后超过 90 秒无 runner 输出，已停止，不能标记为 Flutter 测试通过。官方 Hugging Face/GitHub HTTPS 请求还受到本机 SSL 连接失败影响。
+
+## 2026-08-18 Gemma + LiteRT-LM 路线核验（当前结论）
+
+- 本轮通过本机代理 `http://127.0.0.1:10808` 访问并核验了 Google AI Edge LiteRT-LM 官方 GitHub 资料和 Hugging Face 模型仓库元数据。
+- LiteRT-LM 是 Google 官方端侧 LLM runtime，README 明确列出 Android、iOS、Web、Desktop 和 IoT；Windows 原生 CLI 支持 CPU/GPU，C++ API 为 Stable，Swift 原生 iOS/macOS API 为 Early Preview，Flutter API 标为 Community。
+- 原始 Hugging Face 仓库 `google/gemma-4-E2B-it-qat-mobile-transformers` 是公开的 Apache-2.0 `wNa8o8` 移动 QAT 权重，包含 `model.safetensors`，不能据此假设 LiteRT-LM 或任意通用 loader 能直接读取。
+- 已确认官方/社区转换部署仓库 `litert-community/gemma-4-E2B-it-litert-lm`：公开、Apache-2.0，提供 `gemma-4-E2B-it.litertlm`、GPU/Desktop/Web 等变体，模型卡明确说明这些文件供 LiteRT-LM 使用，并列出 iOS、Desktop、Android、IoT、Web 部署方向。
+- LiteRT-LM 模型卡给出的文本模型磁盘文件约 2.58GB，文本运行内存约 0.8GB 起，实际设备内存仍需以 spike 测量；不能只用参数量推断应用包和峰值内存。
+- 因此本地翻译主候选切换为 `Gemma 4 E2B IT + LiteRT-LM`。现有 NLLB ONNX Runtime/手写 decoder 已从源码和应用接入中移除；后续如需 NLLB，优先重新评估 CTranslate2，不再恢复或扩展手写 decoder。
+- 当前尚未宣称 Gemma 可用。下一步固定为：Windows LiteRT-LM C++/C API 加载和文本 smoke test；iOS Swift/native 真机加载和文本 smoke test；两端通过后再接 Flutter bridge、翻译队列和模型安装。

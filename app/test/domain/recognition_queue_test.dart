@@ -30,7 +30,8 @@ void main() {
     expect(next, same(second));
   });
 
-  test('clear removes waiting windows but leaves the active window owned', () async {
+  test('clear removes waiting windows but leaves the active window owned',
+      () async {
     final queue = RecognitionQueue();
     final first = _window('first');
     final second = _window('second');

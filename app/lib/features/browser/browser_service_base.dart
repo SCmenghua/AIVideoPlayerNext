@@ -9,8 +9,7 @@ abstract class BrowserServiceBase implements BrowserService {
   BrowserServiceBase({
     BrowserMediaClassifier? classifier,
     this.logs,
-  })
-      : _classifier = classifier ?? const BrowserMediaClassifier(),
+  })  : _classifier = classifier ?? const BrowserMediaClassifier(),
         _state = BrowserPageState(
           sessionId: 'browser-${DateTime.now().microsecondsSinceEpoch}',
         );

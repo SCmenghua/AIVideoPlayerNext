@@ -13,11 +13,13 @@ class RecognitionRequest {
     required this.sessionId,
     required this.from,
     this.language = 'auto',
+    this.sourceWindowId,
   });
 
   final String sessionId;
   final Duration from;
   final String language;
+  final String? sourceWindowId;
 }
 
 class RecognitionEvent {
@@ -31,6 +33,8 @@ class RecognitionEvent {
     required this.kind,
     required this.source,
     this.confidence,
+    this.sourceWindowId,
+    this.sourceSegmentIndex,
   });
 
   final String sessionId;
@@ -42,6 +46,8 @@ class RecognitionEvent {
   final RecognitionKind kind;
   final RecognitionSource source;
   final double? confidence;
+  final String? sourceWindowId;
+  final int? sourceSegmentIndex;
 }
 
 abstract interface class SpeechRecognitionService {

@@ -41,6 +41,12 @@ typedef void (*ai_audio_decoder_chunk_callback)(
     const ai_audio_decoder_chunk* chunk,
     void* user_data);
 
+typedef void (*ai_audio_decoder_open_callback)(
+    ai_audio_decoder_status status,
+    uint32_t sample_rate,
+    uint32_t channels,
+    void* user_data);
+
 AI_AUDIO_DECODER_API const char* ai_audio_decoder_status_message(
     ai_audio_decoder_status status);
 AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_create(
@@ -49,6 +55,14 @@ AI_AUDIO_DECODER_API void ai_audio_decoder_destroy(ai_audio_decoder* decoder);
 AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_open(
     ai_audio_decoder* decoder,
     const char* path);
+// Opens a media source on a native worker. The callback is delivered after the
+// reader is ready or opening has failed/cancelled.
+AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_open_async(
+    ai_audio_decoder* decoder,
+    const char* path,
+    int64_t start_position_ms,
+    ai_audio_decoder_open_callback callback,
+    void* user_data);
 AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_set_realtime(
     ai_audio_decoder* decoder,
     uint8_t enabled);
@@ -61,8 +75,19 @@ AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_pause(
 AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_seek(
     ai_audio_decoder* decoder,
     int64_t position_ms);
+// Repositions an already-open reader on a native worker. The callback is
+// delivered after the previous decode read has exited and the position has
+// been applied, so callers never block a UI thread on network I/O.
+AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_seek_async(
+    ai_audio_decoder* decoder,
+    int64_t position_ms,
+    ai_audio_decoder_open_callback callback,
+    void* user_data);
 AI_AUDIO_DECODER_API ai_audio_decoder_status ai_audio_decoder_stop(
     ai_audio_decoder* decoder);
+// Waits for a previously cancelled worker to exit. This may block on network
+// I/O and must be called off the UI thread.
+AI_AUDIO_DECODER_API void ai_audio_decoder_wait(ai_audio_decoder* decoder);
 AI_AUDIO_DECODER_API void ai_audio_decoder_chunk_free(
     const ai_audio_decoder_chunk* chunk);
 

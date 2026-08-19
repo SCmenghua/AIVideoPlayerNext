@@ -4,7 +4,7 @@ import 'package:ai_video_player_next/core/diagnostics/diagnostic_log_service.dar
 
 void main() {
   test('stores entries and exports a readable privacy-safe timeline', () {
-    final logs = DiagnosticLogService();
+    final logs = DiagnosticLogService(preserveSensitiveDetails: false);
     logs.info('网页媒体桥接', '用户点击网页播放按钮', {
       '网页地址': 'https://example.com/watch?id=secret&token=private',
       '视频状态': '{"currentSrc":"https://cdn.example.com/a.mp4?sig=secret"}',
@@ -24,6 +24,22 @@ void main() {
     expect(exported, isNot(contains('private')));
     expect(exported, isNot(contains(r'C:\Users\20592')));
     expect(exported, contains('[本地路径已脱敏]/sample.mp4'));
+  });
+
+  test('keeps complete details in the default testing mode', () {
+    final logs = DiagnosticLogService();
+    logs.info('网页媒体桥接', '测试媒体上下文', {
+      '网页地址': 'https://example.com/watch?id=secret',
+      'Cookie': 'session=private',
+      '本地文件': r'C:\Users\20592\Videos\sample.mp4',
+    });
+
+    final exported = logs.formatForExport();
+
+    expect(exported, contains('id=secret'));
+    expect(exported, contains('session=private'));
+    expect(exported, contains(r'C:\Users\20592\Videos\sample.mp4'));
+    expect(exported, contains('测试日志保留完整本机媒体'));
   });
 
   test('keeps only the most recent entries and can clear them', () {

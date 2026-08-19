@@ -16,6 +16,10 @@ import '../features/browser/windows_browser_service.dart';
 import '../features/player/media_kit_player_service.dart';
 import '../features/player/media_picker.dart';
 import '../features/player/mock_services.dart';
+import '../features/settings/app_settings.dart';
+import '../features/translation/deepl_translation_service.dart';
+import '../features/translation/local_model_translation_service.dart';
+import '../features/translation/openai_compatible_translation_service.dart';
 import '../features/audio/audio_recognition_adapters.dart';
 import '../features/audio/ios_audio_decoder.dart';
 import '../features/audio/recognition_controller.dart';
@@ -51,9 +55,8 @@ String? _whisperModelPath() {
 }
 
 WhisperRequestedBackend _whisperRequestedBackend() {
-  final configured = Platform.environment['AI_VIDEO_WHISPER_BACKEND']
-      ?.trim()
-      .toLowerCase();
+  final configured =
+      Platform.environment['AI_VIDEO_WHISPER_BACKEND']?.trim().toLowerCase();
   return switch (configured) {
     'cpu' => WhisperRequestedBackend.cpu,
     'metal' => WhisperRequestedBackend.metal,
@@ -72,6 +75,7 @@ final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
   final logs = DiagnosticLogService();
   logs.info('应用', '诊断日志已启动', {
     '平台': defaultTargetPlatform.name,
+    '日志策略': logs.preserveSensitiveDetails ? '测试完整记录' : '正式构建脱敏',
   });
   return logs;
 });
@@ -173,18 +177,42 @@ final windowRecognitionServiceProvider =
 });
 
 final recognitionControllerProvider = Provider<RecognitionController>((ref) {
+  final settings = ref.read(appSettingsProvider).snapshot;
   final controller = RecognitionController(
     player: ref.read(playerServiceProvider),
     decoder: ref.read(audioDecoderProvider),
     recognizer: ref.read(windowRecognitionServiceProvider),
     logs: ref.read(diagnosticsLogProvider),
+    prefetchMode: settings.prefetchMode,
   );
   ref.onDispose(controller.dispose);
   return controller;
 });
 
-final translationServiceProvider =
-    Provider<TranslationService>((ref) => MockTranslationService());
+final appSettingsProvider =
+    ChangeNotifierProvider<AppSettingsController>((ref) {
+  return AppSettingsController.fromEnvironment();
+});
+
+TranslationService createTranslationService(AppSettings settings) =>
+    switch (settings.translationMode) {
+      TranslationMode.deepl => DeepLTranslationService(
+          endpoint: settings.deeplEndpoint,
+          apiKey: settings.deeplApiKey,
+        ),
+      TranslationMode.genericApi => OpenAiCompatibleTranslationService(
+          endpoint: settings.genericEndpoint,
+          apiKey: settings.genericApiKey,
+          model: settings.genericModel,
+        ),
+      TranslationMode.localModel => LocalModelTranslationService(
+          model: settings.localTranslationModel,
+        ),
+    };
+
+final translationServiceProvider = Provider<TranslationService>((ref) {
+  return createTranslationService(ref.watch(appSettingsProvider).snapshot);
+});
 
 final playbackSnapshotProvider = StreamProvider<PlaybackSnapshot>((ref) {
   return ref.watch(playerServiceProvider).snapshots;

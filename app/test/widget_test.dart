@@ -101,4 +101,40 @@ void main() {
     await player.dispose();
     await browser.dispose();
   });
+
+  testWidgets('settings workspace exposes recognition and translation modes',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final player = MockPlayerService();
+    final browser = MockBrowserService();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          playerServiceProvider.overrideWithValue(player),
+          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
+          browserServiceProvider.overrideWithValue(browser),
+        ],
+        child: const AIVideoPlayerApp(),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('设置').first);
+    await tester.pump();
+
+    expect(find.text('完整预识别'), findsOneWidget);
+    expect(find.text('按需预取'), findsOneWidget);
+    expect(find.text('DeepL'), findsOneWidget);
+    expect(find.text('通用 API'), findsOneWidget);
+    expect(find.text('本地模型'), findsOneWidget);
+    expect(find.textContaining('构建时间'), findsOneWidget);
+
+    await tester.tap(find.text('按需预取'));
+    await tester.pump();
+    expect(find.text('识别保持约 20 至 45 秒的前瞻缓冲。'), findsOneWidget);
+
+    await player.dispose();
+    await browser.dispose();
+  });
 }
