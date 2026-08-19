@@ -55,6 +55,7 @@ class MobileBrowserService extends BrowserServiceBase {
           final page = Uri.tryParse(url);
           logs?.info('内置浏览器', '网页开始加载', {'网址': url});
           if (page != null) {
+            resetUnsupportedMediaReports();
             updateState(
               url: page,
               status: BrowserLoadStatus.loading,
@@ -138,7 +139,13 @@ class MobileBrowserService extends BrowserServiceBase {
           );
         }
       } else if (payload['kind'] == 'unsupported') {
-        emitUnsupported(page: page, reason: '该视频未提供可交接的真实媒体地址。');
+        final source = payload['source']?.toString() ?? '';
+        final reason = source.startsWith('blob:') ||
+                source.startsWith('mediasource:') ||
+                source.startsWith('data:')
+            ? '该视频使用浏览器媒体流，无法由内置播放器接管。'
+            : '该视频未提供可交接的真实媒体地址。';
+        emitUnsupported(page: page, reason: reason);
       }
     } on FormatException {
       // Ignore third-party page messages that are not our JSON payload.
@@ -187,6 +194,7 @@ class MobileBrowserService extends BrowserServiceBase {
   Future<void> load(Uri url) async {
     await initialize();
     logs?.info('内置浏览器', '请求打开网址', {'网址': url});
+    resetUnsupportedMediaReports();
     if (handleCandidate(candidate: url, originPage: currentState.url ?? url)) {
       return;
     }
@@ -291,6 +299,7 @@ const _mobileMediaBridgeScript = r'''
   let pendingGestureExpiresAt = 0;
   let pendingGestureSerial = 0;
   let lastHandoff = '';
+  let lastUnsupportedSource = '';
   const absolute = (source) => {
     try {
       return new URL(source, document.baseURI).href;
@@ -374,6 +383,7 @@ const _mobileMediaBridgeScript = r'''
     pendingGestureExpiresAt = 0;
     selectionSerial += 1;
     lastHandoff = '';
+    lastUnsupportedSource = '';
     const serial = selectionSerial;
     trace('建立播放意图', {serial}, video);
     // Keep the intent while a short pre-roll finishes and the page swaps in its content source.
@@ -460,9 +470,11 @@ const _mobileMediaBridgeScript = r'''
     trace('发送媒体交接', {source}, selectedVideo, null, `handoff:${source}`);
     post({kind: 'media', url: source, title: document.title, videoElement: true});
   };
-  const emitUnsupported = () => {
-    trace('发送不支持媒体提示', {}, selectedVideo);
-    post({kind: 'unsupported'});
+  const emitUnsupported = (source) => {
+    if (source === lastUnsupportedSource) return;
+    lastUnsupportedSource = source;
+    trace('发送不支持媒体提示', {source}, selectedVideo, null, `unsupported:${source}`);
+    post({kind: 'unsupported', source});
   };
   const reportVideo = (video) => {
     if (!hasIntentFor(video)) claimPendingGesture(video);
@@ -491,7 +503,7 @@ const _mobileMediaBridgeScript = r'''
     }
     if (isBrowserOnlySource(source)) {
       trace('发现浏览器内部媒体流', {}, video);
-      emitUnsupported();
+      emitUnsupported(source);
     }
     return false;
   };

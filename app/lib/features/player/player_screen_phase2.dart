@@ -249,9 +249,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!_sameMediaSource(_snapshot.source, session.source)) return;
     final now = widget.now();
     if (!session.networkReady &&
-        _snapshot.status != PlaybackStatus.loading &&
-        _snapshot.status != PlaybackStatus.error &&
-        !_snapshot.isBuffering) {
+        hasStartupPlayableMediaData(
+          source: session.source,
+          snapshot: _snapshot,
+        )) {
       session.networkReadyAt = now;
     }
     if (!session.recognitionReady &&
@@ -954,10 +955,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   String _networkStartupDetail() {
     if (_snapshot.status == PlaybackStatus.error) return '播放器打开媒体失败';
-    if (_snapshot.isBuffering || _snapshot.status == PlaybackStatus.loading) {
-      return '播放器正在缓冲媒体';
+    final source = _snapshot.source;
+    if (source != null &&
+        !source.uri.isScheme('http') &&
+        !source.uri.isScheme('https')) {
+      return '本地媒体无需网络缓冲';
     }
-    return '等待播放器缓冲状态就绪';
+    final bufferedSeconds = _snapshot.bufferedDuration.inMilliseconds / 1000;
+    if (_snapshot.bufferedDuration > Duration.zero) {
+      return '已缓存 ${bufferedSeconds.toStringAsFixed(2)}s，等待首段可播放媒体数据';
+    }
+    if (_snapshot.isBuffering || _snapshot.status == PlaybackStatus.loading) {
+      return '正在请求并解码首段媒体数据';
+    }
+    return '等待播放器缓存至少 1.00s 的可播放媒体数据';
   }
 
   String _recognitionStartupDetail() {

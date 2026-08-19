@@ -20,6 +20,7 @@ abstract class BrowserServiceBase implements BrowserService {
       StreamController.broadcast();
   final StreamController<BrowserEvent> eventController =
       StreamController.broadcast();
+  final Set<String> _reportedUnsupportedMedia = <String>{};
   BrowserPageState _state;
   bool isDisposed = false;
 
@@ -58,6 +59,10 @@ abstract class BrowserServiceBase implements BrowserService {
       message: message,
       clearMessage: clearMessage,
     ));
+  }
+
+  void resetUnsupportedMediaReports() {
+    _reportedUnsupportedMedia.clear();
   }
 
   bool handleCandidate({
@@ -101,13 +106,20 @@ abstract class BrowserServiceBase implements BrowserService {
   }
 
   void emitUnsupported({required Uri page, required String reason}) {
-    if (!isDisposed) {
-      logs?.warning('浏览器媒体', '网页报告不支持媒体', {
+    if (isDisposed) return;
+    final key = '${page.removeFragment()}|$reason';
+    if (!_reportedUnsupportedMedia.add(key)) {
+      logs?.info('浏览器媒体', '忽略重复的不支持媒体提示', {
         '来源页面': page,
         '原因': reason,
       });
-      eventController.add(BrowserUnsupportedMedia(page: page, reason: reason));
+      return;
     }
+    logs?.warning('浏览器媒体', '网页报告不支持媒体', {
+      '来源页面': page,
+      '原因': reason,
+    });
+    eventController.add(BrowserUnsupportedMedia(page: page, reason: reason));
   }
 
   @override

@@ -34,6 +34,9 @@ class MediaKitPlayerService implements PlayerService {
     _subscriptions.add(_player.stream.buffering.listen((isBuffering) {
       _emit(_snapshot.copyWith(isBuffering: isBuffering));
     }));
+    _subscriptions.add(_player.stream.buffer.listen((value) {
+      _emit(_snapshot.copyWith(bufferedDuration: value));
+    }));
     _subscriptions.add(_player.stream.volume.listen((value) {
       _emit(_snapshot.copyWith(volume: value.clamp(0, 100).toDouble()));
     }));
@@ -78,6 +81,7 @@ class MediaKitPlayerService implements PlayerService {
       volume: _snapshot.volume,
       rate: _snapshot.rate,
       isBuffering: true,
+      bufferedDuration: Duration.zero,
     ));
 
     try {

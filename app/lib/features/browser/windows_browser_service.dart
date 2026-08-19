@@ -82,6 +82,7 @@ class WindowsBrowserService extends BrowserServiceBase {
     if (url == null) return;
     final previousPage = currentState.url ?? url;
     logs?.info('内置浏览器', '网页地址发生变化', {'网址': url});
+    if (previousPage != url) resetUnsupportedMediaReports();
     if (handleCandidate(candidate: url, originPage: previousPage)) {
       if (previousPage != url) {
         unawaited(controller.goBack());
@@ -126,7 +127,13 @@ class WindowsBrowserService extends BrowserServiceBase {
         );
       }
     } else if (kind == 'unsupported') {
-      emitUnsupported(page: page, reason: '该视频未提供可交接的真实媒体地址。');
+      final source = message['source']?.toString() ?? '';
+      final reason = source.startsWith('blob:') ||
+              source.startsWith('mediasource:') ||
+              source.startsWith('data:')
+          ? '该视频使用浏览器媒体流，无法由内置播放器接管。'
+          : '该视频未提供可交接的真实媒体地址。';
+      emitUnsupported(page: page, reason: reason);
     }
   }
 
@@ -135,6 +142,7 @@ class WindowsBrowserService extends BrowserServiceBase {
     await initialize();
     if (!_initialized) return;
     logs?.info('内置浏览器', '请求打开网址', {'网址': url});
+    resetUnsupportedMediaReports();
     if (handleCandidate(candidate: url, originPage: currentState.url ?? url)) {
       return;
     }
@@ -200,6 +208,7 @@ const _mediaBridgeScript = r'''
   const lastTrace = new Map();
   const sourceOf = (video) => video.currentSrc || video.src || video.querySelector('source[src]')?.src;
   const isHttpMedia = (source) => /^https?:/i.test(source || '');
+  const isBrowserOnlySource = (source) => /^(blob:|mediasource:|data:)/i.test(source || '');
   const textOf = (value, limit = 120) => {
     const text = (value || '').toString().replace(/\s+/g, ' ').trim();
     return text.length > limit ? `${text.slice(0, limit)}...` : text;
@@ -262,10 +271,10 @@ const _mediaBridgeScript = r'''
           trace('发送媒体交接', {source}, video);
           post({kind: 'media', url: source, title: document.title, videoElement: true});
         }
-      } else if (!unsupportedReported) {
+      } else if (isBrowserOnlySource(source) && !unsupportedReported) {
         unsupportedReported = true;
-        trace('发送不支持媒体提示', {}, video);
-        post({kind: 'unsupported'});
+        trace('发送不支持媒体提示', {source}, video);
+        post({kind: 'unsupported', source});
       }
     };
     video.addEventListener('pointerdown', intercept, true);

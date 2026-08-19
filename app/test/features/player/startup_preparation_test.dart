@@ -29,6 +29,52 @@ void main() {
     expect(state.canAutoPlay(windowsSkipped: 0), isTrue);
   });
 
+  test('network readiness requires decoded media data, not an opened request',
+      () {
+    final source = MediaSource(
+      uri: Uri.parse('https://media.example.test/video.mp4'),
+      title: 'network.mp4',
+      kind: MediaSourceKind.browserHandoff,
+    );
+    const initial = PlaybackSnapshot(
+      status: PlaybackStatus.paused,
+      position: Duration.zero,
+      duration: Duration.zero,
+      source: null,
+      bufferedDuration: Duration(milliseconds: 999),
+    );
+
+    expect(
+      hasStartupPlayableMediaData(source: source, snapshot: initial),
+      isFalse,
+    );
+    expect(
+      hasStartupPlayableMediaData(
+        source: source,
+        snapshot: initial.copyWith(
+          bufferedDuration: minimumNetworkStartupBuffer,
+        ),
+      ),
+      isTrue,
+    );
+  });
+
+  test('local media does not wait for a network cache', () {
+    final source = MediaSource.localFile(
+      path: r'C:\test\local.mp4',
+      title: 'local.mp4',
+    );
+    const snapshot = PlaybackSnapshot(
+      status: PlaybackStatus.paused,
+      position: Duration.zero,
+      duration: Duration.zero,
+      source: null,
+    );
+
+    expect(hasStartupPlayableMediaData(source: source, snapshot: snapshot),
+        isTrue);
+  });
+
   test('four skipped windows can release playback without translation', () {
     final state = preparation()
       ..networkReadyAt = startedAt

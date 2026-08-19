@@ -40,6 +40,7 @@ class PlaybackSnapshot {
     this.volume = 100,
     this.rate = 1,
     this.isBuffering = false,
+    this.bufferedDuration = Duration.zero,
     this.message,
   });
 
@@ -51,6 +52,7 @@ class PlaybackSnapshot {
         volume = 100,
         rate = 1,
         isBuffering = false,
+        bufferedDuration = Duration.zero,
         message = null;
 
   final PlaybackStatus status;
@@ -60,6 +62,9 @@ class PlaybackSnapshot {
   final double volume;
   final double rate;
   final bool isBuffering;
+
+  /// Media time currently decoded and cached by the playback engine.
+  final Duration bufferedDuration;
   final String? message;
 
   double get progress => duration.inMilliseconds == 0
@@ -74,6 +79,7 @@ class PlaybackSnapshot {
     double? volume,
     double? rate,
     bool? isBuffering,
+    Duration? bufferedDuration,
     String? message,
     bool clearMessage = false,
   }) =>
@@ -85,6 +91,7 @@ class PlaybackSnapshot {
         volume: volume ?? this.volume,
         rate: rate ?? this.rate,
         isBuffering: isBuffering ?? this.isBuffering,
+        bufferedDuration: bufferedDuration ?? this.bufferedDuration,
         message: clearMessage ? null : message ?? this.message,
       );
 }

@@ -1,4 +1,23 @@
+import '../../domain/player/player_service.dart';
 import '../../domain/subtitles/transcript_document.dart';
+
+const minimumNetworkStartupBuffer = Duration(seconds: 1);
+
+/// Reports readiness only after the playback engine has cached enough media
+/// time to begin playing, rather than when its HTTP request merely opens.
+bool hasStartupPlayableMediaData({
+  required MediaSource source,
+  required PlaybackSnapshot snapshot,
+}) {
+  final statusCanPlay = snapshot.status == PlaybackStatus.paused ||
+      snapshot.status == PlaybackStatus.playing ||
+      snapshot.status == PlaybackStatus.ended;
+  if (!statusCanPlay || snapshot.isBuffering) return false;
+  if (!source.uri.isScheme('http') && !source.uri.isScheme('https')) {
+    return true;
+  }
+  return snapshot.bufferedDuration >= minimumNetworkStartupBuffer;
+}
 
 class StartupPreparation {
   StartupPreparation({
