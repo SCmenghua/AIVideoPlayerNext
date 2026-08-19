@@ -2,11 +2,12 @@ import AVFoundation
 import Flutter
 import Foundation
 
-/// Local-file media audio bridge for Phase 6.5.
+/// AVFoundation media audio bridge for recognition.
 ///
-/// The bridge deliberately does not read microphone input or network URLs. The
-/// reader emits bounded Float32 mono/stereo PCM chunks with the media timeline
-/// so Dart can reuse the Phase 6 window planner and session guards.
+/// The reader emits bounded Float32 mono/stereo PCM chunks with the media
+/// timeline so Dart can reuse the window planner and session guards. Network
+/// assets receive the browser handoff headers (for example Cookie and
+/// Referer) through AVURLAsset's resource-loading options.
 final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
   private let lock = NSLock()
@@ -14,7 +15,8 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var output: AVAssetReaderTrackOutput?
   private var worker: DispatchWorkItem?
   private var sessionID = ""
-  private var sourcePath = ""
+  private var sourceURL: URL?
+  private var sourceHeaders: [String: String] = [:]
   private var accepting = false
   private var generation = 0
   private var securityScopedURL: URL?
@@ -31,23 +33,38 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
         switch call.method {
         case "open":
           guard let args = call.arguments as? [String: Any],
-                let path = args["path"] as? String,
                 let session = args["sessionId"] as? String else {
-            throw BridgeError.message("缺少本地媒体路径或会话 ID")
+            throw BridgeError.message("缺少媒体地址或会话 ID")
           }
-          try self.open(path: path, sessionID: session)
-          result(nil)
+          let uri = args["uri"] as? String
+          let path = args["path"] as? String
+          let headers = args["headers"] as? [String: String] ?? [:]
+          guard let source = Self.sourceURL(uri: uri, path: path) else {
+            throw BridgeError.message("媒体地址无效")
+          }
+          Task {
+            do {
+              try await self.open(url: source, headers: headers, sessionID: session)
+              result(nil)
+            } catch let error as BridgeError {
+              result(FlutterError(code: "AUDIO", message: error.description, details: nil))
+            } catch {
+              result(FlutterError(code: "AUDIO", message: error.localizedDescription, details: nil))
+            }
+          }
         case "start": self.start(); result(nil)
         case "pause": self.pause(); result(nil)
         case "seek":
           let args = call.arguments as? [String: Any]
-          do {
-            try self.seek(milliseconds: args?["positionMs"] as? Int ?? 0)
-            result(nil)
-          } catch let error as BridgeError {
-            result(FlutterError(code: "AUDIO", message: error.description, details: nil))
-          } catch {
-            result(FlutterError(code: "AUDIO", message: error.localizedDescription, details: nil))
+          Task {
+            do {
+              try await self.seek(milliseconds: args?["positionMs"] as? Int ?? 0)
+              result(nil)
+            } catch let error as BridgeError {
+              result(FlutterError(code: "AUDIO", message: error.description, details: nil))
+            } catch {
+              result(FlutterError(code: "AUDIO", message: error.localizedDescription, details: nil))
+            }
           }
         case "stop": self.stop(); result(nil)
         default: result(FlutterMethodNotImplemented)
@@ -76,20 +93,41 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     return nil
   }
 
-  private func open(path: String, sessionID: String, startMilliseconds: Int = 0) throws {
+  private func open(
+    url: URL,
+    headers: [String: String],
+    sessionID: String,
+    startMilliseconds: Int = 0
+  ) async throws {
     stop()
-    guard path.hasPrefix("/") else { throw BridgeError.message("iOS 识别目前只支持本地文件") }
-    guard let url = acquireReadableURL(path: path) else {
-      throw BridgeError.message("本地媒体文件不存在")
-    }
+    lock.lock()
+    let openToken = generation
+    lock.unlock()
+    var assetURL = url
     var keepSecurityScope = false
+    if url.isFileURL {
+      guard let readableURL = acquireReadableURL(path: url.path) else {
+        throw BridgeError.message("本地媒体文件不存在")
+      }
+      assetURL = readableURL
+      keepSecurityScope = true
+    }
     defer {
       if !keepSecurityScope {
         releaseSecurityScopedAccess()
       }
     }
-    let asset = AVURLAsset(url: url)
-    guard let track = asset.tracks(withMediaType: .audio).first else {
+    var options: [String: Any] = [:]
+    if !headers.isEmpty && !url.isFileURL {
+      options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+    }
+    let asset = AVURLAsset(url: assetURL, options: options.isEmpty ? nil : options)
+    let tracks = try await loadTracks(asset)
+    lock.lock()
+    let stillCurrent = generation == openToken
+    lock.unlock()
+    guard stillCurrent else { throw BridgeError.message("媒体会话已切换") }
+    guard let track = tracks.first(where: { $0.mediaType == .audio }) else {
       throw BridgeError.message("媒体没有可读取的音频轨道")
     }
     let reader = try AVAssetReader(asset: asset)
@@ -112,7 +150,8 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     self.reader = reader
     self.output = output
     self.sessionID = sessionID
-    self.sourcePath = url.path
+    self.sourceURL = url
+    self.sourceHeaders = headers
     self.accepting = false
     self.generation += 1
     keepSecurityScope = true
@@ -148,7 +187,14 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     let session = sessionID
     accepting = true
     lock.unlock()
-    if reader.status == .unknown { reader.startReading() }
+    if reader.status == .unknown {
+      guard reader.startReading() else {
+        let message = reader.error?.localizedDescription ?? "iOS 媒体读取器启动失败"
+        self.send(["type": "error", "sessionId": session, "message": message])
+        self.lock.lock(); self.accepting = false; self.lock.unlock()
+        return
+      }
+    }
     let work = DispatchWorkItem { [weak self] in
       guard let self else { return }
       var firstPresentationTime: CMTime?
@@ -158,7 +204,14 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
         if !active { break }
         guard let sample = output.copyNextSampleBuffer() else {
           self.lock.lock(); let stillActive = self.accepting && self.generation == token; self.accepting = false; self.lock.unlock()
-          if stillActive { self.sendTail(sessionID: session, ended: true) }
+          if stillActive {
+            if reader.status == .failed {
+              self.send(["type": "error", "sessionId": session,
+                         "message": reader.error?.localizedDescription ?? "iOS 媒体读取失败"])
+            } else {
+              self.sendTail(sessionID: session, ended: true)
+            }
+          }
           break
         }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sample)
@@ -191,13 +244,17 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     if shouldFlush { sendTail(sessionID: session, ended: false) }
   }
 
-  private func seek(milliseconds: Int) throws {
-    guard !sourcePath.isEmpty, !sessionID.isEmpty else {
+  private func seek(milliseconds: Int) async throws {
+    guard let sourceURL, !sessionID.isEmpty else {
       throw BridgeError.message("iOS 音频解码器尚未打开")
     }
-    let path = sourcePath
     let session = sessionID
-    try open(path: path, sessionID: session, startMilliseconds: milliseconds)
+    try await open(
+      url: sourceURL,
+      headers: sourceHeaders,
+      sessionID: session,
+      startMilliseconds: milliseconds
+    )
   }
 
   private func stop() {
@@ -205,8 +262,36 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     worker?.cancel(); worker = nil
     reader?.cancelReading(); reader = nil; output = nil
     sessionID = ""
-    sourcePath = ""
+    sourceURL = nil
+    sourceHeaders = [:]
     releaseSecurityScopedAccess()
+  }
+
+  private func loadTracks(_ asset: AVAsset) async throws -> [AVAssetTrack] {
+    try await withCheckedThrowingContinuation { continuation in
+      asset.loadValuesAsynchronously(forKeys: ["tracks"]) {
+        var error: NSError?
+        let status = asset.statusOfValue(forKey: "tracks", error: &error)
+        switch status {
+        case .loaded:
+          continuation.resume(returning: asset.tracks(withMediaType: .audio))
+        case .failed, .cancelled:
+          continuation.resume(throwing: error ?? BridgeError.message("网络媒体音频轨道加载失败"))
+        default:
+          continuation.resume(throwing: BridgeError.message("网络媒体音频轨道尚未就绪"))
+        }
+      }
+    }
+  }
+
+  private static func sourceURL(uri: String?, path: String?) -> URL? {
+    if let uri, let parsed = URL(string: uri), parsed.scheme != nil {
+      return parsed
+    }
+    if let path, path.hasPrefix("/") {
+      return URL(fileURLWithPath: path)
+    }
+    return nil
   }
 
   private func releaseSecurityScopedAccess() {

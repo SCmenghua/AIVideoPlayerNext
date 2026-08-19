@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../domain/speech/speech_models.dart';
@@ -189,6 +190,13 @@ class RecognitionResultStore extends ChangeNotifier {
     final label = kind == RecognitionResultKind.translation
         ? 'translation'
         : 'recognition';
+    if (Platform.isIOS) {
+      final directory = await getApplicationDocumentsDirectory();
+      final path = '${directory.path}${Platform.pathSeparator}'
+          'ai-video-player-$label-${_timestamp()}.txt';
+      await File(path).writeAsString(formatForExport(kind), encoding: utf8);
+      return path;
+    }
     final location = await getSaveLocation(
       acceptedTypeGroups: const [
         XTypeGroup(label: '文本文件', extensions: ['txt']),

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../app_build_info.dart';
@@ -120,6 +121,16 @@ class DiagnosticLogService extends ChangeNotifier {
   }
 
   Future<String?> saveAsTextFile() async {
+    if (Platform.isIOS) {
+      final directory = await getApplicationDocumentsDirectory();
+      final path = '${directory.path}${Platform.pathSeparator}${_fileName()}';
+      await File(path).writeAsString(formatForExport(), encoding: utf8);
+      info('诊断日志', '日志已导出为 TXT 文件', {
+        '路径': path,
+        '日志条数': _entries.length,
+      });
+      return path;
+    }
     final location = await getSaveLocation(
       acceptedTypeGroups: const [
         XTypeGroup(label: '文本文件', extensions: ['txt']),

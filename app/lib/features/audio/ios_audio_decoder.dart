@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
 import '../../domain/audio/audio_models.dart';
-import '../../domain/player/player_service.dart';
 
 class IosAudioDecoderException implements Exception {
   const IosAudioDecoderException(this.message);
@@ -16,11 +15,11 @@ class IosAudioDecoderException implements Exception {
   String toString() => 'IosAudioDecoderException: $message';
 }
 
-/// AVFoundation-backed local-media decoder used on iOS.
+/// AVFoundation-backed media decoder used on iOS.
 ///
-/// It receives media PCM from the app-owned file, never from the microphone.
-/// Browser handoff/network sources remain explicitly unavailable until their
-/// authenticated media pipeline can expose an equivalent timeline safely.
+/// It receives media PCM from AVFoundation, never from the microphone. Local
+/// files and authenticated HTTP(S) browser handoffs use the same native reader
+/// and timeline.
 class IosAudioDecoder implements AudioDecoder {
   static const _methods = MethodChannel('ai_video_player/ios_audio');
   static const _events = EventChannel('ai_video_player/ios_audio_events');
@@ -50,16 +49,6 @@ class IosAudioDecoder implements AudioDecoder {
     if (!Platform.isIOS) {
       throw const IosAudioDecoderException('iOS audio decoder unavailable');
     }
-    if (request.source.kind != MediaSourceKind.localFile ||
-        request.source.uri.scheme != 'file') {
-      const message = 'iOS 当前只支持本地文件的识别音频；网络媒体尚未接入 PCM。';
-      _emit(AudioDecoderStatus(
-        state: AudioDecoderState.error,
-        sessionId: request.sessionId,
-        message: message,
-      ));
-      throw const IosAudioDecoderException(message);
-    }
     _sessionId = request.sessionId;
     _emit(AudioDecoderStatus(
       state: AudioDecoderState.opening,
@@ -70,10 +59,15 @@ class IosAudioDecoder implements AudioDecoder {
           onError: _onError,
         );
     try {
-      await _methods.invokeMethod<void>('open', <String, Object?>{
-        'path': request.source.uri.toFilePath(),
+      final arguments = <String, Object?>{
+        'uri': request.source.uri.toString(),
         'sessionId': request.sessionId,
-      });
+        'headers': request.source.requestHeaders,
+      };
+      if (request.source.uri.scheme == 'file') {
+        arguments['path'] = request.source.uri.toFilePath();
+      }
+      await _methods.invokeMethod<void>('open', arguments);
       if (request.start > Duration.zero) {
         await _methods.invokeMethod<void>('seek', <String, Object?>{
           'positionMs': request.start.inMilliseconds,
@@ -146,12 +140,12 @@ class IosAudioDecoder implements AudioDecoder {
   void _onEvent(dynamic raw) {
     if (_disposed || raw is! Map) return;
     final event = Map<Object?, Object?>.from(raw);
+    final sessionId = event['sessionId'] as String?;
+    if (sessionId == null || sessionId != _sessionId) return;
     if (event['type'] == 'error') {
       _onError(event['message'] ?? 'iOS 音频解码失败');
       return;
     }
-    final sessionId = event['sessionId'] as String?;
-    if (sessionId == null || sessionId != _sessionId) return;
     final isLast = event['isLast'] == true;
     final ended = event['ended'] == true;
     final samples = _samplesFromEvent(event['samples']);
