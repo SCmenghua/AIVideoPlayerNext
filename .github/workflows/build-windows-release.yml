@@ -1,0 +1,97 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_channel:
+        description: Release channel label
+        required: false
+        default: stable
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-release:
+    name: Build Windows release
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Resolve Flutter packages
+        run: flutter pub get
+
+      - name: Run Dart analysis
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        run: flutter test
+
+      - name: Set build identity
+        shell: pwsh
+        run: |
+          $appVersion = (Select-String -Path pubspec.yaml -Pattern '^version:\s*([^+\s]+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $appBuildTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'
+          $appBuildId = "${{ github.run_number }}-${{ github.sha }}"
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_BUILD_TIME=$appBuildTime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_BUILD_ID=$appBuildId" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_RELEASE_TAG=windows-v$appVersion-${{ github.run_number }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "应用版本：$appVersion"
+          Write-Host "构建时间：$appBuildTime"
+          Write-Host "构建编号：$appBuildId"
+
+      - name: Build Windows application
+        run: >
+          flutter build windows --release
+          --dart-define=APP_VERSION="${{ env.APP_VERSION }}"
+          --dart-define=APP_BUILD_TIME="${{ env.APP_BUILD_TIME }}"
+          --dart-define=APP_BUILD_ID="${{ env.APP_BUILD_ID }}"
+
+      - name: Package Windows application
+        shell: pwsh
+        run: |
+          $releaseDirectory = Join-Path $PWD 'build/windows/x64/runner/Release'
+          if (-not (Test-Path (Join-Path $releaseDirectory '*.exe'))) {
+            throw 'Windows Release 目录中没有找到主程序 exe。'
+          }
+          $packageDirectory = Join-Path $env:RUNNER_TEMP "ai-video-player-next-$env:APP_VERSION-windows"
+          New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
+          Copy-Item -Path (Join-Path $releaseDirectory '*') -Destination $packageDirectory -Recurse -Force
+          $zipPath = Join-Path $env:RUNNER_TEMP "ai-video-player-next-$env:APP_VERSION-windows-${{ github.run_number }}.zip"
+          Compress-Archive -Path (Join-Path $packageDirectory '*') -DestinationPath $zipPath -CompressionLevel Optimal
+          "WINDOWS_PACKAGE=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload Windows package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-video-player-next-windows-${{ github.run_number }}
+          path: ${{ env.WINDOWS_PACKAGE }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.APP_RELEASE_TAG }}
+          name: AI Video Player Next Windows v${{ env.APP_VERSION }} (build ${{ github.run_number }})
+          body: |
+            Windows Release
+
+            - Version: ${{ env.APP_VERSION }}
+            - Build ID: ${{ env.APP_BUILD_ID }}
+            - Commit: ${{ github.sha }}
+            - Channel: ${{ inputs.release_channel }}
+          files: ${{ env.WINDOWS_PACKAGE }}
+          draft: false
+          prerelease: false
