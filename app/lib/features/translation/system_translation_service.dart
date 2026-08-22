@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../domain/translation/translation_service.dart';
 
-/// Apple Translation provider for iOS 18+. Dart sends only subtitle text,
+/// Apple Translation provider for iOS 26+. Dart sends only subtitle text,
 /// language codes and a request ID over the platform channel; the reply must
 /// echo the same request ID or it is rejected.
 ///
@@ -34,7 +34,7 @@ class SystemTranslationService
     if (!_isIOS()) {
       return const TranslationServiceStatus.unavailable(
         provider: 'system-translation',
-        message: '系统翻译仅在 iOS 18.2 或更高版本的设备上可用。',
+        message: '系统翻译仅在 iOS 26 或更高版本的设备上可用。',
       );
     }
     final available = _nativeAvailable;

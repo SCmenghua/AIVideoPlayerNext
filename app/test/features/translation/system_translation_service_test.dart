@@ -38,7 +38,7 @@ void main() {
     await service.readiness;
 
     expect(service.status.available, isFalse);
-    expect(service.status.message, contains('iOS 18'));
+    expect(service.status.message, contains('iOS 26'));
     expect(calls, isEmpty);
     expect(
       service.translate(_request),
@@ -66,14 +66,14 @@ void main() {
         <MethodCall>[],
         (_) => {
               'available': false,
-              'message': '系统翻译需要 iOS 18 或更高版本。',
+              'message': '系统翻译需要 iOS 26 或更高版本。',
             });
 
     final service = SystemTranslationService(isIOS: () => true);
     await service.readiness;
 
     expect(service.status.available, isFalse);
-    expect(service.status.message, '系统翻译需要 iOS 18 或更高版本。');
+    expect(service.status.message, '系统翻译需要 iOS 26 或更高版本。');
   });
 
   test('translates a segment and echoes the request id', () async {
