@@ -162,10 +162,10 @@ private actor SystemTranslator {
       target: Locale.Language(identifier: target)
     )
     do {
-      let session = try await session(configuration: configuration)
+      let created = try await session(configuration: configuration)
       cachedKey = key
-      cachedSession = session
-      return session
+      cachedSession = created
+      return created
     } catch {
       throw TranslationBridgeError.sessionFailed(error.localizedDescription)
     }
