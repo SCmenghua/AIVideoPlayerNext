@@ -525,7 +525,7 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '使用 Apple 系统翻译（iOS 18 或更高版本）。翻译在本机完成；'
+            '使用 Apple 系统翻译（iOS 18.2 或更高版本）。翻译在本机完成；'
             '所需语言包由系统在首次使用时提示下载，下载会短暂使用网络。'
             '不支持的语言组合或未下载语言包时，字幕将保留原文并显示失败原因。'
             'Windows 与 Android 上此模式不可用。',

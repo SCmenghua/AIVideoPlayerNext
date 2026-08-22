@@ -80,7 +80,7 @@ private enum TranslationBridgeError: Error {
   var message: String {
     switch self {
     case .unsupportedOS:
-      return "系统翻译需要 iOS 18 或更高版本。"
+      return "系统翻译需要 iOS 18.2 或更高版本。"
     case .languagePair(let source, let target):
       return "系统翻译不支持 \(source) 到 \(target) 的语言组合。"
     case .prepareFailed(let reason):
@@ -94,16 +94,21 @@ private enum TranslationBridgeError: Error {
 /// Serializes TranslationSession access. Concurrent Dart requests each get
 /// their own reply; the actor keeps a cached session per language pair so the
 /// per-session setup cost is paid once.
+///
+/// The programmatic session factory is the Translation framework's global
+/// `session(configuration:)` function introduced in iOS 18.2; iOS 18.0 only
+/// exposed sessions through SwiftUI's translationTask modifier.
 private actor SystemTranslator {
   private struct SessionKey: Hashable {
     let source: String
     let target: String
   }
 
-  private var sessions: [SessionKey: AnyObject] = [:]
+  private var cachedSession: AnyObject?
+  private var cachedKey: SessionKey?
 
   func availability() -> [String: Any] {
-    if #available(iOS 18.0, *) {
+    if #available(iOS 18.2, *) {
       return ["available": true]
     }
     return [
@@ -113,15 +118,14 @@ private actor SystemTranslator {
   }
 
   func translate(text: String, sourceLanguage: String, targetLanguage: String) async throws -> String {
-    guard #available(iOS 18.0, *) else {
+    guard #available(iOS 18.2, *) else {
       throw TranslationBridgeError.unsupportedOS
     }
     #if canImport(Translation)
     let source = Self.normalize(sourceLanguage)
     let target = Self.normalize(targetLanguage)
-    let key = SessionKey(source: source, target: target)
     do {
-      let session = try await session(forKey: key)
+      let session = try await openSession(source: source, target: target)
       do {
         let response = try await session.translate(text)
         return response.targetText
@@ -129,8 +133,9 @@ private actor SystemTranslator {
         // The language pair may need on-demand assets; ask the system to
         // prepare them (this shows the system download sheet once) and retry
         // the single segment once.
-        sessions[key] = nil
-        let fresh = try await session(forKey: key)
+        cachedSession = nil
+        cachedKey = nil
+        let fresh = try await openSession(source: source, target: target)
         try await fresh.prepareTranslation()
         let response = try await fresh.translate(text)
         return response.targetText
@@ -146,17 +151,20 @@ private actor SystemTranslator {
   }
 
   #if canImport(Translation)
-  private func session(forKey key: SessionKey) async throws -> TranslationSession {
-    if let cached = sessions[key] as? TranslationSession {
+  @available(iOS 18.2, *)
+  private func openSession(source: String, target: String) async throws -> TranslationSession {
+    let key = SessionKey(source: source, target: target)
+    if cachedKey == key, let cached = cachedSession as? TranslationSession {
       return cached
     }
     let configuration = TranslationSession.Configuration(
-      source: Locale.Language(identifier: key.source),
-      target: Locale.Language(identifier: key.target)
+      source: Locale.Language(identifier: source),
+      target: Locale.Language(identifier: target)
     )
     do {
-      let session = try await TranslationSession.session(configuration: configuration)
-      sessions[key] = session
+      let session = try await session(configuration: configuration)
+      cachedKey = key
+      cachedSession = session
       return session
     } catch {
       throw TranslationBridgeError.sessionFailed(error.localizedDescription)

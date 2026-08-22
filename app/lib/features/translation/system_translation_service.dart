@@ -34,7 +34,7 @@ class SystemTranslationService
     if (!_isIOS()) {
       return const TranslationServiceStatus.unavailable(
         provider: 'system-translation',
-        message: '系统翻译仅在 iOS 18 或更高版本的设备上可用。',
+        message: '系统翻译仅在 iOS 18.2 或更高版本的设备上可用。',
       );
     }
     final available = _nativeAvailable;
