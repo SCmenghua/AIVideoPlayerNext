@@ -1,334 +1,187 @@
 # AIVideoPlayerNext 当前阶段执行计划
 
 > 当前项目：`AIVideoPlayerNext`
-> 当前阶段：`Phase 8`
-> 计划状态：进行中，Windows PC 主线已完成，真实网络与 iOS 验收待完成
-> 软件版本目标：`0.8.0`
+> 当前阶段：`Phase 9`
+> 计划状态：已规划，待执行
+> 软件版本目标：`0.9.0`
 > 更新日期：2026-08-22
+
+## 0. Phase 8 结项摘要（2026-08-22，验收通过）
+
+Phase 8 八项要求（iOS 识别速度、iOS 原生翻译、翻译速度、三种字幕显示模式、三种播放中策略、启动准备开关、通用 API URL 规范化、模型列表下载）全部交付并验收通过，版本 `0.8.0`。真机回归确认：iOS 识别不再尾随播放；系统翻译（iOS 26 `TranslationSession(installedSource:target:)` 无头会话）在语言包预装后正常出译文，缺失时返回明确终态错误；播放门控在翻译不可用/终态失败时正确放行。最终自动化基线：`flutter analyze` 无问题，`flutter test --concurrency=1` 182 项全部通过；未签名 IPA 由 macOS CI 产出并在真实 iPhone 完成回归。完整结项记录见 `NEW.md` 的 Phase 8 结项记录（2026-08-22）。
 
 ## 1. 阶段目标
 
-### Phase 8：字幕显示与播放策略、iOS 识别/翻译优化、通用 API 完善
+### Phase 9：系统语音识别 Adapter
 
-本阶段围绕字幕翻译体验收束播放器行为。用户可以分别决定字幕显示内容、播放中等待策略和自动启动准备门槛；识别与翻译服务负责尽快提供字幕结果，播放器则分别按照启动状态和播放中状态作出判断。
+接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider，与现有 whisper.cpp 本地识别并列。系统识别的价值：
+
+- iOS `SFSpeechRecognizer` 提供零模型下载、低延迟的设备识别，可作为轻量替代（部分语言支持设备端识别）。
+- Windows Live Captions 用于在桌面开发阶段快速制造识别文本流，验证翻译 Provider、Overlay、历史与导出工作流，不依赖 Whisper 模型加载。
 
 本阶段目标链路：
 
 ```text
-设置持久化
-  -> 字幕显示模式 + 播放启动策略 + 启动准备开关
-  -> 播放策略协调器
-       -> 视频可播放状态
-       -> 等待两条字幕/跳过四个窗口门槛
-  -> 播放器启动决策
-  -> 播放中内容决策
-       -> 字幕优先：下一条字幕未返回则暂停
-       -> 翻译优先：下一条翻译未返回则暂停
-       -> 播放优先：不因字幕/翻译暂停
-  -> SubtitleTimeline / TranscriptDocument
-  -> 原文、译文或双语 Overlay
-
-iOS 媒体音频
-  -> 首批 PCM 与首批识别结果性能优化
-  -> iOS 原生翻译接口
-  -> 统一 TranslationService
-
-通用 API 设置
-  -> 用户 URL 解析与规范化
-  -> `/v1/chat/completions` 请求
-  -> `/v1/models` 模型列表
-  -> 用户选择并保存模型
+设置：识别引擎选择（whisper.cpp / 系统识别）
+  -> 识别引擎状态契约（可用性、授权、语言、隐私/网络提示）
+       不可用/未授权/语言不支持 -> 明确降级提示 -> 回退 whisper.cpp
+  -> AppleSpeechRecognitionService（iOS）
+       SFSpeechRecognizer 授权与语言检查
+       现有窗口 PCM -> SFSpeechAudioBufferRecognitionRequest
+       partial/final -> RecognitionEvent（媒体时间取自窗口）
+  -> WindowsLiveCaptionsService（仅 Windows 11 + Live Captions 可用）
+       可用性探测与限制说明
+       字幕文本流 -> RecognitionEvent（时间精度受限，明确标注）
+  -> 既有 RecognitionController / TranscriptDocument / 翻译队列不变
 ```
 
-本阶段必须保留 Phase 7 已完成的媒体时间轴、session/generation 隔离、有界翻译队列和稳定 `segmentId` 回填能力。自动开始播放只由视频状态和启动准备开关决定；播放开始后是否等待字幕或翻译由用户选择的播放中策略决定。两套决策都由统一策略模块解释，不在其他模块中写入隐含的固定策略。
+必须保留 Phase 7-8 已完成的媒体时间轴权威性、session/generation 隔离、有界队列和稳定 `segmentId` 回填能力。系统识别 Provider 只是 `WindowRecognitionService` 契约后的另一种实现来源；whisper.cpp 路径、固定素材回归和诊断口径不得被系统 Provider 污染。
 
 ## 2. 已确认事实与现状
 
-- `NEW.md` 已将 Phase 8 收束为八项要求：iOS 识别速度、iOS 原生翻译、翻译速度、字幕显示模式、三种播放策略、启动准备开关、通用 API URL 规范化和模型列表下载。
-- 当前 `AppSettingsController` 已持久化翻译 Provider、通用 API endpoint、API Key、Model 和识别预取策略，但尚未持久化字幕显示模式、播放启动策略和“等待两条字幕或跳过四个窗口”开关。
-- 当前通用 API endpoint 已有基础规范化函数，可以处理域名根路径、`/v1` 和完整 Chat Completions 地址；仍需补齐用户输入校验、输入框交互、错误提示和模型列表获取。
-- 当前设置页已有通用 API 的 Endpoint、API Key 和 Model 输入框，但 Model 右侧尚无“下载模型列表”按钮和模型选择下拉菜单。
-- 当前 `SubtitleOverlay` 固定使用“译文优先、原文降级”的显示方式，尚未由用户选择双语、原文或翻译模式。
-- 当前 `StartupPreparation` 包含固定的翻译准备和四窗口放行逻辑，必须改造成由播放策略和设置开关驱动的统一决策；不能把现有固定行为直接当作 Phase 8 最终语义。
-- 当前已有有界 `TranscriptTranslationQueue`、`TranslationService`、OpenAI-compatible Provider、DeepL Provider、`TranscriptDocument` 和字幕 Overlay 测试，可作为本阶段的基础设施。
-- 当前 iOS 已有 `IosAudioDecoder` 与 `IOSAudioDecoderBridge`，可以通过 AVFoundation 输出带媒体时间的 PCM；首批音频/识别结果耗时和 iOS 设备实测数据仍需建立。
-- 当前 iOS 工程尚未接入 Apple Translation 的原生桥接和统一 Provider 实现。
-- 当前翻译队列已经支持固定并发、超时、去重、取消和 session 校验；翻译速度优化应优先定位实际瓶颈，再调整调度或 Provider 调用，不破坏稳定片段回填。
+- 当前识别管线：`RecognitionController` 消费 `AudioDecoder` 的带媒体时间 PCM，按窗口规划器切窗（目标 4 秒 / 上限 6 秒，650ms 尾静音，400ms 最小语音），交给 `WindowRecognitionService`（whisper.cpp 经 speech_core FFI）产出 `RecognitionEvent`，整理进 `TranscriptDocument` 供翻译与 Overlay 消费。
+- `RecognitionController` 已具备有界队列、20s/45s 水位背压、session/generation 隔离、暂停/seek/换片取消；Windows 与 iOS 共用同一 Dart 调度，iOS 已移除墙钟节流。
+- 当前设置已有识别预取策略（完整预识别 / 按需预取），但没有识别引擎选择；`WindowRecognitionService` 也没有可用性/授权状态契约（whisper.cpp 始终可用）。
+- iOS 原生桥接模式已成熟：`IOSAudioDecoderBridge`、`SystemTranslationBridge` 均以 MethodChannel + AppDelegate 注册实现，Dart 侧有 `IosAudioDecoder`、`SystemTranslationService` 对应封装与测试替身，可按同一模式新增 Speech 桥接。
+- iOS `SFSpeechRecognizer` 要点：需要 `NSSpeechRecognitionUsageDescription` 与运行时授权；请求级限制约 1 分钟（本项目的 4-6 秒窗口天然满足）；`supportsOnDeviceRecognition` 与语言可用性需逐locale 检查；设备端识别关闭时可能联网。音频输入用 `SFSpeechAudioBufferRecognitionRequest` 逐块追加，`endAudio` 后产出 final。
+- Windows Live Captions 没有公开的字幕读取 API；可行路径是 UI Automation 读取系统字幕窗口文本（参考 LiveCaptions-Translator 的做法），且要求 Windows 11 且用户已在系统设置启用 Live Captions。时间精度只有"文本到达时刻"，无法给出精确媒体起止。
+- 诊断日志已具备五级体系（调试/信息/警告/错误/关闭，默认信息级），新事件按同一分级约定接入。
 
 ## 3. 不可违反的约束
 
-0. 若需要下载外网的内容，可使用系统的代理，端口为mix:10808
-1. 字幕时间只服从播放器的权威媒体时间轴；识别或翻译结果的墙钟完成时间不能改变字幕的媒体起止时间。
-2. 播放启动必须经过统一的策略决策，不能由播放器页面、识别控制器、翻译队列分别维护互相冲突的等待条件。
-3. 字幕优先、翻译优先和播放优先必须具有可测试且互斥的播放中语义：选中的策略是唯一的暂停/继续决策来源。
-4. 自动开始播放只要求视频达到可播放状态；启用“等待两条字幕或跳过四个窗口”时，额外遵守该启动门槛。该门槛与播放中策略独立，播放优先也可以保留并使用此启动门槛。
-5. 播放开始后，字幕优先在下一条字幕未返回时暂停，翻译优先在下一条翻译未返回时暂停，播放优先不因字幕或翻译暂停。
-6. 切换设置、换片、重新开始会话和 seek 后，旧的识别、翻译、模型列表请求和播放器启动回调不得污染当前会话或改变当前设置状态。
-7. iOS 原生服务不可用、系统版本不支持或请求失败时，必须返回明确状态并遵循用户可见的 Provider 选择；不得伪造成功结果或静默覆盖用户选择。
-8. 通用 API 只向用户输入的规范 URL 发起请求。URL 规范化必须限制在合法 HTTP(S) 地址内，不能将媒体 URL、Cookie、Referer 或其他浏览器授权信息带入翻译请求。
-9. 模型列表下载必须使用当前已保存的 endpoint 和 API Key，支持取消、超时、HTTP 错误和响应格式错误；服务端返回的模型名必须经过校验后才能进入选择菜单。
-10. 设置文件写入保持后台串行和原子替换；新增字段缺失时使用明确默认值，旧设置文件必须可以继续打开。
-11. 队列、PCM、模型列表和 UI 状态均有界；不得因为持续识别、翻译失败或重复点击下载而无限增长。
-12. 测试构建的诊断数据仅保留在本机；Release 构建继续执行既有脱敏策略，不新增敏感信息外传路径。
+0. 若需要下载外网的内容，可使用系统的代理，端口为 mix:10808。
+1. 字幕时间只服从播放器的权威媒体时间轴；系统识别结果的墙钟到达时间不能改变字幕的媒体起止时间。Apple Speech 的媒体时间取自喂入窗口的 `mediaStart/mediaEnd`；Live Captions 只能给出低精度锚点，必须在文档与 UI 中明示，不得伪装成精确时间轴来源。
+2. whisper.cpp 是跨平台识别基准。系统 Provider 的输出、测试替身与开关状态不得影响 whisper.cpp 固定素材回归；两套 Provider 的结果不得混入同一识别会话。
+3. 系统识别引擎必须在设置中可选择、可关闭，并显示授权、隐私与网络状态；未授权、语言不支持或系统不可用时，返回明确状态并回退 whisper.cpp，不得伪造识别结果或静默空跑。
+4. 识别引擎切换、换片、重新开始会话和 seek 后，旧引擎的在途请求与迟到结果不得污染当前会话（沿用 session/generation 隔离）。
+5. Apple Speech 授权弹窗只在用户主动选择该引擎或点击相关按钮时触发，不得在应用启动时抢授权。
+6. Windows Live Captions adapter 是开发辅助与桌面可选能力，默认关闭；不作为移动端方案，不作为生产识别基准。
+7. 设置文件写入保持后台串行和原子替换；新增字段缺失时使用明确默认值，旧设置文件必须可以继续打开（默认引擎为 whisper.cpp）。
+8. 队列、PCM、事件与 UI 状态均有界；系统识别产生的 partial 流不得造成无界事件增长。
+9. 测试构建的诊断数据仅保留在本机；Release 构建继续执行既有脱敏策略。识别内容不新增任何外传路径（Apple Speech 的系统联网行为需在 UI 中提示，由用户选择）。
 
 ## 4. 领域模型与决策语义
 
-### 4.1 设置模型
-
-新增设置枚举和字段，名称可按现有代码风格调整，但语义必须保持稳定：
+### 4.1 识别引擎设置
 
 ```text
-SubtitleDisplayMode
-  bilingual       原文与译文同时显示
-  original        只显示原文
-  translation     只显示译文；译文尚未产出时按产品定义显示空态或原文降级
-
-PlaybackStartStrategy
-  subtitlePriority     播放中等待下一条字幕返回
-  translationPriority  播放中等待下一条翻译返回
-  playbackPriority     播放中不等待字幕或翻译
-
-waitForSubtitlePreparation
-  自动开始播放前，是否启用“等待两条字幕产出或跳过四个窗口”门槛
-  与 PlaybackStartStrategy 独立，三种策略均可单独保存
+RecognitionEngineKind
+  whisper        whisper.cpp 本地识别（默认，现状）
+  system         平台系统识别：iOS -> Apple Speech；Windows -> Live Captions
 ```
 
-设置快照、持久化 JSON、默认构造、环境变量初始化、变更通知和设置页必须使用同一套字段。枚举值变更要有兼容处理，未知值回退到默认值而不是阻止应用启动。
+- 设置持久化、默认值回退与既有字段同一套机制；默认 `whisper` 保证旧设置无缝升级。
+- 引擎选择与预取策略（完整预识别/按需预取）正交：任何引擎都沿用同一预取与背压行为。
+- 引擎切换立即生效于下一次识别会话；当前会话中的切换走既有"配置变更重建"路径，不允许新旧引擎同时产出事件。
 
-### 4.2 播放启动决策
+### 4.2 识别引擎状态契约
 
-建议建立纯 Dart 的 `PlaybackStartPolicy` 或等价决策对象，输入当前状态并输出明确决策：
+为识别引擎建立与 `TranslationServiceStatusProvider` 对称的状态契约：
 
 ```text
-输入：
-  videoReady
-  nextSubtitleReady
-  nextTranslationReady
-  recognizedSubtitleCount / skippedWindowCount
-  strategy
-  waitForSubtitlePreparation
-
-输出：
-  canStart
-  reason
-  waitingFor
-  gateEnabled
+RecognitionEngineStatus
+  available(provider, ...)                        可用
+  unavailable(provider, message, ...)             不可用 + 用户可读原因
 ```
 
-语义如下：
+- whisper.cpp：常驻可用（模型加载失败时按现有错误路径报错）。
+- Apple Speech：探测授权状态、locale 语言支持、设备端识别可用性；未授权时提供"去授权"入口，拒绝授权后给出明确回退提示。
+- Live Captions：探测系统版本与功能启用状态；未启用时给出开启指引而不是报错。
+- `RecognitionController` 在引擎不可用时记录警告并按设置回退（默认自动回退 whisper.cpp 并在诊断与 UI 中明示"本次会话已回退"），不中断播放。
 
-| 播放中策略 | 自动开始条件 | 播放中缺少内容时 |
-|---|---|---|
-| 字幕优先 | 视频可播放；若开关开启则先满足启动门槛 | 下一条字幕未返回时暂停并显示“等待字幕返回中” |
-| 翻译优先 | 视频可播放；若开关开启则先满足启动门槛 | 下一条字幕的翻译未返回时暂停并显示“等待翻译返回中” |
-| 播放优先 | 视频可播放；若开关开启则先满足启动门槛 | 继续播放，不因字幕或翻译缺失暂停 |
+### 4.3 Apple Speech 的窗口映射
 
-“下一条/下一句”必须基于当前 session 的媒体时间顺序判断，不能用任意历史结果数量替代。等待原因要能被 UI 和诊断日志读取，但不应把内部实现细节暴露成新的用户配置。
+- 复用现有窗口规划：每个 `RecognitionWindow` 的 PCM 逐块追加进一个 `SFSpeechAudioBufferRecognitionRequest`，窗口耗尽即 `endAudio`；`bestTranscription` 变化映射为 partial 事件，`isFinal` 映射为 final 事件，媒体时间取窗口边界。
+- 窗口取消（seek/换片/暂停清空）必须终止对应请求并丢弃迟到结果。
+- 设备端识别可用时默认 `requiresOnDeviceRecognition = true`（零联网、隐私最优）；不可用但在用户选择联网识别时，UI 必须提示该语言会使用服务器识别。
 
-### 4.3 字幕显示模式
+### 4.4 Live Captions 的定位与锚点
 
-Overlay 继续从 `TranscriptDocument` 按播放器媒体位置查询当前片段，并依据 `SubtitleDisplayMode` 渲染：
-
-- 双语：显示原文和对应译文；译文缺失时显示明确的原文状态，不篡改原文。
-- 原文：只显示原文，不要求翻译队列完成。
-- 翻译：只显示译文；没有可用译文时显示空态或按统一产品决定处理，不能把显示模式偷偷改回双语。
-
-显示模式只影响 Overlay 呈现，不应改变 `TranscriptDocument` 的原文数据、翻译队列的 session 隔离或播放器时间轴。
+- 输出文本按到达顺序映射为低精度 `RecognitionEvent`，锚点取播放器当前媒体位置的最近窗口边界；UI 与导出明确标注来源为 Live Captions、时间为近似值。
+- 该引擎只用于开发验证与桌面可选场景，移动端设置中不出现；其事件不进入 whisper.cpp 的回归断言。
 
 ## 5. 执行步骤
 
-### Step 1：设置模型、迁移与设置页骨架
-
-状态：`已完成（自动化验证）`
-
-- 在 `AppSettings`、`AppSettingsController`、设置 JSON 和 `SettingsWorkspace` 中加入字幕显示模式、播放启动策略和启动准备开关。
-- 为新增字段定义默认值，并覆盖旧设置文件缺少字段、未知枚举值、空字符串和非法值的情况。
-- 新增“字幕显示”区域，使用互斥分段控件呈现双语、原文、翻译三种模式。
-- 新增“播放启动策略”区域，使用互斥分段控件呈现字幕优先、翻译优先、播放优先三种策略。
-- 新增启动准备开关；该开关只控制自动开始播放前的“两条字幕/四窗口”门槛，三种播放策略均可编辑和独立保存。
-- 设置变更后更新内存快照并后台持久化；重新打开设置页时控件必须反映保存值。
-
-完成条件：新增设置可以保存、重启后恢复，播放策略与启动门槛互不覆盖，旧 `settings.json` 不会导致启动失败。
-
-### Step 2：实现统一播放策略决策器
-
-状态：`已完成（自动化验证）`
-
-- 将现有 `StartupPreparation` 的固定等待判断拆为“视频可播放状态”“启动准备门槛”和“播放中内容策略”三部分。
-- 实现启动与播放中策略的纯 Dart 单元测试，覆盖视频未准备好、字幕/译文缺失、无字幕、跳过窗口数量变化、会话切换和重复状态更新。
-- 将启动准备开关接入决策器。关闭时不使用两条字幕/四窗口门槛；开启时对三种播放策略均只影响自动开始阶段。
-- 在播放器启动、翻译回填、识别结果到达、视频缓冲状态改变、播放位置改变和设置改变时重新计算决策，避免重复 `play()` 或迟到回调误启动。
-- UI 显示当前等待原因和可执行状态，但不把策略判断分散到多个 Widget 回调中。
-- 重新审视已有超时和“立即播放”入口：它们必须服从当前策略定义，不得绕过用户选择，也不得把固定十秒规则写成全局产品约束。
-
-完成条件：启动门槛与三种播放中策略均能由单一策略模块解释；所有自动启动、手动启动和异步回调都经过同一决策路径。
-
-### Step 3：接入字幕显示模式与 Overlay 回归
-
-状态：`已完成（自动化验证）`
-
-- 修改 `SubtitleOverlay` 及其调用链，使其读取设置中的 `SubtitleDisplayMode`。
-- 覆盖双语、原文、翻译三种显示结果，以及译文 pending、failed、缺失和异步回填状态。
-- 保持 Overlay 按媒体时间查询，不因设置切换重写原文或改变 `TranscriptDocument` 的片段 ID。
-- 普通播放器、全屏播放器、拖动预览和设置切换均使用同一显示模式语义。
-- 增加 Widget 测试，确认模式切换不会触发不必要的翻译请求，也不会把旧 session 的译文显示到新媒体。
-
-完成条件：三种显示模式在播放器和测试环境中可切换，字幕内容、样式和时间命中稳定，翻译未返回时状态可预期。
-
-### Step 4：iOS 首批识别速度优化
+### Step 1：识别引擎设置模型与装配骨架
 
 状态：`未开始`
 
-- 建立真实 iPhone 基线，至少记录打开媒体、首个可用 PCM、首个识别窗口、前几句 final 字幕、稳定阶段识别吞吐和内存峰值。
-- 重点分析前几句慢的来源：AVFoundation 资源加载、音频轨道建立、首次 reader 启动、首个 PCM 批次大小、Dart/Swift 事件交接和 Whisper 首次推理初始化。
-- 优化首批音频交接与识别初始化路径，保证首个有效窗口尽快进入现有有界识别管线；持续识别仍使用稳定媒体时间和 session 校验。
-- 避免为了首句速度取消音频时间映射、跳过质量门控或引入无限并发；所有调整必须有设备数据对比。
-- 覆盖本地文件、普通 HTTP(S) 媒体、暂停、seek、换片、前后台切换和弱网情形，并记录无法由 iOS 保证的后台/热量限制。
+- 新增 `RecognitionEngineKind` 设置字段、持久化、默认值回退与设置页"识别引擎"分段控件（iOS 显示 Whisper/系统识别，Windows 显示 Whisper/系统字幕，其余平台仅 Whisper）。
+- `providers.dart` 按设置装配识别引擎；引擎不可见性/可用性不满足的平台只显示 Whisper。
+- 建立识别引擎状态契约（`RecognitionEngineStatus`）与探测接口，whisper.cpp 返回常驻可用。
 
-完成条件：真实 iPhone 上前几句识别耗时相对基线改善，字幕时间不漂移，连续识别、取消和会话隔离回归通过。
+完成条件：设置可保存、重启恢复；旧 `settings.json` 打开不失败；默认行为与 Phase 8 完全一致。
 
-### Step 5：接入 iOS 原生翻译接口
+### Step 2：识别引擎状态、降级与控制器接线
 
-状态：`代码已完成（Windows 自动化验证）；macOS 构建、未签名 IPA 与真机验收待完成`
+状态：`未开始`
 
-- 确认项目支持的最低 iOS 版本、Apple Translation API 可用条件、语言支持范围、系统下载资源和隐私/网络状态要求。
-- 在 iOS 原生侧建立最小翻译桥接，输入只包含字幕文本、源语言、目标语言和请求标识，输出包含结果、状态、错误类型和请求标识。
-- 在 Dart 侧实现统一的 iOS Translation Provider，使其遵守现有 `TranslationService` 与 `TranslationServiceStatusProvider` 契约。
-- 将取消、超时、系统不支持、语言不可用、资源未准备和用户拒绝等状态映射为可诊断的 Provider 状态。
-- 与现有翻译模式设置对接：用户选择 iOS 原生翻译时才创建该 Provider，不覆盖 DeepL、通用 API 或本地模型配置。
-- 通过稳定 `segmentId` 回填结果，验证换片、seek、切换 Provider 和重复请求不会串片。
+- `RecognitionController` 接入引擎状态：启动会话前探测；不可用时记录警告、自动回退 whisper.cpp 并在诊断与播放器状态区明示。
+- 引擎切换、换片、seek 与暂停清空时，旧引擎在途请求被取消或隔离，迟到结果不回写当前会话（沿用 generation 机制）。
+- 纯 Dart 单测覆盖：不可用回退、切换隔离、迟到结果丢弃、状态上报。
 
-完成条件：支持设备能够完成一条和连续多条字幕的原生翻译；不支持设备显示明确不可用状态，其他 Provider 仍可正常工作。
+完成条件：任何引擎状态下，播放、字幕时间轴与翻译管线行为不劣于 Phase 8 基线。
 
-### Step 6：翻译速度优化与首批字幕体验
+### Step 3：iOS Apple Speech Adapter
 
-状态：`队列、seek 优先级、批量调度和诊断已完成；真实网络性能验收待完成`
+状态：`未开始`
 
-- 基于现有翻译队列记录排队、请求、响应、回填和 Overlay 刷新的分段耗时，先确认瓶颈属于队列、Provider、网络、系统翻译资源还是 UI。
-- 优先保证当前播放位置附近和启动阶段的字幕进入翻译队列，避免历史缺口长期占用有限并发；优先级调整必须保持有界和可取消。
-- 减少重复翻译和无效回填，继续使用稳定 `segmentId`、源文本和语言作为去重依据；Provider 切换后清理或隔离旧配置结果。
-- 对通用 API、DeepL、iOS 原生翻译分别记录首条和稳态延迟，不以某一 Provider 的速度假设替代其他 Provider 行为。
-- 用真实短视频和连续字幕回归验证首批译文、播放策略决策、翻译失败恢复和 Overlay 刷新。
+- Swift 侧新增 `AppleSpeechBridge`（MethodChannel 模式同 `SystemTranslationBridge`）：授权请求与状态查询、locale 支持、`supportsOnDeviceRecognition`、按窗口创建 `SFSpeechAudioBufferRecognitionRequest`、partial/final 事件流、取消。
+- `Info.plist` 增加 `NSSpeechRecognitionUsageDescription`（中文说明，注明识别内容可能由系统处理）。
+- Dart 侧 `AppleSpeechRecognitionService` 实现 `WindowRecognitionService` 与状态契约；窗口 PCM 经通道喂入，事件带 requestId/sessionId 回显守卫。
+- 自动化：Dart 契约测试用 mock 通道覆盖授权拒绝、语言不支持、final 映射、取消与迟到丢弃；macOS CI 编译 iOS。
 
-本轮已完成的队列可靠性与 seek 优先级子项：`TranscriptTranslationQueue.prioritizeFrom` 会按当前媒体位置重建调度代次，跳过已结束的历史片段并优先入队当前及后续片段；旧 Provider 请求即使无法取消，也不会占用新调度的并发额度或回写结果。Provider 异常、超时、错误 `segmentId` 和空文本都会触发最多三次的有界重试，间隔为 1 秒、2 秒；达到上限后保留失败状态而不会无限重试。session、seek、Provider 切换和 dispose 都会取消旧重试计时器。播放器主界面、全屏拖动和前进/后退按钮均调用统一 seek 入口，自动化测试覆盖快进顺序、旧请求隔离、瞬时失败恢复、空文本重试和上限停止。
+完成条件：真机上授权后可产出与 whisper.cpp 同结构的 `RecognitionEvent`，字幕时间取窗口媒体时间；拒绝授权或语言不支持时明确回退。
 
-完成条件：翻译首条结果和稳态吞吐相对基线改善；队列无界增长、重复请求、旧结果污染和字幕时间变化均未出现。
+### Step 4：Windows Live Captions 调研与 Adapter
 
-### Step 7：通用 API URL 规范化与模型列表
+状态：`未开始`
 
-状态：`已完成（自动化验证）`
+- 先做可行性 spike：Windows 11 版本检测、Live Captions 启用状态探测、UI Automation 读取字幕文本的技术路径与稳定性（窗口类名/文本节点可能在系统更新中变化，需容错与版本标注）。
+- 依据调研结果实现 `WindowsLiveCaptionsService`：默认关闭；启用时输出低精度 `RecognitionEvent`；系统不支持或功能未开启时返回明确状态与开启指引。
+- 明确该引擎"开发验证工具"定位：用于快速验证翻译 Provider、Overlay、历史与导出工作流；文档与 UI 注明时间近似。
 
-- 将用户输入先按 URL 字符串解析，支持 `abc.com`、`abc.com/v1`、带或不带协议的合法 HTTP(S) 地址，以及已经是 `/v1/chat/completions` 的地址。
-- 规范化结果统一为 `https://abc.com/v1/chat/completions` 形式；已有明确路径时不得重复追加路径，查询参数和末尾斜杠按统一规则处理。
-- 对空值、非法 scheme、缺少 host、用户名密码、非 HTTP(S) 地址和明显不合法的路径返回可见校验错误；不得在用户未输入时凭空生成 endpoint。
-- 在 Model 输入框右侧增加带图标的“下载模型列表”按钮；点击时使用当前 endpoint 和 API Key 请求对应的模型列表接口。
-- 解析常见 OpenAI-compatible `/v1/models` 响应，校验 `data[].id` 为非空字符串，去重并保持服务端顺序；列表为空或响应格式异常时显示可理解的错误状态。
-- 使用下拉菜单供用户选择模型；下载中禁用重复请求，支持超时、取消、HTTP 错误、鉴权失败和 endpoint 变更后的过期结果丢弃。
-- 用户手动输入的 Model 仍可保存；下载列表不得强制覆盖当前选择，除非用户主动选择列表项。
-- 增加 URL 规范化纯 Dart 测试、模型响应解析测试、设置持久化测试和设置页交互测试。
+完成条件：Windows 11 环境可开关；不可用环境清晰降级；调研结论（含 UI Automation 的脆弱性风险）写入执行记录。
 
-完成条件：示例 URL 均规范化为正确 endpoint；模型列表可以下载、选择、保存和恢复，错误不会破坏已有 API 配置。
+### Step 5：设置页与诊断集成
 
-### Step 8：跨模块集成、性能回归与结项
+状态：`未开始`
 
-状态：`进行中（Windows 自动化完成；iOS、真实网络和最终集成验收待完成）`
+- 识别引擎分段的说明文案包含隐私/网络提示：Apple Speech 设备端识别零联网，联网语言会提示；Live Captions 完全本机。
+- 引擎状态、授权入口、回退事件进入诊断日志（信息/警告分级遵循五级体系）。
+- 诊断页能区分事件来源引擎（whisper/system），export 字段与脱敏策略不变。
 
-- 组合测试字幕显示模式、三种播放策略和启动准备开关的全部有效状态，确认播放中策略不覆盖独立的字幕准备门槛。
-- 回归本地视频、普通 HTTP(S) 网络视频、短视频和长视频；覆盖打开、播放、暂停、seek、连续 seek、换片、翻译切换和设置切换。
-- 在 Windows 验证通用 API URL、模型列表、现有 Provider、字幕 Overlay 和播放策略；在真实 iPhone 验证 iOS 识别首句速度、原生翻译和前后台行为。
-- 运行 `dart analyze lib test`、`flutter analyze`、`flutter test --concurrency=1`，执行 iOS 构建和 Windows Release smoke；保存测试输出与设备性能基线。
-- 更新 `NEW.md` 的实际进度，只记录已验证的行为；未完成的真实 Provider、iOS 真机或网络回归不得标记为完成。
+完成条件：用户可以在设置中选择、关闭、查看状态与授权；诊断可追溯引擎与回退原因。
 
-完成条件：Phase 8 八项要求均有实现、自动化测试和必要的真实设备/网络回归记录；设置、播放、字幕、翻译和通用 API 的状态没有互相覆盖或冲突。
+### Step 6：跨模块集成、回归与结项
+
+状态：`未开始`
+
+- 回归：whisper.cpp 固定素材回归结果与 Phase 8 基线完全一致（系统 Provider 代码不得影响该路径）；识别引擎切换 × 换片 × seek × 翻译并行的组合测试。
+- 真机：iPhone 上 Apple Speech 授权、单句/连续识别、取消、换片、回退；Windows 11 上 Live Captions 验证翻译/Overlay/历史/导出工作流。
+- 运行 `dart analyze lib test`、`flutter analyze`、`flutter test --concurrency=1`；iOS 构建走 macOS CI 产出未签名 IPA 并真机回归。
+- 更新 `NEW.md` 实际进度，只记录已验证行为。
+
+完成条件：验收清单全部通过，`NEW.md` 记录 Phase 9 结项。
 
 ## 6. 本阶段范围边界
 
-包含：Phase 8 八项产品要求、设置持久化、播放策略决策、字幕显示模式、iOS 首批识别性能、iOS 原生翻译、现有翻译队列优化、通用 API URL 规范化和模型列表选择。
+包含：识别引擎设置与状态契约、引擎降级回退、iOS Apple Speech adapter（Swift + Dart + 授权）、Windows Live Captions 调研与 adapter、设置页与诊断集成、相关自动化与真机回归。
 
-不包含：重新设计 Phase 7 的网络媒体消费者、重新实现 Whisper 时间轴、永久字幕历史数据库、绕过 DRM/MSE/blob 或受保护媒体、无界缓存、未验证的本地翻译模型默认启用，以及与 Phase 8 无关的视觉重构。
+不包含：Android 系统识别、whisper.cpp 模型更换或量化调整、识别控制器核心调度重写、Live Captions 的生产级时间轴精确化、永久字幕历史数据库、与识别引擎无关的视觉重构。
 
 ## 7. 验收清单
 
-- [ ] 字幕显示设置支持双语、原文、翻译三种模式，并在普通/全屏播放器中生效。
-- [ ] 字幕优先播放中在下一条字幕未返回时暂停，并显示“等待字幕返回中”。
-- [ ] 翻译优先播放中在下一条翻译未返回时暂停，并显示“等待翻译返回中”。
-- [ ] 播放优先播放中不因字幕或翻译未返回而暂停。
-- [ ] 自动开始播放可独立使用“等待两条字幕产出或跳过四个窗口”门槛；开关可保存且不被播放策略覆盖。
-- [ ] 设置切换、换片、seek 和迟到回调不会造成重复播放、串片或错误启动。
-- [ ] iOS 真实设备前几句识别速度相对基线改善，媒体时间和后续识别连续正确。
-- [ ] iOS 原生翻译 Provider 可用时能完成字幕翻译，不可用时有明确状态且其他 Provider 不受影响。
-- [ ] 翻译首条延迟和稳态吞吐相对基线改善；队列仍有界、可取消、去重且 session 隔离。
-- [ ] `abc.com`、`abc.com/v1` 和完整 endpoint 均能规范化为正确的 Chat Completions URL；非法 URL 给出校验错误。
-- [ ] 通用 API 可下载 `/v1/models`，模型列表可下拉选择、保存、恢复，并正确处理失败和重复点击。
-- [ ] URL、模型列表、字幕模式和播放策略均有单元/Widget 测试；Phase 8 集成测试通过。
-- [ ] `flutter analyze`、`flutter test --concurrency=1`、Windows Release smoke 和 iOS 真机回归均有记录。
+- [ ] 设置提供识别引擎选择，持久化且旧设置文件兼容；默认 whisper.cpp，行为与 Phase 8 一致。
+- [ ] Apple Speech：授权请求只在用户主动操作时触发；授权后能产出结构一致的 `RecognitionEvent`，媒体时间取自窗口；取消/换片/seek 不串会话。
+- [ ] Apple Speech：拒绝授权、语言不支持或不可用时明确降级回 whisper.cpp，播放与字幕不受影响。
+- [ ] Live Captions：仅 Windows 11 且功能可用时可选；输出标注低精度时间与来源；不可用环境清晰降级。
+- [ ] 两种系统 Provider 都可独立测试与禁用；其输出不污染 whisper.cpp 固定素材回归。
+- [ ] 引擎状态、回退与授权事件可在诊断日志追溯；Release 脱敏策略不变。
+- [ ] `dart analyze lib test`、`flutter analyze`、`flutter test --concurrency=1` 通过；iOS 未签名 IPA 构建并完成真机回归；Windows Release smoke 通过。
 
 ## 8. 本轮执行记录
 
 | 日期 | 项目 | 状态 | 说明 |
 |---|---|---|---|
-| 2026-08-19 | Phase 8 计划重订 | 已完成 | 根据 `NEW.md` 的八项要求替换旧 Phase 7 执行计划；旧计划中的固定启动等待和全局播放策略不再作为本阶段约束。 |
-| 2026-08-19 | Phase 8 Step 1 设置模型与页面 | 已完成（自动化验证） | 已加入字幕显示模式、三种播放中策略和启动准备开关；设置 JSON 具备缺失/未知枚举/非法类型回退，播放策略不会覆盖独立的启动准备开关。 |
-| 2026-08-19 | Phase 8 Step 2 统一播放策略 | 已完成（自动化验证） | 新增纯 Dart `PlaybackStartPolicy` 及测试，播放器启动、手动播放、字幕/翻译回填、视频 ready 和设置切换均走统一决策；自动开始只由视频 ready 与独立的“两条字幕/四窗口”开关决定。 |
-| 2026-08-19 | Phase 8 Step 3 字幕显示与 Overlay | 已完成（自动化验证） | 普通/全屏播放器接入同一显示模式，并新增双语、原文、翻译 pending 的 Widget 测试；字幕仍按媒体时间查询。 |
-| 2026-08-19 | Phase 8 播放语义修正 | 已完成（自动化验证） | 字幕优先和翻译优先只在播放中分别等待下一条字幕或译文；播放优先不断播，三种策略均不改变自动开始的独立准备门槛。 |
-| 2026-08-19 | Phase 8 iOS 识别与翻译 | 未开始 | 待建立真实 iPhone 性能基线并接入原生翻译接口。 |
-| 2026-08-19 | Phase 8 通用 API | 已完成（自动化验证） | URL 规范化、`/v1/models` 下载、去重排序、下拉选择、持久化、超时/HTTP/响应格式错误和过期请求隔离均已实现并测试。 |
-| 2026-08-19 | Phase 8 自动化验证 | 已完成（Windows） | `dart analyze lib test` 报告 `No issues found`，格式检查通过，`flutter test --concurrency=1` 通过 127 项；Windows Release `0.8.0` 已构建、ZIP 回解压覆盖并完成 5 秒启动 smoke，关键 exe、DLL、`data` 和模型资源存在。 |
-| 2026-08-19 | Phase 8 翻译 seek 与失败重试 | 已完成（自动化验证） | 翻译队列按 seek 位置重建有界调度，当前及后续字幕优先，历史排队任务清理，旧在途请求与重试计时器隔离；Provider 异常、超时、错误 ID 和空文本进行有界重试，避免队列因无结果卡住。 |
-| 2026-08-20 | Phase 8 翻译调度与诊断增强 | 已完成（代码与静态验证） | 设置页新增可持久化的每批字幕数（1-20）和并发请求数（1-8）；OpenAI-compatible 与 DeepL 支持批量请求，旧 Provider 自动回退为严格单条并发；队列支持运行时更新配置。诊断页新增实际平均批量、并发峰值、API 均值/P95/最近、排队等待、端到端等待、失败尝试、最终失败和重试数据。批量提示词要求稳定 ID、一一对应、仅返回 JSON 数组；真实网络 Provider 回归仍待执行。 |
-| 2026-08-20 | Phase 8 批量翻译协议与超时修复 | 已完成（自动化验证） | 批量提示词明确要求只返回 JSON 数组，每项使用原样复制的 `id` 和 `translation`；解析器按稳定 ID 严格映射，并兼容常见 `text` 别名和 Markdown JSON 代码块。正式翻译默认超时从 20 秒调整为 40 秒；OpenAI-compatible/DeepL 超时会关闭底层 HTTP 连接，避免旧请求与重试请求叠加；批量失败会降级为逐条重试。 |
-| 2026-08-20 | Phase 8 翻译回归验证与 Release | 已完成（Windows） | `flutter analyze` 通过；完整 `flutter test --concurrency=1` 通过 141 项；翻译定向测试覆盖批量格式、稳定 ID、格式兼容、40 秒默认超时、底层连接关闭和批量失败逐条重试；Windows `0.8.0` Release 构建和 5 秒启动 smoke 通过。当前构建位于 `release/ai-video-player-next-0.8.0-20260820-021342/ai_video_player_next.exe`。 |
-| 2026-08-22 | Phase 8 当前进度盘点 | 已完成盘点 | 已将本阶段当前实现、验收结果、未完成工作和待修复/待验证问题集中记录在本节；未通过真实 iPhone 或真实网络 Provider 验收的内容不标记为完成。 |
-| 2026-08-22 | Phase 8 单句翻译可靠性改造 | 已完成（自动化验证） | 针对真实使用中"批量翻译高失败率、失败后卡住"的问题：通用 API 移除批量 JSON 协议，改为逐句请求、模型只返回纯文本译文、按本地 `segmentId` 回填；Provider 持有共享 `HttpClient` 复用 TCP/TLS 连接（空闲保活 90 秒），超时用 `HttpClientRequest.abort` 只中止本请求、不销毁连接池；响应剥离 markdown 围栏和对称引号；HTTP 408/429/5xx 归类为可重试并读取 `Retry-After`（上限 60 秒），其余 4xx 不再自动重试；并发上限从 8 放宽到 20（默认 10），默认批量改为 1；"每批字幕数"仅对 DeepL 显示。`flutter analyze` 通过，全部 151 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。真实网络 Provider 回归仍待执行。 |
-| 2026-08-22 | 诊断日志五级重构 | 已完成（自动化验证） | 诊断日志从固定三级改为五级可切换：调试 / 信息 / 警告 / 错误 / 关闭，默认"信息"级，低于当前级别的事件在记录前直接丢弃。诊断页日志面板新增级别切换菜单，面板副标题与导出 TXT 头部显示当前级别，导出内容只包含已记录条目。全量调用点重新分级：Whisper 每窗口输入输出、网络 Range 细节、解码进度、播放器状态与用户操作、网页标题/地址/导航按钮、翻译每批成功日志等约 57 处高频事件降为"调试"级；初始化、模型加载、媒体打开、首个 PCM/首条字幕、媒体交接、启动决策等关键里程碑保留"信息"级；降级与可恢复问题为"警告"，能力丢失为"错误"；移动端网页子资源加载错误从"错误"降为"警告"。`flutter analyze` 通过，全部 157 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。级别设置为会话级，不持久化。 |
-| 2026-08-22 | Phase 8 Step 5 系统翻译 Provider | 已完成（代码与 Windows 自动化） | 新增第四种翻译方式"系统翻译"：iOS 原生 `SystemTranslationBridge`（MethodChannel `ai_video_player/system_translation`）封装 Apple Translation 框架，iOS 26+ 可用（无头会话用 `TranslationSession(installedSource:target:)` 初始化器创建——26.0 API；18.x 只能经 SwiftUI translationTask 拿会话，且该初始化器要求语言包已在系统设置中预先下载，无头调用无法触发下载确认），按语言对缓存 `TranslationSession`，失败时重建会话并经 `prepareTranslation()` 准备资源后重试一次，`zh-CN` 规范化为 `zh-Hans`；Dart `SystemTranslationService` 遵守 `TranslationService`/`TranslationServiceStatusProvider` 契约，非 iOS、系统版本不足或桥接缺失时返回明确不可用状态，回复必须回显 `requestId` 否则拒绝。设置页新增"系统翻译"分段与说明表单；`createTranslationService` 按模式装配。`flutter analyze` 通过，全部 173 项测试通过，Windows `0.8.0` Release 构建并完成启动 smoke。Swift 侧无法在 Windows 编译，需 macOS CI 构建 IPA 并在真机验证（见 9.2）。 |
-| 2026-08-22 | iOS 识别去墙钟节流 | 已完成（代码与 Windows 自动化） | 诊断确认 iOS 字幕尾随播放 2-4 秒的主因不是模型大小（推理 800ms/窗口，实时倍率约 0.13-0.2），而是 `IOSAudioDecoderBridge` 仍按墙钟 1 倍速供 PCM，识别无法领先播放（Windows 已在 Phase 7 移除同款节流）。本轮删除 `waitForTimeline` 墙钟等待，AVAssetReader 全速读出，领先量交给两端共用的有界识别队列与 20s/45s 水位背压；同时限制在途事件块不超过 16 个，防止全速解码淹没平台线程、延迟暂停指令。Dart 层零改动。`flutter analyze` 通过，173 项测试通过，Windows Release 构建与 5 秒 smoke 通过。Swift 侧待 macOS CI 编译与真机验证：预期"识别落后"转为"识别领先 20-45 秒"，字幕提前就绪；若内存/发热吃紧再评估更小的 Whisper 量化。 |
-| 2026-08-22 | 翻译携带上文（可开关） | 已完成（自动化验证） | 恢复单句翻译丢失的上下文准确性，且不回退到批量 JSON 协议：`TranslationRequest` 新增 `context` 行（原文 + 已定译法），队列按媒体时间取当前句前最多 3 句快照构造请求，已完成的译文以"已定译法"标注附带用于术语一致性；上下文是请求构造时的快照，不引入任何请求间顺序依赖，并发能力不变。通用 API 提示词用 `<<<CONTEXT`/`CONTEXT>>>`/`<<<TEXT`/`TEXT>>>` 显式标记，只翻译标记行；响应护栏拒绝行数多于源句或长度远超合理倍数（源长×6+40）的译文，按可重试失败处理，防止模型翻译上下文连坐。设置页新增"翻译携带上文"开关（默认开），持久化并立即应用于运行中队列；DeepL 不受影响。`flutter analyze` 通过，全部 164 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。 |
-| 2026-08-22 | 真机修复：系统翻译模式下播放卡死 | 已完成（自动化验证，待真机回归） | 首次真机日志确认的连锁缺陷：`SystemTranslationService.readiness` 是惰性 `late final` 而生产代码从不引用它，原生能力探测从未发出，状态永远停在"正在检测系统翻译能力……"；服务判定不可用后队列不排任务，起播门（等待 2 条翻译完成或跳过 4 窗口）与"翻译优先"内容门（当前句无译文即 `pause`）双重卡死播放——即用户所见"卡在未返回 2 条字幕"。修复：探测改为构造时立即发起且 `translate` 先 `await readiness`；起播门新增 `translationExpected`（服务不可用即放行）与 `failedTranslationCount`（前 2 条终态失败即放行）；内容门把"已终态失败"视为已了结、服务不可用时不再等译文；`SystemTranslationService` 把桥接 `UNSUPPORTED_OS`/`LANGUAGE`/`PREPARE` 错误映射为不可重试的 `TranslationProviderException`（语言包缺失不再空转重试），会话类错误保持可重试。设置项与超时对话框文案同步。`flutter analyze` 通过，181 项测试通过（新增探测主动触发、门控放行、错误分类与不可用服务端到端播放测试）。待重新打包 IPA 真机回归。 |
-| 2026-08-22 | 真机修复：系统翻译无返回 / 测试连接无效 / 并发语义 | 已完成（自动化验证，待真机回归） | 第二轮真机反馈三连修：(1) 翻译无返回——上一版桥接在 `translate` 失败后经 `prepareTranslation()` 重试，无头会话无法弹出系统下载确认，该调用在真机上可能永不完成导致请求挂死；Swift 侧删除该重试路径，失败后按 `session.isReady` 分类：未就绪即抛终态 `languagePackMissing`（code PREPARE，提示到系统设置下载语言包），其余为可重试 `sessionFailed`；`availability` 处理改为桥接类上的纯函数同步应答，彻底不经过 actor。(2) 设置页"测试连接"对系统翻译原本直接 return——现在会等待探测完成后给出可用性结论，可用时再发一句真实试翻（en→zh-CN），错误信息展示 Provider 具体消息而非 runtimeType。(3) 并发语义——原生侧单会话经 actor 串行执行，并发数对系统翻译无效；队列装配时该模式并发固定为 1，设置页隐藏并发/批量滑块并注明"本机串行执行"。`flutter analyze` 通过，182 项测试通过（新增系统模式设置页 widget 测试）。 |
-| 待定 | Phase 8 集成验收 | 进行中 | Windows 自动化与 Release smoke 已完成；真实网络 Provider 回归，以及 iOS Step 4-5 真机性能和原生翻译验收仍待完成，之后才能结项。 |
-
-## 9. Phase 8 当前进度快照（2026-08-22）
-
-本节是当前阶段的集中状态记录。后续推进以本节和上方 Step 状态为准；“自动化通过”不等于真实网络或真实 iPhone 已验收。
-
-### 9.1 已完成
-
-- **设置与持久化**：字幕显示模式、播放中策略、启动准备开关、翻译批量大小和翻译并发数已加入设置模型、JSON 持久化和设置页；旧设置缺失字段、非法值和未知枚举有默认值回退。
-- **播放策略语义**：字幕优先、翻译优先、播放优先只控制播放开始后的等待行为；“等待两条已完成翻译或跳过四个窗口”只控制自动开始前的独立启动门槛。启动门槛关闭后不会重新启用隐含的两条/四窗口阈值。
-- **字幕显示**：普通播放器和全屏播放器使用统一 Overlay；双语、原文、翻译模式以及翻译 pending/缺失状态已有自动化覆盖。
-- **翻译 seek 优先级**：快进后会优先调度当前媒体位置及其后的字幕，不再按旧时间顺序继续耗尽历史翻译；旧代次请求的迟到结果不会回写当前会话。
-- **翻译可靠性**：Provider 异常、超时、空译文、错误/缺失/重复 ID 会进入有界重试；达到上限后保留失败状态，不会永久占用队列，也不会因为一次失败永久卡住。
-- **单句翻译（2026-08-22 改造）**：通用 API 不再组批，每次翻译一句、模型只返回纯文本译文，按本地 `segmentId` 回填，彻底移除"模型抄 JSON/ID"的失败类别；DeepL 仍支持批量。并发默认 10、上限 20，连接复用后高并发不再重复建立 TLS/代理隧道。
-- **响应清洗**：单句译文会剥离 markdown 围栏和对称包裹引号；空响应按可重试失败处理。
-- **超时与重试**：正式翻译默认超时仍为 40 秒；超时通过 `HttpClientRequest.abort` 只中止当前请求，共享连接池保留。HTTP 408/429/5xx 可重试并遵循 `Retry-After`（上限 60 秒）；其余 4xx（如 401/403）为配置类错误，不再自动重试，直接终止并显示"不会自动重试"。
-- **诊断数据**：日志/诊断页已记录批量大小、并发峰值、API 等待均值/P95/最近值、排队等待、端到端等待、失败次数、超时次数、最终失败和重试次数。
-- **通用 API**：Endpoint 规范化、`/v1/models` 模型列表下载、模型选择持久化、超时/HTTP/响应格式错误和过期请求隔离已实现并有自动化测试。
-- **Windows 验证**：`flutter analyze` 无问题；完整 Flutter 测试 141 项通过；Windows Release 0.8.0 构建成功并完成启动 smoke。
-
-### 9.2 未完成
-
-- **iOS Step 4**：尚未在真实 iPhone 上建立 Phase 8 首批识别速度基线，也未完成优化后的真实设备对比、前后台和连续识别回归。
-- **iOS Step 5**：Apple Translation 原生桥接和 Dart Provider 代码已完成并通过 Windows 自动化测试（含可用性状态、requestId 守卫、空结果拒绝）；Swift 侧尚未在 macOS/Xcode 编译，未签名 IPA 未生成，系统版本/语言组合/语言包下载提示和真机翻译仍未验证。
-- **真实网络 Provider**：尚未使用用户实际的通用 API endpoint/model 完成批量 JSON、40 秒超时、HTTP 错误、格式错误、批量降级和多轮重试的真实网络回归。自动化 HTTP server 只能证明本地协议和队列行为。
-- **真实视频集成验收**：尚未完成短视频、长视频、连续 seek、换片、翻译切换和设置切换的完整真实网络视频验收；尤其需要确认当前播放位置附近的翻译优先级在真实返回延迟下符合预期。
-- **最终结项资料**：`NEW.md` 的本阶段实际进度、真实 Provider 日志和 iOS 性能/翻译记录尚未补齐，因此 Phase 8 不能标记为最终完成。
-
-### 9.3 已修复但仍需真实回归确认的问题
-
-- **批量响应格式失败**：旧实现只要求模型返回 JSON，但没有充分强调输出结构；现在提示词明确规定 JSON shape，解析器按 ID 严格校验并提供格式兼容和逐条降级。需用实际模型确认其稳定返回格式。
-- **翻译持续 timeout**：正式请求和测试连接此前不是同一路径，正式批量请求更慢且旧外层 timeout 不会取消底层请求；现在正式默认超时为 40 秒并关闭底层连接。需用真实 API 确认服务端耗时、HTTP 状态和模型输出。
-- **翻译失败后不再重发**：队列现在会对 Provider 异常、TimeoutException、格式异常和空结果安排有界重试，并在批量失败时逐条降级。需观察真实 API 连续失败和恢复时日志、状态及重试次数。
-- **快进后仍翻译旧字幕**：seek 会创建新的调度代次，跳过当前位置之前的历史片段并优先当前及后续片段；旧在途请求结果会丢弃。需在真实播放中验证连续快进和返回旧位置的行为。
-- **重新打开视频后字幕/翻译消失但识别从旧进度继续**：当前会话的识别结果仓库在换片/重新打开时重置，并由新的 session 隔离旧任务。需验证同一文件重复打开、不同文件切换和旧识别任务迟到时不会恢复旧进度或串入新文档。
-- **启动准备开关看似无效**：启动门槛与播放中策略已拆开；自动开始门槛只统计两条“已完成翻译”，失败或 pending 不计数，四窗口只统计真正跳过的窗口。需验证关闭门槛后播放中策略仍按用户选择工作，避免将播放中暂停误认为启动门槛仍开启。
-- **旧字幕影响识别完成判断**：启动准备统计基于当前 session 和当前文档的有效识别/翻译状态，不应使用旧会话残留数量；需要在同一视频重开和已有本地快照场景下做真实回归。
-
-### 9.4 后续计划修改/验证顺序
-
-1. 使用实际通用 API 配置完成单条、批量、多并发、格式异常、超时和恢复场景回归；保留脱敏后的关键日志字段和耗时数据。
-2. 根据真实 API 日志确认批量大小、并发数和 40 秒超时是否合适；若模型对严格 JSON 仍不稳定，优先增加 Provider 层结构化输出参数或更窄的降级策略，不改变稳定 ID 映射。
-3. 真实视频执行“打开 -> 自动开始 -> 播放中等待 -> 翻译恢复 -> 快进 -> 换片 -> 重开同片”流程，重点检查字幕/翻译不会串会话，且快进后不继续清空历史队列。
-4. 在真实 iPhone 上完成识别速度基线、原生翻译能力探测、单条/连续字幕翻译、取消、换片和前后台状态映射。
-5. 根据真实验收发现的问题补充自动化回归，更新 `NEW.md` 和本文件的验收清单；完成前不把 Phase 8 标记为结项。
+| 2026-08-22 | Phase 9 计划制定 | 已完成 | Phase 8 验收结项（见第 0 节与 `NEW.md`）；依据 `NEW.md` Phase 9 要求制定本计划：识别引擎设置与状态契约、iOS Apple Speech adapter、Windows Live Captions 调研与 adapter、降级回退与诊断集成。 |

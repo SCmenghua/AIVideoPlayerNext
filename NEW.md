@@ -410,6 +410,23 @@ Phase 7 的实际实现已经提前交付了 Phase 8 原计划中的一部分基
 - Step 7 已完成代码与 Windows 自动化验证：通用 API 输入支持缺少协议、`/v1` 和完整 Chat Completions 地址的规范化，并拒绝不安全或不完整的 URL；设置页可请求 `/v1/models`、去重保留服务端顺序、在下拉菜单中选择后保存模型，并处理超时、HTTP/格式错误、重复点击和配置变更后的过期响应。
 - 自动化验证已完成：`dart analyze lib test` 报告 `No issues found`，格式检查通过，`flutter test --concurrency=1` 通过全部 127 项测试，覆盖播放策略、启动门槛、字幕 Overlay、设置、翻译 seek 优先级、失败重试和模型列表。Windows Release `0.8.0` 已构建、压缩并从 ZIP 回解压覆盖原 Release 目录；解压后的程序已启动并保持运行 5 秒，关键 DLL、`data` 和 Whisper 模型均存在。Step 4-5、Step 6 的真实 Provider 性能基线，以及 iOS 真机识别/原生翻译回归仍未完成，Phase 8 不能结项。
 
+#### Phase 8 结项记录（2026-08-22，验收通过）
+
+八项要求全部交付；Windows 自动化与 Release smoke、macOS CI 未签名 IPA 真机回归完成后，用户在真实 iPhone 上确认功能基本正常，Phase 8 结项。版本 `0.8.0`。逐项结果：
+
+1. **iOS 识别速度**：诊断确认尾随主因是 `IOSAudioDecoderBridge` 的墙钟 1 倍速供 PCM 而非模型大小（推理约 800ms/窗口，实时倍率 0.13-0.2）。删除墙钟等待、全速读出并限制在途块 ≤16，领先量交给共用有界队列与 20s/45s 水位背压；真机回归确认识别从"落后播放"转为提前就绪，字幕不再尾随。
+2. **iOS 原生翻译**：新增第四种翻译方式"系统翻译"。`SystemTranslationBridge`（MethodChannel）以 iOS 26 无头初始化器 `TranslationSession(installedSource:target:)` 创建会话并按语言对缓存，语言包需预先在系统设置下载（无头会话无法触发下载确认），缺失时返回终态错误并提示路径；`zh-CN` 规范化为 `zh-Hans`。Dart `SystemTranslationService` 探测构造即发起、`translate` 先等探测，桥接错误分类为可重试/不可重试。真机三轮回归修复了播放门控卡死、翻译无返回（`prepareTranslation()` 无头挂起）与测试连接无效，验收通过。
+3. **翻译速度**：通用 API 改为单句纯文本协议 + 共享 `HttpClient` 连接复用（空闲保活 90 秒），超时只中止当前请求；408/429/5xx 可重试并遵循 `Retry-After`，其余 4xx 终态失败；并发默认 10、上限 20。可选滑动窗口上下文（默认开，前 3 句快照 + 已定译法，带护栏），在单句协议下恢复指代/术语准确性。
+4. **三种字幕显示模式**：双语/原文/翻译，普通与全屏播放器统一 Overlay 语义，译文缺失状态可预期。
+5. **三种播放中策略**：字幕优先/翻译优先/播放优先由统一 `PlaybackStartPolicy` 解释；门控新增"翻译不可用即放行""前两条终态失败即放行""失败视为已了结"语义，服务不可用时不再卡播放。
+6. **启动准备开关**：独立于播放策略持久化；语义为"前两条翻译完成（或失败）或跳过四个窗口"。
+7. **通用 API URL 规范化**：`abc.com`/`abc.com/v1`/完整地址统一规范化，非法输入可见报错。
+8. **模型列表下载**：`/v1/models` 下载、去重保序、下拉选择、持久化，超时/HTTP/格式错误与过期响应隔离。
+
+附带交付：五级可切换诊断日志（默认"信息"级）；系统翻译测试连接（探测 + 真实试翻）；系统翻译串行语义（并发固定 1，设置页隐藏并发/批量滑块）。最终自动化基线：`flutter analyze` 无问题，`flutter test --concurrency=1` 182 项全部通过；未签名 IPA 经 GitHub Actions macOS CI 产出（run 32572273777）并在真机完成回归。
+
+遗留（不阻塞结项，供后续阶段参考）：通用 API 的真实网络长时稳定性观察；系统翻译更多语言组合的覆盖；iOS 连续播放的发热/内存长时观察。
+
 ### Phase 9：系统语音识别 Adapter
 
 目标：接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider。
