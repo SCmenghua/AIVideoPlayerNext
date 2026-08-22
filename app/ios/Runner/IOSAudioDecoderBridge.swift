@@ -19,6 +19,8 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var sourceHeaders: [String: String] = [:]
   private var accepting = false
   private var generation = 0
+  private let inflightLock = NSLock()
+  private var inflightSends = 0
   private var securityScopedURL: URL?
   private var securityScopeActive = false
 
@@ -197,8 +199,10 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     }
     let work = DispatchWorkItem { [weak self] in
       guard let self else { return }
-      var firstPresentationTime: CMTime?
-      let wallClockStart = Date()
+      // Recognition is an independent sequential consumer: read ahead at full
+      // decode speed and let the bounded Dart recognition queue and its
+      // watermarks apply backpressure. Pacing output to wall-clock playback
+      // here would lock recognition into permanently trailing the player.
       while true {
         self.lock.lock(); let active = self.accepting && self.generation == token; self.lock.unlock()
         if !active { break }
@@ -214,20 +218,16 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
           }
           break
         }
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sample)
-        if firstPresentationTime == nil { firstPresentationTime = presentationTime }
-        if let firstPresentationTime,
-           !self.waitForTimeline(
-             presentationTime: presentationTime,
-             firstPresentationTime: firstPresentationTime,
-             wallClockStart: wallClockStart,
-             token: token
-           ) {
-          CMSampleBufferInvalidate(sample)
-          break
-        }
         self.send(sampleBuffer: sample, sessionID: session)
         CMSampleBufferInvalidate(sample)
+        // Full-speed reading must not flood the platform thread: pause calls
+        // from Dart share it with these dispatches, so yield once too many
+        // chunk sends are still in flight.
+        while self.currentInflightSends() > 16 {
+          self.lock.lock(); let stillActive = self.accepting && self.generation == token; self.lock.unlock()
+          if !stillActive { break }
+          Thread.sleep(forTimeInterval: 0.005)
+        }
       }
     }
     worker = work
@@ -302,21 +302,6 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     securityScopeActive = false
   }
 
-  private func waitForTimeline(
-    presentationTime: CMTime,
-    firstPresentationTime: CMTime,
-    wallClockStart: Date,
-    token: Int
-  ) -> Bool {
-    let target = CMTimeSubtract(presentationTime, firstPresentationTime).seconds
-    while Date().timeIntervalSince(wallClockStart) < target {
-      lock.lock(); let active = accepting && generation == token; lock.unlock()
-      if !active { return false }
-      Thread.sleep(forTimeInterval: 0.01)
-    }
-    return true
-  }
-
   private func send(sampleBuffer: CMSampleBuffer, sessionID: String) {
     guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
@@ -334,7 +319,24 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     send(["sessionId": sessionID, "isLast": true, "ended": ended])
   }
 
-  private func send(_ value: [String: Any]) { DispatchQueue.main.async { [weak self] in self?.eventSink?(value) } }
+  private func send(_ value: [String: Any]) {
+    inflightLock.lock()
+    inflightSends += 1
+    inflightLock.unlock()
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.eventSink?(value)
+      self.inflightLock.lock()
+      self.inflightSends -= 1
+      self.inflightLock.unlock()
+    }
+  }
+
+  private func currentInflightSends() -> Int {
+    inflightLock.lock()
+    defer { inflightLock.unlock() }
+    return inflightSends
+  }
 }
 
 private enum BridgeError: Error, CustomStringConvertible {
