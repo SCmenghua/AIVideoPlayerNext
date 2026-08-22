@@ -73,7 +73,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       service: ref.read(translationServiceProvider),
       targetLanguage: 'zh-CN',
       batchSize: ref.read(appSettingsProvider).translationBatchSize,
-      maxConcurrent: ref.read(appSettingsProvider).translationMaxConcurrent,
+      maxConcurrent:
+          _translationConcurrency(ref.read(appSettingsProvider).snapshot),
       contextEnabled: ref.read(appSettingsProvider).translationContextEnabled,
       logs: ref.read(diagnosticsLogProvider),
     );
@@ -130,7 +131,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!next.sameTranslationScheduling(_lastSettings)) {
       _translationQueue.updateScheduling(
         batchSize: next.translationBatchSize,
-        maxConcurrent: next.translationMaxConcurrent,
+        maxConcurrent: _translationConcurrency(next),
         contextEnabled: next.translationContextEnabled,
       );
     }
@@ -440,6 +441,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               translation.status == TranscriptTranslationStatus.failed)
           .length ??
       0;
+
+  /// System translation runs through one serialized native session, so a
+  /// higher concurrency only stacks requests waiting for the same actor.
+  int _translationConcurrency(AppSettings settings) =>
+      settings.translationMode == TranslationMode.systemTranslation
+          ? 1
+          : settings.translationMaxConcurrent;
 
   Future<void> _showStartupTimeout(_StartupSession session) async {
     if (!mounted || _startup != session) return;

@@ -157,4 +157,44 @@ void main() {
     await player.dispose();
     await browser.dispose();
   });
+
+  testWidgets('system translation mode hides batching and answers the test',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final player = MockPlayerService();
+    final browser = MockBrowserService();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          playerServiceProvider.overrideWithValue(player),
+          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
+          browserServiceProvider.overrideWithValue(browser),
+        ],
+        child: const AIVideoPlayerApp(),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('设置').first);
+    await tester.pump();
+
+    final systemMode = find.text('系统翻译');
+    await tester.ensureVisible(systemMode);
+    await tester.tap(systemMode);
+    await tester.pump();
+
+    expect(find.textContaining('串行执行'), findsOneWidget);
+    expect(find.text('并发请求数'), findsNothing);
+    expect(find.text('每批字幕数'), findsNothing);
+
+    final testButton = find.text('测试连接');
+    await tester.ensureVisible(testButton);
+    await tester.tap(testButton);
+    await tester.pump();
+    expect(find.textContaining('系统翻译'), findsWidgets);
+
+    await player.dispose();
+    await browser.dispose();
+  });
 }

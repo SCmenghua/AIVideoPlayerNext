@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../../core/app_build_info.dart';
 import '../../domain/translation/translation_service.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../audio/recognition_controller.dart';
+import '../translation/system_translation_service.dart';
 import '../translation/translation_model_catalog.dart';
 import 'app_settings.dart';
 
@@ -137,8 +139,10 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   }
 
   String _errorMessage(Object error) {
+    if (error is TranslationProviderException) return error.message;
     if (error is HttpException) return error.message;
     if (error is FormatException) return error.message;
+    if (error is TimeoutException) return '翻译请求超时';
     return error.runtimeType.toString();
   }
 
@@ -148,24 +152,27 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
       _applyDeepL();
     } else if (settings.translationMode == TranslationMode.genericApi) {
       _applyGeneric();
-    } else {
-      return;
-    }
-    final service = createTranslationService(settings.snapshot);
-    final statusProvider = service is TranslationServiceStatusProvider
-        ? service as TranslationServiceStatusProvider
-        : null;
-    final status = statusProvider?.status ??
-        const TranslationServiceStatus.available(provider: 'custom');
-    if (!status.available) {
-      setState(() => _testResult = status.message ?? '翻译服务不可用。');
-      return;
     }
     setState(() {
       _testing = true;
       _testResult = null;
     });
     try {
+      final service = createTranslationService(settings.snapshot);
+      // The system-translation probe runs asynchronously; the status only
+      // becomes meaningful once it has settled.
+      if (service is SystemTranslationService) {
+        await service.readiness;
+      }
+      final statusProvider = service is TranslationServiceStatusProvider
+          ? service as TranslationServiceStatusProvider
+          : null;
+      final status = statusProvider?.status ??
+          const TranslationServiceStatus.available(provider: 'custom');
+      if (!status.available) {
+        setState(() => _testResult = status.message ?? '翻译服务不可用。');
+        return;
+      }
       final result = await service
           .translate(const TranslationRequest(
             segmentId: 'connection-test',
@@ -178,7 +185,7 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
       setState(() => _testResult = '连接成功：${result.text}');
     } on Object catch (error) {
       if (!mounted) return;
-      setState(() => _testResult = '连接失败：${error.runtimeType}');
+      setState(() => _testResult = '连接失败：${_errorMessage(error)}');
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -578,9 +585,9 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         children: [
           Text('翻译调度', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 10),
-          Row(
-            children: [
-              if (settings.translationMode == TranslationMode.deepl) ...[
+          if (settings.translationMode == TranslationMode.deepl) ...[
+            Row(
+              children: [
                 Expanded(
                   child: _IntegerSetting(
                     label: '每批字幕数',
@@ -592,19 +599,34 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                   ),
                 ),
                 const SizedBox(width: 12),
-              ],
-              Expanded(
-                child: _IntegerSetting(
-                  label: '并发请求数',
-                  value: settings.translationMaxConcurrent,
-                  minimum: 1,
-                  maximum: 20,
-                  onChanged:
-                      ref.read(appSettingsProvider).setTranslationMaxConcurrent,
+                Expanded(
+                  child: _IntegerSetting(
+                    label: '并发请求数',
+                    value: settings.translationMaxConcurrent,
+                    minimum: 1,
+                    maximum: 20,
+                    onChanged:
+                        ref.read(appSettingsProvider).setTranslationMaxConcurrent,
+                  ),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
+          ] else if (settings.translationMode !=
+              TranslationMode.systemTranslation) ...[
+            _IntegerSetting(
+              label: '并发请求数',
+              value: settings.translationMaxConcurrent,
+              minimum: 1,
+              maximum: 20,
+              onChanged:
+                  ref.read(appSettingsProvider).setTranslationMaxConcurrent,
+            ),
+          ] else ...[
+            const Text(
+              '系统翻译在本机串行执行，一次翻译一句，并发设置不适用。',
+              style: TextStyle(color: Color(0xFF9EA7AC)),
+            ),
+          ],
           const SizedBox(height: 8),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
@@ -622,7 +644,9 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
           Text(
             settings.translationMode == TranslationMode.deepl
                 ? '设置会立即应用到后续翻译请求；批次不足时最多等待约 300 ms 后发送。'
-                : '通用 API 逐句翻译、直接并发，不组批；设置会立即应用到后续翻译请求。',
+                : settings.translationMode == TranslationMode.systemTranslation
+                    ? '系统翻译由 iOS 在本机完成，串行返回；语言包需已在系统设置中下载。'
+                    : '通用 API 逐句翻译、直接并发，不组批；设置会立即应用到后续翻译请求。',
             style: const TextStyle(color: Color(0xFF9EA7AC)),
           ),
         ],

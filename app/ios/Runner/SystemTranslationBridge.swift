@@ -15,6 +15,16 @@ import Translation
 final class SystemTranslationBridge: NSObject {
   private let translator = SystemTranslator()
 
+  private static func availabilityReply() -> [String: Any] {
+    if #available(iOS 26.0, *) {
+      return ["available": true]
+    }
+    return [
+      "available": false,
+      "message": TranslationBridgeError.unsupportedOS.message,
+    ]
+  }
+
   func register(with registrar: FlutterApplicationRegistrar) {
     let channel = FlutterMethodChannel(
       name: "ai_video_player/system_translation",
@@ -27,7 +37,9 @@ final class SystemTranslationBridge: NSObject {
       }
       switch call.method {
       case "availability":
-        result(self.translator.availability())
+        // Pure OS-version check answered inline: it must never depend on
+        // actor scheduling, otherwise the Dart-side probe could hang.
+        result(Self.availabilityReply())
       case "translate":
         guard let args = call.arguments as? [String: Any],
               let requestID = args["requestId"] as? String,
@@ -64,15 +76,13 @@ final class SystemTranslationBridge: NSObject {
 
 private enum TranslationBridgeError: Error {
   case unsupportedOS
-  case languagePair(source: String, target: String)
-  case prepareFailed(String)
+  case languagePackMissing(source: String, target: String)
   case sessionFailed(String)
 
   var code: String {
     switch self {
     case .unsupportedOS: return "UNSUPPORTED_OS"
-    case .languagePair: return "LANGUAGE"
-    case .prepareFailed: return "PREPARE"
+    case .languagePackMissing: return "PREPARE"
     case .sessionFailed: return "SESSION"
     }
   }
@@ -81,10 +91,8 @@ private enum TranslationBridgeError: Error {
     switch self {
     case .unsupportedOS:
       return "系统翻译需要 iOS 26 或更高版本。"
-    case .languagePair(let source, let target):
-      return "系统翻译不支持 \(source) 到 \(target) 的语言组合。"
-    case .prepareFailed(let reason):
-      return "系统翻译语言包尚未就绪：\(reason)"
+    case .languagePackMissing(let source, let target):
+      return "系统翻译缺少 \(source) → \(target) 语言包，请在系统设置 › 通用 › 翻译 中下载后重试。"
     case .sessionFailed(let reason):
       return "系统翻译会话失败：\(reason)"
     }
@@ -109,16 +117,6 @@ private actor SystemTranslator {
   private var cachedSession: AnyObject?
   private var cachedKey: SessionKey?
 
-  func availability() -> [String: Any] {
-    if #available(iOS 26.0, *) {
-      return ["available": true]
-    }
-    return [
-      "available": false,
-      "message": TranslationBridgeError.unsupportedOS.message,
-    ]
-  }
-
   func translate(text: String, sourceLanguage: String, targetLanguage: String) async throws -> String {
     guard #available(iOS 26.0, *) else {
       throw TranslationBridgeError.unsupportedOS
@@ -126,29 +124,22 @@ private actor SystemTranslator {
     #if canImport(Translation)
     let source = Self.normalize(sourceLanguage)
     let target = Self.normalize(targetLanguage)
+    let session = openSession(source: source, target: target)
     do {
-      let session = openSession(source: source, target: target)
-      do {
-        let response = try await session.translate(text)
-        return response.targetText
-      } catch {
-        // The most likely cause is a language pair that is not installed;
-        // rebuild the session and ask the system to prepare its assets
-        // before retrying the segment once.
-        cachedSession = nil
-        cachedKey = nil
-        let fresh = openSession(source: source, target: target)
-        do {
-          try await fresh.prepareTranslation()
-        } catch {
-          throw TranslationBridgeError.prepareFailed(error.localizedDescription)
-        }
-        let response = try await fresh.translate(text)
-        return response.targetText
-      }
-    } catch let error as TranslationBridgeError {
-      throw error
+      let response = try await session.translate(text)
+      return response.targetText
     } catch {
+      // Drop the failed session; the next request rebuilds it. A session
+      // that is not ready means the language pair is not installed: a
+      // headless session cannot present the system download sheet, and
+      // prepareTranslation would never complete, so surface a terminal
+      // error instead of hanging or retrying. Anything else is a session
+      // error the caller may retry.
+      cachedSession = nil
+      cachedKey = nil
+      if !session.isReady {
+        throw TranslationBridgeError.languagePackMissing(source: source, target: target)
+      }
       throw TranslationBridgeError.sessionFailed(error.localizedDescription)
     }
     #else
