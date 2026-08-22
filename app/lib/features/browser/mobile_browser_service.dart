@@ -53,7 +53,7 @@ class MobileBrowserService extends BrowserServiceBase {
         },
         onPageStarted: (url) {
           final page = Uri.tryParse(url);
-          logs?.info('内置浏览器', '网页开始加载', {'网址': url});
+          logs?.debug('内置浏览器', '网页开始加载', {'网址': url});
           if (page != null) {
             resetUnsupportedMediaReports();
             updateState(
@@ -67,7 +67,7 @@ class MobileBrowserService extends BrowserServiceBase {
         },
         onPageFinished: (url) async {
           final page = Uri.tryParse(url);
-          logs?.info('内置浏览器', '网页加载完成', {
+          logs?.debug('内置浏览器', '网页加载完成', {
             '网址': url,
             '标题': await controller.getTitle(),
           });
@@ -83,7 +83,7 @@ class MobileBrowserService extends BrowserServiceBase {
           progress: progress,
         ),
         onWebResourceError: (error) {
-          logs?.error('内置浏览器', '网页资源加载错误', {
+          logs?.warning('内置浏览器', '网页资源加载错误', {
             '错误代码': error.errorCode,
             '描述': error.description,
             '网址': error.url,
@@ -115,7 +115,7 @@ class MobileBrowserService extends BrowserServiceBase {
       final page =
           currentState.url ?? Uri.tryParse(payload['page']?.toString() ?? '');
       if (payload['kind'] == 'trace') {
-        logs?.info('网页媒体桥接', payload['action']?.toString() ?? '网页事件', {
+        logs?.debug('网页媒体桥接', payload['action']?.toString() ?? '网页事件', {
           '序号': payload['sequence'],
           '网页地址': payload['page'] ?? page,
           '网页标题': payload['title'],
@@ -175,7 +175,7 @@ class MobileBrowserService extends BrowserServiceBase {
           'source': _mobileMediaBridgeScript,
         },
       );
-      logs?.info('网页媒体桥接', 'iOS 文档开始阶段注入成功');
+      logs?.debug('网页媒体桥接', 'iOS 文档开始阶段注入成功');
     } catch (_) {
       logs?.warning('网页媒体桥接', 'iOS 提前注入失败，使用页面回调注入');
       // The normal page callbacks remain as a fallback on unsupported hosts.
@@ -204,7 +204,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> goBack() async {
     if (_initialized && await controller.canGoBack()) {
-      logs?.info('内置浏览器', '用户点击后退');
+      logs?.debug('内置浏览器', '用户点击后退');
       await controller.goBack();
       await _updateHistory();
     }
@@ -213,7 +213,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> goForward() async {
     if (_initialized && await controller.canGoForward()) {
-      logs?.info('内置浏览器', '用户点击前进');
+      logs?.debug('内置浏览器', '用户点击前进');
       await controller.goForward();
       await _updateHistory();
     }
@@ -222,7 +222,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> reload() async {
     if (_initialized) {
-      logs?.info('内置浏览器', '用户点击刷新');
+      logs?.debug('内置浏览器', '用户点击刷新');
       await controller.reload();
     }
   }
@@ -230,7 +230,7 @@ class MobileBrowserService extends BrowserServiceBase {
   @override
   Future<void> stop() async {
     if (_initialized) {
-      logs?.info('内置浏览器', '用户停止加载');
+      logs?.debug('内置浏览器', '用户停止加载');
       await controller.runJavaScript('window.stop();');
     }
   }

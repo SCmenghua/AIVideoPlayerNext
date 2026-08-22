@@ -189,7 +189,7 @@ Overlay 继续从 `TranscriptDocument` 按播放器媒体位置查询当前片�
 
 ### Step 5：接入 iOS 原生翻译接口
 
-状态：`未开始`
+状态：`代码已完成（Windows 自动化验证）；macOS 构建、未签名 IPA 与真机验收待完成`
 
 - 确认项目支持的最低 iOS 版本、Apple Translation API 可用条件、语言支持范围、系统下载资源和隐私/网络状态要求。
 - 在 iOS 原生侧建立最小翻译桥接，输入只包含字幕文本、源语言、目标语言和请求标识，输出包含结果、状态、错误类型和请求标识。
@@ -280,6 +280,11 @@ Overlay 继续从 `TranscriptDocument` 按播放器媒体位置查询当前片�
 | 2026-08-20 | Phase 8 批量翻译协议与超时修复 | 已完成（自动化验证） | 批量提示词明确要求只返回 JSON 数组，每项使用原样复制的 `id` 和 `translation`；解析器按稳定 ID 严格映射，并兼容常见 `text` 别名和 Markdown JSON 代码块。正式翻译默认超时从 20 秒调整为 40 秒；OpenAI-compatible/DeepL 超时会关闭底层 HTTP 连接，避免旧请求与重试请求叠加；批量失败会降级为逐条重试。 |
 | 2026-08-20 | Phase 8 翻译回归验证与 Release | 已完成（Windows） | `flutter analyze` 通过；完整 `flutter test --concurrency=1` 通过 141 项；翻译定向测试覆盖批量格式、稳定 ID、格式兼容、40 秒默认超时、底层连接关闭和批量失败逐条重试；Windows `0.8.0` Release 构建和 5 秒启动 smoke 通过。当前构建位于 `release/ai-video-player-next-0.8.0-20260820-021342/ai_video_player_next.exe`。 |
 | 2026-08-22 | Phase 8 当前进度盘点 | 已完成盘点 | 已将本阶段当前实现、验收结果、未完成工作和待修复/待验证问题集中记录在本节；未通过真实 iPhone 或真实网络 Provider 验收的内容不标记为完成。 |
+| 2026-08-22 | Phase 8 单句翻译可靠性改造 | 已完成（自动化验证） | 针对真实使用中"批量翻译高失败率、失败后卡住"的问题：通用 API 移除批量 JSON 协议，改为逐句请求、模型只返回纯文本译文、按本地 `segmentId` 回填；Provider 持有共享 `HttpClient` 复用 TCP/TLS 连接（空闲保活 90 秒），超时用 `HttpClientRequest.abort` 只中止本请求、不销毁连接池；响应剥离 markdown 围栏和对称引号；HTTP 408/429/5xx 归类为可重试并读取 `Retry-After`（上限 60 秒），其余 4xx 不再自动重试；并发上限从 8 放宽到 20（默认 10），默认批量改为 1；"每批字幕数"仅对 DeepL 显示。`flutter analyze` 通过，全部 151 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。真实网络 Provider 回归仍待执行。 |
+| 2026-08-22 | 诊断日志五级重构 | 已完成（自动化验证） | 诊断日志从固定三级改为五级可切换：调试 / 信息 / 警告 / 错误 / 关闭，默认"信息"级，低于当前级别的事件在记录前直接丢弃。诊断页日志面板新增级别切换菜单，面板副标题与导出 TXT 头部显示当前级别，导出内容只包含已记录条目。全量调用点重新分级：Whisper 每窗口输入输出、网络 Range 细节、解码进度、播放器状态与用户操作、网页标题/地址/导航按钮、翻译每批成功日志等约 57 处高频事件降为"调试"级；初始化、模型加载、媒体打开、首个 PCM/首条字幕、媒体交接、启动决策等关键里程碑保留"信息"级；降级与可恢复问题为"警告"，能力丢失为"错误"；移动端网页子资源加载错误从"错误"降为"警告"。`flutter analyze` 通过，全部 157 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。级别设置为会话级，不持久化。 |
+| 2026-08-22 | Phase 8 Step 5 系统翻译 Provider | 已完成（代码与 Windows 自动化） | 新增第四种翻译方式"系统翻译"：iOS 原生 `SystemTranslationBridge`（MethodChannel `ai_video_player/system_translation`）封装 Apple Translation 框架，iOS 18+ 可用，按语言对缓存 `TranslationSession`，失败时经 `prepareTranslation()` 触发系统语言包下载后重试一次，`zh-CN` 规范化为 `zh-Hans`；Dart `SystemTranslationService` 遵守 `TranslationService`/`TranslationServiceStatusProvider` 契约，非 iOS、系统版本不足或桥接缺失时返回明确不可用状态，回复必须回显 `requestId` 否则拒绝。设置页新增"系统翻译"分段与说明表单；`createTranslationService` 按模式装配。`flutter analyze` 通过，全部 173 项测试通过，Windows `0.8.0` Release 构建并完成启动 smoke。Swift 侧无法在 Windows 编译，需 macOS CI 构建 IPA 并在真机验证（见 9.2）。 |
+| 2026-08-22 | iOS 识别去墙钟节流 | 已完成（代码与 Windows 自动化） | 诊断确认 iOS 字幕尾随播放 2-4 秒的主因不是模型大小（推理 800ms/窗口，实时倍率约 0.13-0.2），而是 `IOSAudioDecoderBridge` 仍按墙钟 1 倍速供 PCM，识别无法领先播放（Windows 已在 Phase 7 移除同款节流）。本轮删除 `waitForTimeline` 墙钟等待，AVAssetReader 全速读出，领先量交给两端共用的有界识别队列与 20s/45s 水位背压；同时限制在途事件块不超过 16 个，防止全速解码淹没平台线程、延迟暂停指令。Dart 层零改动。`flutter analyze` 通过，173 项测试通过，Windows Release 构建与 5 秒 smoke 通过。Swift 侧待 macOS CI 编译与真机验证：预期"识别落后"转为"识别领先 20-45 秒"，字幕提前就绪；若内存/发热吃紧再评估更小的 Whisper 量化。 |
+| 2026-08-22 | 翻译携带上文（可开关） | 已完成（自动化验证） | 恢复单句翻译丢失的上下文准确性，且不回退到批量 JSON 协议：`TranslationRequest` 新增 `context` 行（原文 + 已定译法），队列按媒体时间取当前句前最多 3 句快照构造请求，已完成的译文以"已定译法"标注附带用于术语一致性；上下文是请求构造时的快照，不引入任何请求间顺序依赖，并发能力不变。通用 API 提示词用 `<<<CONTEXT`/`CONTEXT>>>`/`<<<TEXT`/`TEXT>>>` 显式标记，只翻译标记行；响应护栏拒绝行数多于源句或长度远超合理倍数（源长×6+40）的译文，按可重试失败处理，防止模型翻译上下文连坐。设置页新增"翻译携带上文"开关（默认开），持久化并立即应用于运行中队列；DeepL 不受影响。`flutter analyze` 通过，全部 164 项测试通过，Windows `0.8.0` Release 构建并完成 5 秒启动 smoke。 |
 | 待定 | Phase 8 集成验收 | 进行中 | Windows 自动化与 Release smoke 已完成；真实网络 Provider 回归，以及 iOS Step 4-5 真机性能和原生翻译验收仍待完成，之后才能结项。 |
 
 ## 9. Phase 8 当前进度快照（2026-08-22）
@@ -293,9 +298,9 @@ Overlay 继续从 `TranscriptDocument` 按播放器媒体位置查询当前片�
 - **字幕显示**：普通播放器和全屏播放器使用统一 Overlay；双语、原文、翻译模式以及翻译 pending/缺失状态已有自动化覆盖。
 - **翻译 seek 优先级**：快进后会优先调度当前媒体位置及其后的字幕，不再按旧时间顺序继续耗尽历史翻译；旧代次请求的迟到结果不会回写当前会话。
 - **翻译可靠性**：Provider 异常、超时、空译文、错误/缺失/重复 ID 会进入有界重试；达到上限后保留失败状态，不会永久占用队列，也不会因为一次失败永久卡住。
-- **批量翻译**：OpenAI-compatible 和 DeepL 支持批量请求；批量大小和并发数可在设置中调整，并会应用到运行中的队列；不支持批量能力的 Provider 自动使用单条请求。
-- **批量返回协议**：批量请求使用稳定 `segmentId`，提示词要求严格 JSON 数组和 `id`/`translation` 字段；解析按 ID 映射而不是按返回顺序映射。对常见 `text` 别名和 Markdown JSON 包裹做了兼容，但仍拒绝未知、重复、缺失或空结果。
-- **超时与重试**：正式翻译默认超时为 40 秒；Provider 自己拥有请求超时并主动关闭 HTTP client，避免 Dart 外层超时后旧网络请求继续运行；批量格式失败会逐条降级重试。
+- **单句翻译（2026-08-22 改造）**：通用 API 不再组批，每次翻译一句、模型只返回纯文本译文，按本地 `segmentId` 回填，彻底移除"模型抄 JSON/ID"的失败类别；DeepL 仍支持批量。并发默认 10、上限 20，连接复用后高并发不再重复建立 TLS/代理隧道。
+- **响应清洗**：单句译文会剥离 markdown 围栏和对称包裹引号；空响应按可重试失败处理。
+- **超时与重试**：正式翻译默认超时仍为 40 秒；超时通过 `HttpClientRequest.abort` 只中止当前请求，共享连接池保留。HTTP 408/429/5xx 可重试并遵循 `Retry-After`（上限 60 秒）；其余 4xx（如 401/403）为配置类错误，不再自动重试，直接终止并显示"不会自动重试"。
 - **诊断数据**：日志/诊断页已记录批量大小、并发峰值、API 等待均值/P95/最近值、排队等待、端到端等待、失败次数、超时次数、最终失败和重试次数。
 - **通用 API**：Endpoint 规范化、`/v1/models` 模型列表下载、模型选择持久化、超时/HTTP/响应格式错误和过期请求隔离已实现并有自动化测试。
 - **Windows 验证**：`flutter analyze` 无问题；完整 Flutter 测试 141 项通过；Windows Release 0.8.0 构建成功并完成启动 smoke。
@@ -303,7 +308,7 @@ Overlay 继续从 `TranscriptDocument` 按播放器媒体位置查询当前片�
 ### 9.2 未完成
 
 - **iOS Step 4**：尚未在真实 iPhone 上建立 Phase 8 首批识别速度基线，也未完成优化后的真实设备对比、前后台和连续识别回归。
-- **iOS Step 5**：Apple Translation 原生桥接和 Dart Provider 尚未接入；系统不支持、语言不可用、资源未准备、取消和用户拒绝等状态尚未完成真实设备验证。
+- **iOS Step 5**：Apple Translation 原生桥接和 Dart Provider 代码已完成并通过 Windows 自动化测试（含可用性状态、requestId 守卫、空结果拒绝）；Swift 侧尚未在 macOS/Xcode 编译，未签名 IPA 未生成，系统版本/语言组合/语言包下载提示和真机翻译仍未验证。
 - **真实网络 Provider**：尚未使用用户实际的通用 API endpoint/model 完成批量 JSON、40 秒超时、HTTP 错误、格式错误、批量降级和多轮重试的真实网络回归。自动化 HTTP server 只能证明本地协议和队列行为。
 - **真实视频集成验收**：尚未完成短视频、长视频、连续 seek、换片、翻译切换和设置切换的完整真实网络视频验收；尤其需要确认当前播放位置附近的翻译优先级在真实返回延迟下符合预期。
 - **最终结项资料**：`NEW.md` 的本阶段实际进度、真实 Provider 日志和 iOS 性能/翻译记录尚未补齐，因此 Phase 8 不能标记为最终完成。

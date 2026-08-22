@@ -256,6 +256,11 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                           icon: Icon(Icons.api_outlined),
                         ),
                         ButtonSegment(
+                          value: TranslationMode.systemTranslation,
+                          label: Text('系统翻译'),
+                          icon: Icon(Icons.phone_iphone),
+                        ),
+                        ButtonSegment(
                           value: TranslationMode.localModel,
                           label: Text('本地模型'),
                           icon: Icon(Icons.memory_outlined),
@@ -275,6 +280,9 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                     else if (settings.translationMode ==
                         TranslationMode.genericApi)
                       _genericApiForm()
+                    else if (settings.translationMode ==
+                        TranslationMode.systemTranslation)
+                      _systemTranslationForm()
                     else
                       _localModelForm(settings.localTranslationModel),
                     if (settings.translationMode !=
@@ -513,6 +521,19 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         ],
       );
 
+  Widget _systemTranslationForm() => const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '使用 Apple 系统翻译（iOS 18 或更高版本）。翻译在本机完成；'
+            '所需语言包由系统在首次使用时提示下载，下载会短暂使用网络。'
+            '不支持的语言组合或未下载语言包时，字幕将保留原文并显示失败原因。'
+            'Windows 与 Android 上此模式不可用。',
+            style: TextStyle(color: Color(0xFF9EA7AC)),
+          ),
+        ],
+      );
+
   Widget _localModelForm(LocalTranslationModel selected) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -558,23 +579,25 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
           const SizedBox(height: 10),
           Row(
             children: [
-              Expanded(
-                child: _IntegerSetting(
-                  label: '每批字幕数',
-                  value: settings.translationBatchSize,
-                  minimum: 1,
-                  maximum: 20,
-                  onChanged:
-                      ref.read(appSettingsProvider).setTranslationBatchSize,
+              if (settings.translationMode == TranslationMode.deepl) ...[
+                Expanded(
+                  child: _IntegerSetting(
+                    label: '每批字幕数',
+                    value: settings.translationBatchSize,
+                    minimum: 1,
+                    maximum: 20,
+                    onChanged:
+                        ref.read(appSettingsProvider).setTranslationBatchSize,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
+                const SizedBox(width: 12),
+              ],
               Expanded(
                 child: _IntegerSetting(
                   label: '并发请求数',
                   value: settings.translationMaxConcurrent,
                   minimum: 1,
-                  maximum: 8,
+                  maximum: 20,
                   onChanged:
                       ref.read(appSettingsProvider).setTranslationMaxConcurrent,
                 ),
@@ -582,9 +605,24 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
             ],
           ),
           const SizedBox(height: 8),
-          const Text(
-            '设置会立即应用到后续翻译请求；批次不足时最多等待约 300 ms 后发送。',
-            style: TextStyle(color: Color(0xFF9EA7AC)),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('翻译携带上文'),
+            subtitle: const Text(
+              '通用 API 逐句翻译时附带最近几句原文和已定译法作为参考，'
+              '提高指代和术语的准确性；不影响并发。',
+            ),
+            value: settings.translationContextEnabled,
+            onChanged: (value) => ref
+                .read(appSettingsProvider)
+                .setTranslationContextEnabled(value),
+          ),
+          Text(
+            settings.translationMode == TranslationMode.deepl
+                ? '设置会立即应用到后续翻译请求；批次不足时最多等待约 300 ms 后发送。'
+                : '通用 API 逐句翻译、直接并发，不组批；设置会立即应用到后续翻译请求。',
+            style: const TextStyle(color: Color(0xFF9EA7AC)),
           ),
         ],
       );

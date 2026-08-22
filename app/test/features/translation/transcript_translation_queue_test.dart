@@ -76,6 +76,62 @@ class _UnavailableTranslationService
   }
 }
 
+class _FatalTranslationService
+    implements TranslationService, TranslationServiceStatusProvider {
+  int requestCount = 0;
+
+  @override
+  TranslationServiceStatus get status =>
+      const TranslationServiceStatus.available(provider: 'fatal-test');
+
+  @override
+  Future<TranslationResult> translate(TranslationRequest request) async {
+    requestCount++;
+    throw const TranslationProviderException(
+      '翻译服务返回 HTTP 401。',
+      statusCode: 401,
+      retryable: false,
+    );
+  }
+}
+
+class _RetryAfterTranslationService
+    implements TranslationService, TranslationServiceStatusProvider {
+  _RetryAfterTranslationService({required this.retryAfter});
+
+  final Duration retryAfter;
+  int requestCount = 0;
+  TranslationRequest? _lastRequest;
+  Completer<TranslationResult>? _pending;
+
+  @override
+  TranslationServiceStatus get status =>
+      const TranslationServiceStatus.available(provider: 'retry-after-test');
+
+  @override
+  Future<TranslationResult> translate(TranslationRequest request) {
+    requestCount++;
+    _lastRequest = request;
+    if (requestCount == 1) {
+      return Future<TranslationResult>.error(TranslationProviderException(
+        '翻译服务返回 HTTP 429。',
+        statusCode: 429,
+        retryAfter: retryAfter,
+      ));
+    }
+    _pending = Completer<TranslationResult>();
+    return _pending!.future;
+  }
+
+  void completeLast() {
+    _pending?.complete(TranslationResult(
+      segmentId: _lastRequest!.segmentId,
+      text: '你好',
+      provider: 'retry-after-test',
+    ));
+  }
+}
+
 class _ControlledBatchTranslationService
     implements
         TranslationService,
@@ -568,6 +624,159 @@ void main() {
         TranscriptTranslationStatus.failed);
   });
 
+  test('attaches preceding lines as context by media time', () async {
+    final store = RecognitionResultStore();
+    final service = _ControlledTranslationService();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      maxConcurrent: 1,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'hello',
+      startSeconds: 0,
+    ));
+    await _settle();
+    expect(service.requests.single.context, isEmpty);
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-2',
+      text: 'world',
+      startSeconds: 2,
+    ));
+    await _settle();
+
+    service.pending.first.complete(const TranslationResult(
+      segmentId: 'seg-000001',
+      text: '你好',
+      provider: 'test',
+    ));
+    await _settle();
+
+    expect(service.requests, hasLength(2));
+    final second = service.requests.last;
+    expect(second.text, 'world');
+    expect(second.context, hasLength(1));
+    expect(second.context.single.text, 'hello');
+    expect(second.context.single.translation, '你好',
+        reason: '已完成的译文应作为术语一致性参考附带。');
+  });
+
+  test('omits context entirely when the setting is disabled', () async {
+    final store = RecognitionResultStore();
+    final service = _ControlledTranslationService();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      maxConcurrent: 1,
+      contextEnabled: false,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'hello',
+    ));
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-2',
+      text: 'world',
+      startSeconds: 2,
+    ));
+    await _settle();
+
+    service.completeNext();
+    await _settle();
+    service.completeNext();
+    await _settle();
+
+    expect(service.requests, hasLength(2));
+    for (final request in service.requests) {
+      expect(request.context, isEmpty);
+    }
+  });
+
+  test('does not retry a fatal provider error', () async {
+    final store = RecognitionResultStore();
+    final service = _FatalTranslationService();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      retryDelay: Duration.zero,
+      maxAttempts: 3,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'hello',
+    ));
+    await _settle();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+
+    expect(service.requestCount, 1, reason: 'HTTP 401 属配置错误，不应重试。');
+    final result = store.translationResults.single.translation;
+    expect(result.status, TranscriptTranslationStatus.failed);
+    expect(result.error, contains('不会自动重试'));
+    expect(queue.metrics.terminalFailedSegments, 1);
+    expect(queue.metrics.retriedSegments, 0);
+  });
+
+  test('honors the provider retry-after delay before re-enqueueing', () async {
+    final store = RecognitionResultStore();
+    final service = _RetryAfterTranslationService(
+      retryAfter: const Duration(milliseconds: 40),
+    );
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      retryDelay: Duration.zero,
+      maxAttempts: 3,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'hello',
+    ));
+    await _settle();
+    expect(service.requestCount, 1);
+
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(service.requestCount, 1, reason: '服务端要求 40ms 后重试，不应提前发出。');
+
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(service.requestCount, 2);
+    service.completeLast();
+    await _settle();
+    expect(store.translationResults.single.translation.status,
+        TranscriptTranslationStatus.translated);
+  });
+
   test('cancels pending retries after seek', () async {
     final store = RecognitionResultStore();
     final service = _ControlledTranslationService(fail: true);
@@ -712,7 +921,8 @@ void main() {
     expect(service.requests, hasLength(1));
     expect(service.requests.single, hasLength(2));
 
-    service.pending.single.completeError(const FormatException('batch response'));
+    service.pending.single
+        .completeError(const FormatException('batch response'));
     await _settle();
     expect(service.requests, hasLength(2));
     expect(service.requests[1], hasLength(1));
@@ -739,7 +949,8 @@ void main() {
     expect(
       store.translationResults
           .where((result) =>
-              result.translation.status == TranscriptTranslationStatus.translated)
+              result.translation.status ==
+              TranscriptTranslationStatus.translated)
           .map((result) => result.translation.text),
       containsAll(<String>['one', 'two']),
     );

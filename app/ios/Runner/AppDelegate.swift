@@ -6,6 +6,7 @@ import webview_flutter_wkwebview
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let audioBridge = IOSAudioDecoderBridge()
+  private let systemTranslationBridge = SystemTranslationBridge()
 
   override func application(
     _ application: UIApplication,
@@ -52,6 +53,7 @@ import webview_flutter_wkwebview
     }
 
     audioBridge.register(with: engineBridge.applicationRegistrar)
+    systemTranslationBridge.register(with: engineBridge.applicationRegistrar)
 
     let speechChannel = FlutterMethodChannel(
       name: "ai_video_player/ios_speech_core",

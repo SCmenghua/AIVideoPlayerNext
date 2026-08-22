@@ -9,7 +9,7 @@ import '../audio/recognition_controller.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../../domain/translation/translation_service.dart';
 
-enum TranslationMode { deepl, genericApi, localModel }
+enum TranslationMode { deepl, genericApi, systemTranslation, localModel }
 
 enum SubtitleDisplayMode { bilingual, original, translation }
 
@@ -31,6 +31,7 @@ class AppSettings {
     required this.genericModel,
     required this.translationBatchSize,
     required this.translationMaxConcurrent,
+    required this.translationContextEnabled,
     required this.subtitleDisplayMode,
     required this.playbackStartStrategy,
     required this.waitForSubtitlePreparation,
@@ -46,6 +47,7 @@ class AppSettings {
   final String genericModel;
   final int translationBatchSize;
   final int translationMaxConcurrent;
+  final bool translationContextEnabled;
   final SubtitleDisplayMode subtitleDisplayMode;
   final PlaybackStartStrategy playbackStartStrategy;
   final bool waitForSubtitlePreparation;
@@ -61,7 +63,8 @@ class AppSettings {
 
   bool sameTranslationScheduling(AppSettings other) =>
       translationBatchSize == other.translationBatchSize &&
-      translationMaxConcurrent == other.translationMaxConcurrent;
+      translationMaxConcurrent == other.translationMaxConcurrent &&
+      translationContextEnabled == other.translationContextEnabled;
 }
 
 class AppSettingsController extends ChangeNotifier {
@@ -75,8 +78,9 @@ class AppSettingsController extends ChangeNotifier {
     Uri? genericEndpoint,
     String? genericApiKey,
     String genericModel = 'gpt-4.1-mini',
-    int translationBatchSize = 4,
-    int translationMaxConcurrent = 2,
+    int translationBatchSize = 1,
+    int translationMaxConcurrent = 10,
+    bool translationContextEnabled = true,
     SubtitleDisplayMode subtitleDisplayMode = SubtitleDisplayMode.bilingual,
     PlaybackStartStrategy playbackStartStrategy =
         PlaybackStartStrategy.translationPriority,
@@ -95,6 +99,7 @@ class AppSettingsController extends ChangeNotifier {
         _translationBatchSize = _boundedBatchSize(translationBatchSize),
         _translationMaxConcurrent =
             _boundedConcurrency(translationMaxConcurrent),
+        _translationContextEnabled = translationContextEnabled,
         _subtitleDisplayMode = subtitleDisplayMode,
         _playbackStartStrategy = playbackStartStrategy,
         _waitForSubtitlePreparation = waitForSubtitlePreparation {
@@ -131,6 +136,7 @@ class AppSettingsController extends ChangeNotifier {
   String _genericModel;
   int _translationBatchSize;
   int _translationMaxConcurrent;
+  bool _translationContextEnabled;
   SubtitleDisplayMode _subtitleDisplayMode;
   PlaybackStartStrategy _playbackStartStrategy;
   bool _waitForSubtitlePreparation;
@@ -148,6 +154,7 @@ class AppSettingsController extends ChangeNotifier {
   String get genericModel => _genericModel;
   int get translationBatchSize => _translationBatchSize;
   int get translationMaxConcurrent => _translationMaxConcurrent;
+  bool get translationContextEnabled => _translationContextEnabled;
   SubtitleDisplayMode get subtitleDisplayMode => _subtitleDisplayMode;
   PlaybackStartStrategy get playbackStartStrategy => _playbackStartStrategy;
   bool get waitForSubtitlePreparation => _waitForSubtitlePreparation;
@@ -163,6 +170,7 @@ class AppSettingsController extends ChangeNotifier {
         genericModel: _genericModel,
         translationBatchSize: _translationBatchSize,
         translationMaxConcurrent: _translationMaxConcurrent,
+        translationContextEnabled: _translationContextEnabled,
         subtitleDisplayMode: _subtitleDisplayMode,
         playbackStartStrategy: _playbackStartStrategy,
         waitForSubtitlePreparation: _waitForSubtitlePreparation,
@@ -259,6 +267,14 @@ class AppSettingsController extends ChangeNotifier {
             _translationMaxConcurrent = value;
             changed = true;
           }
+        }
+      }
+      if (!_changedBeforeLoad.contains('translationContextEnabled') &&
+          values.containsKey('translationContextEnabled')) {
+        final raw = values['translationContextEnabled'];
+        if (raw is bool && raw != _translationContextEnabled) {
+          _translationContextEnabled = raw;
+          changed = true;
         }
       }
       if (!_changedBeforeLoad.contains('subtitleDisplayMode')) {
@@ -392,6 +408,13 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setTranslationContextEnabled(bool value) {
+    if (_translationContextEnabled == value) return;
+    _translationContextEnabled = value;
+    _markChanged('translationContextEnabled');
+    notifyListeners();
+  }
+
   void setSubtitleDisplayMode(SubtitleDisplayMode value) {
     if (_subtitleDisplayMode == value) return;
     _subtitleDisplayMode = value;
@@ -438,7 +461,7 @@ class AppSettingsController extends ChangeNotifier {
 
   static int _boundedBatchSize(int value) => value.clamp(1, 20);
 
-  static int _boundedConcurrency(int value) => value.clamp(1, 8);
+  static int _boundedConcurrency(int value) => value.clamp(1, 20);
 }
 
 class AppSettingsStore {
@@ -472,6 +495,7 @@ class AppSettingsStore {
       'genericApiKey': settings.genericApiKey,
       'genericModel': settings.genericModel,
       'translationBatchSize': settings.translationBatchSize,
+      'translationContextEnabled': settings.translationContextEnabled,
       'translationMaxConcurrent': settings.translationMaxConcurrent,
       'subtitleDisplayMode': settings.subtitleDisplayMode.name,
       'playbackStartStrategy': settings.playbackStartStrategy.name,

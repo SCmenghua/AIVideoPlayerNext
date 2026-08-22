@@ -31,11 +31,11 @@ class WindowsBrowserService extends BrowserServiceBase {
       await controller.addScriptToExecuteOnDocumentCreated(_mediaBridgeScript);
       _subscriptions.add(controller.url.listen(_handleUrl));
       _subscriptions.add(controller.title.listen((title) {
-        logs?.info('内置浏览器', '网页标题发生变化', {'标题': title});
+        logs?.debug('内置浏览器', '网页标题发生变化', {'标题': title});
         updateState(title: title);
       }));
       _subscriptions.add(controller.loadingState.listen((loading) {
-        logs?.info('内置浏览器', '网页加载状态变化', {
+        logs?.debug('内置浏览器', '网页加载状态变化', {
           '状态': loading.name,
           '网址': currentState.url,
         });
@@ -81,7 +81,7 @@ class WindowsBrowserService extends BrowserServiceBase {
     final url = Uri.tryParse(value);
     if (url == null) return;
     final previousPage = currentState.url ?? url;
-    logs?.info('内置浏览器', '网页地址发生变化', {'网址': url});
+    logs?.debug('内置浏览器', '网页地址发生变化', {'网址': url});
     if (previousPage != url) resetUnsupportedMediaReports();
     if (handleCandidate(candidate: url, originPage: previousPage)) {
       if (previousPage != url) {
@@ -103,7 +103,7 @@ class WindowsBrowserService extends BrowserServiceBase {
     final page =
         currentState.url ?? Uri.tryParse(message['page']?.toString() ?? '');
     if (kind == 'trace') {
-      logs?.info('网页媒体桥接', message['action']?.toString() ?? '网页事件', {
+      logs?.debug('网页媒体桥接', message['action']?.toString() ?? '网页事件', {
         '序号': message['sequence'],
         '网页地址': message['page'] ?? page,
         '网页标题': message['title'],
@@ -158,7 +158,7 @@ class WindowsBrowserService extends BrowserServiceBase {
   @override
   Future<void> goBack() async {
     if (_initialized && currentState.canGoBack) {
-      logs?.info('内置浏览器', '用户点击后退');
+      logs?.debug('内置浏览器', '用户点击后退');
       await controller.goBack();
     }
   }
@@ -166,7 +166,7 @@ class WindowsBrowserService extends BrowserServiceBase {
   @override
   Future<void> goForward() async {
     if (_initialized && currentState.canGoForward) {
-      logs?.info('内置浏览器', '用户点击前进');
+      logs?.debug('内置浏览器', '用户点击前进');
       await controller.goForward();
     }
   }
@@ -174,7 +174,7 @@ class WindowsBrowserService extends BrowserServiceBase {
   @override
   Future<void> reload() async {
     if (_initialized) {
-      logs?.info('内置浏览器', '用户点击刷新');
+      logs?.debug('内置浏览器', '用户点击刷新');
       await controller.reload();
     }
   }
@@ -182,7 +182,7 @@ class WindowsBrowserService extends BrowserServiceBase {
   @override
   Future<void> stop() async {
     if (_initialized) {
-      logs?.info('内置浏览器', '用户停止加载');
+      logs?.debug('内置浏览器', '用户停止加载');
       await controller.stop();
     }
   }

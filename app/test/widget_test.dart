@@ -127,6 +127,7 @@ void main() {
     expect(find.text('按需预取'), findsOneWidget);
     expect(find.text('DeepL'), findsOneWidget);
     expect(find.text('通用 API'), findsOneWidget);
+    expect(find.text('系统翻译'), findsOneWidget);
     expect(find.text('本地模型'), findsOneWidget);
     expect(find.text('字幕显示'), findsOneWidget);
     expect(find.text('双语'), findsOneWidget);

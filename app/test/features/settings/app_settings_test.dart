@@ -51,8 +51,8 @@ void main() {
       () {
     final settings = AppSettingsController();
 
-    expect(settings.translationBatchSize, 4);
-    expect(settings.translationMaxConcurrent, 2);
+    expect(settings.translationBatchSize, 1);
+    expect(settings.translationMaxConcurrent, 10);
 
     settings.setTranslationBatchSize(999);
     settings.setTranslationMaxConcurrent(0);
@@ -61,6 +61,39 @@ void main() {
     expect(settings.translationMaxConcurrent, 1);
     expect(settings.snapshot.translationBatchSize, 20);
     expect(settings.snapshot.translationMaxConcurrent, 1);
+  });
+
+  test('translation concurrency allows up to twenty requests', () {
+    final settings = AppSettingsController();
+
+    settings.setTranslationMaxConcurrent(20);
+
+    expect(settings.translationMaxConcurrent, 20);
+    expect(settings.snapshot.translationMaxConcurrent, 20);
+  });
+
+  test('system translation is a selectable translation mode', () {
+    final settings = AppSettingsController();
+
+    settings.setTranslationMode(TranslationMode.systemTranslation);
+
+    expect(settings.translationMode, TranslationMode.systemTranslation);
+    expect(
+        settings.snapshot.translationMode, TranslationMode.systemTranslation);
+  });
+
+  test('translation context toggle defaults on and affects scheduling', () {
+    final settings = AppSettingsController();
+
+    expect(settings.translationContextEnabled, isTrue);
+
+    final before = settings.snapshot;
+    settings.setTranslationContextEnabled(false);
+
+    expect(settings.translationContextEnabled, isFalse);
+    expect(settings.snapshot.translationContextEnabled, isFalse);
+    expect(before.sameTranslationScheduling(settings.snapshot), isFalse);
+    expect(before.sameTranslationConfiguration(settings.snapshot), isTrue);
   });
 
   test('translation scheduling changes are isolated from provider config', () {

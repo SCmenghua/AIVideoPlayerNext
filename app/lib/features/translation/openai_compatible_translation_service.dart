@@ -5,12 +5,14 @@ import 'dart:io';
 import '../../domain/translation/translation_service.dart';
 
 /// Text-only adapter for an OpenAI-compatible chat-completions endpoint.
-/// Media URLs, audio, browser headers and session credentials are deliberately
-/// outside this contract and cannot enter the request payload.
+/// Each request translates exactly one subtitle segment and the model returns
+/// plain translated text; the segment mapping stays local so the model never
+/// has to echo IDs or structured JSON. Connections are pooled and reused
+/// across requests, and a timeout aborts only its own request.
 class OpenAiCompatibleTranslationService
     implements
         TranslationService,
-        TimedBatchTranslationService,
+        TimedTranslationService,
         TranslationServiceRequestCanceller,
         TranslationServiceDiagnosticsProvider,
         TranslationServiceStatusProvider {
@@ -38,11 +40,14 @@ class OpenAiCompatibleTranslationService
     );
   }
 
+  static const _userAgent = 'ai-video-player-next/0.8';
+
   final Uri? endpoint;
   final String? apiKey;
   final String model;
   final HttpClient Function() _clientFactory;
-  final Set<HttpClient> _activeClients = <HttpClient>{};
+  final Set<HttpClientRequest> _activeRequests = <HttpClientRequest>{};
+  HttpClient? _sharedClient;
 
   @override
   Map<String, Object?> get diagnostics => {
@@ -72,82 +77,72 @@ class OpenAiCompatibleTranslationService
   }
 
   @override
-  Future<TranslationResult> translate(TranslationRequest request) async {
-    final results = await translateBatchWithTimeout(
-      [request],
-      defaultTranslationRequestTimeout,
-    );
-    return results.single;
-  }
+  Future<TranslationResult> translate(TranslationRequest request) =>
+      translateWithTimeout(request, defaultTranslationRequestTimeout);
 
   @override
-  Future<List<TranslationResult>> translateBatch(
-    List<TranslationRequest> requests,
-  ) =>
-      translateBatchWithTimeout(requests, defaultTranslationRequestTimeout);
-
-  @override
-  Future<List<TranslationResult>> translateBatchWithTimeout(
-    List<TranslationRequest> requests,
+  Future<TranslationResult> translateWithTimeout(
+    TranslationRequest request,
     Duration timeout,
   ) async {
-    if (requests.isEmpty) return const [];
     final serviceStatus = status;
     if (!serviceStatus.available) {
       throw StateError(serviceStatus.message ?? '翻译服务不可用。');
     }
-    final client = _clientFactory();
-    _activeClients.add(client);
-    client.connectionTimeout = timeout;
+    final client = _clientForRequest();
     var timedOut = false;
+    HttpClientRequest? httpRequest;
     final timeoutTimer = Timer(timeout, () {
       timedOut = true;
-      client.close(force: true);
+      httpRequest?.abort(TimeoutException('翻译请求超过 ${timeout.inSeconds} 秒。'));
     });
     try {
-      final httpRequest = await client.postUrl(endpoint!);
+      httpRequest = await client.postUrl(endpoint!);
+      _activeRequests.add(httpRequest);
       httpRequest.headers
         ..contentType = ContentType.json
-        ..set(HttpHeaders.authorizationHeader, 'Bearer $apiKey');
-      final isBatch = requests.length > 1;
+        ..set(HttpHeaders.authorizationHeader, 'Bearer $apiKey')
+        ..set(HttpHeaders.userAgentHeader, _userAgent);
       httpRequest.write(jsonEncode({
         'model': model,
         'temperature': 0,
         'messages': [
-          {
+          const {
             'role': 'system',
-            'content': isBatch
-                ? 'Translate subtitle segments. Return ONLY a valid JSON '
-                    'array, with no markdown fences and no explanation. '
-                    'Each input segment must produce exactly one object. '
-                    'Every object MUST contain exactly these string keys: '
-                    '"id" (copied exactly from the input) and '
-                    '"translation" (the translated subtitle). NEVER use '
-                    '"text", "source", or "translatedText" as the output '
-                    'key. Preserve meaning, names, punctuation and line '
-                    'breaks. Do not omit, merge, reorder, or duplicate '
-                    'segments. Required shape: '
-                    '[{"id":"segment-id","translation":"translated text"}]'
-                : 'You translate subtitle text. Return only the translated '
-                    'text. Preserve meaning, names, punctuation and line breaks. '
-                    'Do not add explanations.',
+            'content': 'You translate subtitle text. Return only the '
+                'translated text. Preserve meaning, names, punctuation and '
+                'line breaks. Do not add explanations, quotes or markdown. '
+                'When previous lines are given as context, use them only to '
+                'resolve meaning and keep terminology consistent; never '
+                'translate, repeat or summarize the context lines.',
           },
           {
             'role': 'user',
-            'content': isBatch
-                ? _batchPrompt(requests)
-                : 'Source language: ${requests.single.sourceLanguage}\n'
-                    'Target language: ${requests.single.targetLanguage}\n'
-                    'Text:\n${requests.single.text}',
+            'content': _userPrompt(request),
           },
         ],
       }));
       final response = await httpRequest.close();
       final body = await utf8.decoder.bind(response).join();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(
-          '翻译服务返回 HTTP ${response.statusCode}。',
-          uri: endpoint,
+      final statusCode = response.statusCode;
+      if (statusCode == HttpStatus.tooManyRequests ||
+          statusCode == HttpStatus.serviceUnavailable ||
+          statusCode == HttpStatus.badGateway ||
+          statusCode == HttpStatus.gatewayTimeout ||
+          statusCode == HttpStatus.requestTimeout ||
+          statusCode >= 500) {
+        throw TranslationProviderException(
+          '翻译服务返回 HTTP $statusCode。',
+          statusCode: statusCode,
+          retryable: true,
+          retryAfter: _retryAfter(response.headers),
+        );
+      }
+      if (statusCode < 200 || statusCode >= 300) {
+        throw TranslationProviderException(
+          '翻译服务返回 HTTP $statusCode。',
+          statusCode: statusCode,
+          retryable: false,
         );
       }
       if (timedOut) {
@@ -162,18 +157,14 @@ class OpenAiCompatibleTranslationService
       final message = (choices.first as Map)['message'];
       if (message is! Map) throw const FormatException('翻译响应缺少 message。');
       final content = message['content'];
-      final text = content is String ? content.trim() : '';
+      final text = _cleanResponseText(content is String ? content : '');
       if (text.isEmpty) throw const FormatException('翻译响应为空。');
-      if (!isBatch) {
-        return [
-          TranslationResult(
-            segmentId: requests.single.segmentId,
-            text: text,
-            provider: 'openai-compatible',
-          ),
-        ];
-      }
-      return _decodeBatch(text, requests);
+      _validateResponseShape(text, request);
+      return TranslationResult(
+        segmentId: request.segmentId,
+        text: text,
+        provider: 'openai-compatible',
+      );
     } on Object {
       if (timedOut) {
         throw TimeoutException('翻译请求超过 ${timeout.inSeconds} 秒。');
@@ -181,67 +172,97 @@ class OpenAiCompatibleTranslationService
       rethrow;
     } finally {
       timeoutTimer.cancel();
-      client.close(force: true);
-      _activeClients.remove(client);
+      if (httpRequest != null) _activeRequests.remove(httpRequest);
     }
+  }
+
+  /// One pooled client survives across requests; keep-alive connections are
+  /// reused instead of paying DNS/TCP/TLS (and proxy tunnel) per request.
+  HttpClient _clientForRequest() => _sharedClient ??= (_clientFactory()
+    ..connectionTimeout = defaultTranslationRequestTimeout
+    ..idleTimeout = const Duration(seconds: 90));
+
+  /// Server-requested retry delay, honored up to one minute so a large
+  /// Retry-After cannot stall the queue indefinitely.
+  static Duration? _retryAfter(HttpHeaders headers) {
+    final raw = headers.value(HttpHeaders.retryAfterHeader);
+    final seconds = raw == null ? null : int.tryParse(raw.trim());
+    if (seconds == null || seconds <= 0) return null;
+    return Duration(seconds: seconds.clamp(1, 60));
+  }
+
+  /// Builds the user message. Without context this is the plain single-line
+  /// form; with context the preceding lines are fenced off with explicit
+  /// markers so the model translates only the marked line.
+  static String _userPrompt(TranslationRequest request) {
+    final buffer = StringBuffer()
+      ..writeln('Source language: ${request.sourceLanguage}')
+      ..writeln('Target language: ${request.targetLanguage}');
+    if (request.context.isEmpty) {
+      buffer
+        ..writeln('Text:')
+        ..writeln(request.text);
+      return buffer.toString();
+    }
+    buffer
+      ..writeln('Previous lines (context only, do NOT translate them):')
+      ..writeln('<<<CONTEXT');
+    for (final line in request.context) {
+      final previous =
+          line.translation == null || line.translation!.trim().isEmpty
+              ? ''
+              : '  [已定译法：${line.translation!.trim()}]';
+      buffer.writeln('${line.text}$previous');
+    }
+    buffer
+      ..writeln('CONTEXT>>>')
+      ..writeln('Translate only this line:')
+      ..writeln('<<<TEXT')
+      ..writeln(request.text)
+      ..writeln('TEXT>>>');
+    return buffer.toString();
+  }
+
+  /// Rejects responses whose shape suggests the model translated the context
+  /// block instead of the single marked line: more lines than the source, or
+  /// a length far beyond any reasonable translation of it.
+  static void _validateResponseShape(String text, TranslationRequest request) {
+    final sourceLineCount = request.text.trim().split(RegExp(r'\r?\n')).length;
+    final responseLineCount = text.trim().split(RegExp(r'\r?\n')).length;
+    if (responseLineCount > sourceLineCount) {
+      throw const FormatException('译文行数多于源句，疑似翻译了上下文。');
+    }
+    final maximumLength = request.text.length * 6 + 40;
+    if (text.length > maximumLength) {
+      throw const FormatException('译文长度异常，疑似翻译了上下文。');
+    }
+  }
+
+  static String _cleanResponseText(String raw) {
+    var text = raw.trim();
+    final fenced =
+        RegExp(r'^```(?:[a-zA-Z]+)?\s*([\s\S]*?)\s*```$').firstMatch(text);
+    if (fenced != null) text = fenced.group(1)!.trim();
+    const quotePairs = [('“', '”'), ('"', '"'), ("'", "'"), ('‘', '’')];
+    for (final (open, close) in quotePairs) {
+      if (text.length >= 2 && text.startsWith(open) && text.endsWith(close)) {
+        final inner = text.substring(1, text.length - 1).trim();
+        if (inner.isNotEmpty) {
+          text = inner;
+          break;
+        }
+      }
+    }
+    return text;
   }
 
   @override
   void cancelActiveRequests() {
-    for (final client in List<HttpClient>.of(_activeClients)) {
-      client.close(force: true);
+    for (final request in List<HttpClientRequest>.of(_activeRequests)) {
+      request.abort();
     }
-  }
-
-  String _batchPrompt(List<TranslationRequest> requests) => jsonEncode({
-        'sourceLanguage': requests.first.sourceLanguage,
-        'targetLanguage': requests.first.targetLanguage,
-        'segments': requests
-            .map((request) => {'id': request.segmentId, 'text': request.text})
-            .toList(),
-      });
-
-  List<TranslationResult> _decodeBatch(
-    String content,
-    List<TranslationRequest> requests,
-  ) {
-    final decoded = jsonDecode(_normalizeBatchJson(content));
-    if (decoded is! List) {
-      throw const FormatException('批量翻译响应不是 JSON 数组。');
-    }
-    final expected = {for (final request in requests) request.segmentId};
-    final seen = <String>{};
-    final results = <TranslationResult>[];
-    for (final item in decoded) {
-      if (item is! Map || item['id'] is! String) {
-        throw const FormatException('批量翻译响应项目格式无效。');
-      }
-      final id = item['id'] as String;
-      final rawTranslation = item['translation'] ?? item['text'];
-      if (rawTranslation is! String) {
-        throw const FormatException('批量翻译响应项目格式无效。');
-      }
-      final translation = rawTranslation.trim();
-      if (!expected.contains(id) || !seen.add(id) || translation.isEmpty) {
-        throw const FormatException('批量翻译响应缺少、重复或未知片段。');
-      }
-      results.add(TranslationResult(
-        segmentId: id,
-        text: translation,
-        provider: 'openai-compatible',
-      ));
-    }
-    if (seen.length != expected.length) {
-      throw const FormatException('批量翻译响应缺少片段。');
-    }
-    return results;
-  }
-
-  String _normalizeBatchJson(String content) {
-    final trimmed = content.trim();
-    final fenced = RegExp(r'^```(?:json)?\s*([\s\S]*?)\s*```$',
-            caseSensitive: false)
-        .firstMatch(trimmed);
-    return fenced?.group(1)?.trim() ?? trimmed;
+    _activeRequests.clear();
+    _sharedClient?.close(force: true);
+    _sharedClient = null;
   }
 }

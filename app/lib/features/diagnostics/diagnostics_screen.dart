@@ -60,7 +60,8 @@ class DiagnosticsWorkspace extends StatelessWidget {
                         icon: Icons.bug_report_outlined,
                         accent: const Color(0xFFE95636),
                         count: entries.length,
-                        subtitle: AppBuildInfo.label,
+                        subtitle:
+                            '${AppBuildInfo.label} · 记录级别：${diagnosticLogLevelLabels[logs.minimumLevel]}',
                         actions: _LogActions(
                             logs: logs, enabled: entries.isNotEmpty),
                         child: entries.isEmpty
@@ -241,6 +242,26 @@ class _LogActions extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          PopupMenuButton<DiagnosticLogLevel>(
+            icon: const Icon(Icons.filter_list_outlined, size: 18),
+            tooltip: '日志级别（当前：${diagnosticLogLevelLabels[logs.minimumLevel]}）',
+            initialValue: logs.minimumLevel,
+            onSelected: (value) => logs.level = value,
+            itemBuilder: (context) => [
+              for (final level in DiagnosticLogLevel.values)
+                PopupMenuItem(
+                  value: level,
+                  child: Text(
+                    diagnosticLogLevelLabels[level]!,
+                    style: TextStyle(
+                      fontWeight: level == logs.minimumLevel
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ),
+            ],
+          ),
           _ActionButton(
             icon: Icons.content_copy_outlined,
             tooltip: '复制诊断日志',
@@ -804,9 +825,11 @@ class _DiagnosticEntryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = switch (entry.level) {
+      DiagnosticLogLevel.debug => const Color(0xFF7DD3FC),
       DiagnosticLogLevel.info => const Color(0xFF5ED6A0),
       DiagnosticLogLevel.warning => const Color(0xFFFFD166),
       DiagnosticLogLevel.error => const Color(0xFFFF8A80),
+      DiagnosticLogLevel.off => const Color(0xFF9EA7AC),
     };
     final time = entry.timestamp
         .toLocal()
@@ -828,7 +851,10 @@ class _DiagnosticEntryTile extends StatelessWidget {
             children: [
               Icon(Icons.circle, size: 10, color: color),
               const SizedBox(width: 8),
-              Expanded(child: Text('${entry.category} · ${entry.action}')),
+              Expanded(
+                child: Text(
+                    '[${diagnosticLogLevelLabels[entry.level]}] ${entry.category} · ${entry.action}'),
+              ),
               Text(time,
                   style:
                       const TextStyle(fontSize: 11, color: Color(0xFF9EA7AC))),

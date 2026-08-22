@@ -140,8 +140,8 @@ class WhisperWindowRecognitionService
       state: WindowRecognitionState.recognizing,
       lastWindow: window,
     ));
-    logs?.info('识别音频', 'Whisper 开始识别', {'窗口 ID': window.windowId});
-    logs?.info('识别音频', 'Whisper 输入窗口', {
+    logs?.debug('识别音频', 'Whisper 开始识别', {'窗口 ID': window.windowId});
+    logs?.debug('识别音频', 'Whisper 输入窗口', {
       '窗口 ID': window.windowId,
       '媒体起点': window.mediaStart,
       '媒体终点': window.mediaEnd,
@@ -175,7 +175,7 @@ class WhisperWindowRecognitionService
           discardReason = 'knownHallucination';
         }
         if (discardReason != null) {
-          logs?.info('识别音频', 'Whisper 候选已丢弃', {
+          logs?.debug('识别音频', 'Whisper 候选已丢弃', {
             '窗口 ID': window.windowId,
             '片段起点': event.start,
             '片段终点': event.end,
@@ -209,7 +209,7 @@ class WhisperWindowRecognitionService
         lastOutput: events.map((event) => event.text).toList(growable: false),
         lastInference: stopwatch.elapsed,
       ));
-      logs?.info('识别音频', 'Whisper 输出窗口', {
+      logs?.debug('识别音频', 'Whisper 输出窗口', {
         '窗口 ID': window.windowId,
         '结果数': events.length,
         '输出文字': events.map((event) => event.text).join(' | '),
@@ -226,7 +226,7 @@ class WhisperWindowRecognitionService
         '回退原因': _worker.backendStatus.fallbackLabel,
       });
       if (events.isEmpty) {
-        logs?.info('识别音频', 'Whisper 输出为空', {'窗口 ID': window.windowId});
+        logs?.debug('识别音频', 'Whisper 输出为空', {'窗口 ID': window.windowId});
       }
       return WindowRecognitionResult(
         window: window,

@@ -109,7 +109,7 @@ abstract class BrowserServiceBase implements BrowserService {
     if (isDisposed) return;
     final key = '${page.removeFragment()}|$reason';
     if (!_reportedUnsupportedMedia.add(key)) {
-      logs?.info('浏览器媒体', '忽略重复的不支持媒体提示', {
+      logs?.debug('浏览器媒体', '忽略重复的不支持媒体提示', {
         '来源页面': page,
         '原因': reason,
       });

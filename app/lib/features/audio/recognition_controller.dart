@@ -184,7 +184,7 @@ class RecognitionController {
     await _player.seek(position);
     _considerSeekPriority(position, previousPosition: previousPosition);
     _lastPlaybackPosition = position;
-    _logs?.info('识别音频', 'seek 交给播放器完成', {
+    _logs?.debug('识别音频', 'seek 交给播放器完成', {
       '目标位置': position,
       'UI 调用耗时': elapsed.elapsed,
       '会话 ID': _sessionId,
@@ -339,7 +339,7 @@ class RecognitionController {
     _priorityFirstPcmPending = true;
     _priorityFirstWindowPending = true;
     _priorityFirstSubtitlePending = true;
-    _logs?.info('识别媒体缓存', '识别网络目标区域已提升优先级', {
+    _logs?.debug('识别媒体缓存', '识别网络目标区域已提升优先级', {
       '会话 ID': _sessionId,
       '工作序号': nextWorkEpoch,
       '播放器目标位置': position,
@@ -707,25 +707,25 @@ class RecognitionController {
     };
     switch (event.kind) {
       case RecognitionMediaCacheRequestEventKind.priorityIntent:
-        _logs?.info('识别媒体缓存', '网络目标区域优先意图已登记', details);
+        _logs?.debug('识别媒体缓存', '网络目标区域优先意图已登记', details);
         return;
       case RecognitionMediaCacheRequestEventKind.cacheHit:
-        _logs?.info('识别媒体缓存', '代理 Range 命中识别缓存', details);
+        _logs?.debug('识别媒体缓存', '代理 Range 命中识别缓存', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamStarted:
-        _logs?.info('识别媒体缓存', '上游 Range 请求已开始', details);
+        _logs?.debug('识别媒体缓存', '上游 Range 请求已开始', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamResponse:
-        _logs?.info('识别媒体缓存', '上游实际 Range 已响应', details);
+        _logs?.debug('识别媒体缓存', '上游实际 Range 已响应', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamFirstByte:
-        _logs?.info('识别媒体缓存', '上游 Range 首字节已到达', details);
+        _logs?.debug('识别媒体缓存', '上游 Range 首字节已到达', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamCompleted:
-        _logs?.info('识别媒体缓存', '上游 Range 请求已完成', details);
+        _logs?.debug('识别媒体缓存', '上游 Range 请求已完成', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamCancelled:
-        _logs?.info('识别媒体缓存', '旧上游 Range 已为新位置取消', details);
+        _logs?.debug('识别媒体缓存', '旧上游 Range 已为新位置取消', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamFailed:
         _logs?.error('识别媒体缓存', '上游 Range 请求失败', details);
@@ -747,7 +747,7 @@ class RecognitionController {
             now.difference(_lastMediaCacheLogAt!) >= const Duration(seconds: 1);
     if (!shouldLog) return;
     _lastMediaCacheLogAt = now;
-    _logs?.info('识别媒体缓存', '识别缓存状态', {
+    _logs?.debug('识别媒体缓存', '识别缓存状态', {
       '会话 ID': snapshot.sessionId,
       '状态': snapshot.state.name,
       '模式': snapshot.mode.name,
@@ -786,7 +786,7 @@ class RecognitionController {
       _lastDecoderLogAt = now;
       _lastLoggedDecoderState = status.state;
       _lastLoggedDecoderChunks = status.emittedChunks;
-      _logs?.info('识别音频', '解码器状态汇总', {
+      _logs?.debug('识别音频', '解码器状态汇总', {
         '状态': status.state.name,
         '采样率': status.sampleRate,
         '声道': status.channels,
@@ -817,7 +817,7 @@ class RecognitionController {
       final isFirstChunk = !_hasLoggedAudioChunk;
       _hasLoggedAudioChunk = true;
       _lastDecoderLogAt = now;
-      _logs?.info('识别音频', '解码音频进度', {
+      _logs?.debug('识别音频', '解码音频进度', {
         '媒体起点': chunk.mediaStart,
         '持续时间': chunk.duration,
         '采样率': chunk.sampleRate,
@@ -845,7 +845,7 @@ class RecognitionController {
         });
       }
       if (chunk.isLast) {
-        _logs?.info('识别音频', 'decoder worker 已退出', {
+        _logs?.debug('识别音频', 'decoder worker 已退出', {
           '会话 ID': chunk.sessionId,
           '状态': _decoder.status.state.name,
         });
@@ -861,7 +861,7 @@ class RecognitionController {
         );
         continue;
       }
-      _logs?.info('识别音频', '生成识别窗口', {
+      _logs?.debug('识别音频', '生成识别窗口', {
         '窗口 ID': window.windowId,
         '媒体起点': window.mediaStart,
         '媒体终点': window.mediaEnd,
@@ -881,7 +881,7 @@ class RecognitionController {
       if (!_queue.offer(window)) {
         if (_deferredWindow == null) {
           _deferredWindow = window;
-          _logs?.info('识别音频', '窗口等待背压恢复', {
+          _logs?.debug('识别音频', '窗口等待背压恢复', {
             '窗口 ID': window.windowId,
             '媒体起点': window.mediaStart,
             '媒体终点': window.mediaEnd,
@@ -951,7 +951,7 @@ class RecognitionController {
         queueDepth: _queue.depth,
         lastReason: 'high_watermark',
       ));
-      _logs?.info('识别音频', '背压恢复转为连续预取高水位暂停', {
+      _logs?.debug('识别音频', '背压恢复转为连续预取高水位暂停', {
         '处理至': _diagnostic.processedThrough,
         '播放位置': _diagnostic.playbackPosition,
         '领先量': _recognitionLead,
@@ -1024,7 +1024,7 @@ class RecognitionController {
           queueDepth: _queue.depth,
           lastReason: 'high_watermark',
         ));
-        _logs?.info('识别音频', '达到连续预取高水位，暂停解码', {
+        _logs?.debug('识别音频', '达到连续预取高水位，暂停解码', {
           '处理至': _diagnostic.processedThrough,
           '播放位置': _diagnostic.playbackPosition,
           '领先量': _recognitionLead,
@@ -1069,7 +1069,7 @@ class RecognitionController {
           queueDepth: _queue.depth,
           lastReason: 'low_watermark_recovered',
         ));
-        _logs?.info('识别音频', '低于连续预取低水位，恢复解码', {
+        _logs?.debug('识别音频', '低于连续预取低水位，恢复解码', {
           '处理至': _diagnostic.processedThrough,
           '播放位置': _diagnostic.playbackPosition,
           '领先量': _recognitionLead,
@@ -1088,7 +1088,7 @@ class RecognitionController {
     if (deferred == null || _disposed || !_queue.offer(deferred)) return;
     _deferredWindow = null;
     _setDiagnostic(_diagnostic.copyWith(queueDepth: _queue.depth));
-    _logs?.info('识别音频', '等待窗口已重新入队', {
+    _logs?.debug('识别音频', '等待窗口已重新入队', {
       '窗口 ID': deferred.windowId,
       '媒体起点': deferred.mediaStart,
       '媒体终点': deferred.mediaEnd,
@@ -1170,7 +1170,7 @@ class RecognitionController {
           recognizedThrough = _laterOf(recognizedThrough, event.end);
           final isFirstRecognition = !_hasLoggedRecognition;
           _hasLoggedRecognition = true;
-          _logs?.info('识别音频', '字幕输出', {
+          _logs?.debug('识别音频', '字幕输出', {
             '窗口 ID': window.windowId,
             '片段起点': event.start,
             '片段终点': event.end,
@@ -1257,7 +1257,7 @@ class RecognitionController {
           ? _diagnostic.processedThrough
           : _laterOf(_diagnostic.processedThrough, mediaEnd),
     ));
-    _logs?.info('识别音频', '窗口已跳过', {
+    _logs?.debug('识别音频', '窗口已跳过', {
       '原因': reason,
       '媒体起点': mediaStart,
       '媒体终点': mediaEnd,

@@ -19,6 +19,7 @@ import '../features/player/mock_services.dart';
 import '../features/settings/app_settings.dart';
 import '../features/translation/deepl_translation_service.dart';
 import '../features/translation/local_model_translation_service.dart';
+import '../features/translation/system_translation_service.dart';
 import '../features/translation/openai_compatible_translation_service.dart';
 import '../features/audio/audio_recognition_adapters.dart';
 import '../features/audio/ios_audio_decoder.dart';
@@ -205,6 +206,7 @@ TranslationService createTranslationService(AppSettings settings) =>
           apiKey: settings.genericApiKey,
           model: settings.genericModel,
         ),
+      TranslationMode.systemTranslation => SystemTranslationService(),
       TranslationMode.localModel => LocalModelTranslationService(
           model: settings.localTranslationModel,
         ),

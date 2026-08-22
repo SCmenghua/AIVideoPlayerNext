@@ -125,13 +125,13 @@ class MediaKitPlayerService implements PlayerService {
       return;
     }
     final elapsed = Stopwatch()..start();
-    _logs?.info('播放器', '用户点击播放', {
+    _logs?.debug('播放器', '用户点击播放', {
       '标题': _snapshot.source?.title,
       '状态': _snapshot.status.name,
     });
     try {
       await _player.play();
-      _logs?.info('播放器', '播放调用返回', {'调用耗时': elapsed.elapsed});
+      _logs?.debug('播放器', '播放调用返回', {'调用耗时': elapsed.elapsed});
     } catch (error) {
       _logs?.error('播放器', '播放调用失败', {
         '错误': error,
@@ -151,9 +151,9 @@ class MediaKitPlayerService implements PlayerService {
       return;
     }
     final elapsed = Stopwatch()..start();
-    _logs?.info('播放器', '用户点击暂停', {'标题': _snapshot.source?.title});
+    _logs?.debug('播放器', '用户点击暂停', {'标题': _snapshot.source?.title});
     await _player.pause();
-    _logs?.info('播放器', '暂停调用返回', {'调用耗时': elapsed.elapsed});
+    _logs?.debug('播放器', '暂停调用返回', {'调用耗时': elapsed.elapsed});
   }
 
   @override
@@ -170,7 +170,7 @@ class MediaKitPlayerService implements PlayerService {
             : position;
     final elapsed = Stopwatch()..start();
     await _player.seek(bounded);
-    _logs?.info('播放器', '用户调整播放进度', {
+    _logs?.debug('播放器', '用户调整播放进度', {
       '目标位置': bounded,
       '媒体标题': _snapshot.source?.title,
       '调用耗时': elapsed.elapsed,
@@ -181,14 +181,14 @@ class MediaKitPlayerService implements PlayerService {
   Future<void> setRate(double rate) async {
     final bounded = rate.clamp(0.5, 2).toDouble();
     await _player.setRate(bounded);
-    _logs?.info('播放器', '用户调整播放速度', {'速度': bounded});
+    _logs?.debug('播放器', '用户调整播放速度', {'速度': bounded});
   }
 
   @override
   Future<void> setVolume(double volume) async {
     final bounded = volume.clamp(0, 100).toDouble();
     await _player.setVolume(bounded);
-    _logs?.info('播放器', '用户调整音量', {'音量': bounded});
+    _logs?.debug('播放器', '用户调整音量', {'音量': bounded});
   }
 
   void _handlePlayerError(String error) {
@@ -208,14 +208,14 @@ class MediaKitPlayerService implements PlayerService {
     if (_disposed) return;
     if (snapshot.status != _lastLoggedStatus) {
       _lastLoggedStatus = snapshot.status;
-      _logs?.info('播放器', '播放状态变化', {
+      _logs?.debug('播放器', '播放状态变化', {
         '状态': snapshot.status.name,
         '媒体标题': snapshot.source?.title,
       });
     }
     if (snapshot.isBuffering != _lastLoggedBuffering) {
       _lastLoggedBuffering = snapshot.isBuffering;
-      _logs?.info('播放器', snapshot.isBuffering ? '开始缓冲' : '缓冲结束', {
+      _logs?.debug('播放器', snapshot.isBuffering ? '开始缓冲' : '缓冲结束', {
         '媒体标题': snapshot.source?.title,
       });
     }

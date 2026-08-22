@@ -10,7 +10,19 @@ import 'package:share_plus/share_plus.dart';
 
 import '../app_build_info.dart';
 
-enum DiagnosticLogLevel { info, warning, error }
+/// Log severity. Ordered from most verbose to least; [off] may only be used
+/// as the recording threshold and is never assigned to an entry.
+enum DiagnosticLogLevel { debug, info, warning, error, off }
+
+/// Human labels for the switchable recording levels shown in the UI and in
+/// exported files. `off` disables recording entirely.
+const diagnosticLogLevelLabels = {
+  DiagnosticLogLevel.debug: '调试',
+  DiagnosticLogLevel.info: '信息',
+  DiagnosticLogLevel.warning: '警告',
+  DiagnosticLogLevel.error: '错误',
+  DiagnosticLogLevel.off: '关闭',
+};
 
 class DiagnosticLogEntry {
   const DiagnosticLogEntry({
@@ -28,18 +40,43 @@ class DiagnosticLogEntry {
   final Map<String, String> details;
 }
 
-/// In-memory diagnostic timeline for user initiated export.
+/// In-memory diagnostic timeline for user initiated export. Entries below
+/// [minimumLevel] are dropped before recording; the level is switchable at
+/// runtime from the diagnostics workspace.
 class DiagnosticLogService extends ChangeNotifier {
-  DiagnosticLogService({bool? preserveSensitiveDetails})
-      : preserveSensitiveDetails = preserveSensitiveDetails ?? !kReleaseMode;
-
+  DiagnosticLogService({
+    bool? preserveSensitiveDetails,
+    this.minimumLevel = DiagnosticLogLevel.info,
+  }) : preserveSensitiveDetails = preserveSensitiveDetails ?? !kReleaseMode;
   static const _maximumEntries = 800;
   final bool preserveSensitiveDetails;
+  DiagnosticLogLevel minimumLevel;
+
   final List<DiagnosticLogEntry> _entries = [];
 
   UnmodifiableListView<DiagnosticLogEntry> get entries =>
       UnmodifiableListView(_entries);
 
+  /// Runtime-switchable recording threshold. Lowering it does not restore
+  /// entries that were already dropped.
+  set level(DiagnosticLogLevel value) {
+    if (value == minimumLevel) return;
+    minimumLevel = value;
+    notifyListeners();
+  }
+
+  /// High-frequency diagnostic detail: per-window audio/PCM data, network
+  /// Range activity, player state transitions, routine user interactions.
+  void debug(
+    String category,
+    String action, [
+    Map<String, Object?> details = const {},
+  ]) {
+    _add(DiagnosticLogLevel.debug, category, action, details);
+  }
+
+  /// Key lifecycle events and milestones: initialization, media open, model
+  /// load, first PCM/subtitle, handoff, settings changes.
   void info(
     String category,
     String action, [
@@ -48,6 +85,8 @@ class DiagnosticLogService extends ChangeNotifier {
     _add(DiagnosticLogLevel.info, category, action, details);
   }
 
+  /// Degradations and recoverable problems: unsupported media, invalid input,
+  /// retryable failures, ignored duplicates.
   void warning(
     String category,
     String action, [
@@ -56,6 +95,7 @@ class DiagnosticLogService extends ChangeNotifier {
     _add(DiagnosticLogLevel.warning, category, action, details);
   }
 
+  /// Failures that lose a capability or require user attention.
   void error(
     String category,
     String action, [
@@ -70,6 +110,7 @@ class DiagnosticLogService extends ChangeNotifier {
     String action,
     Map<String, Object?> details,
   ) {
+    if (level.index < minimumLevel.index) return;
     final safeDetails = <String, String>{};
     details.forEach((key, value) {
       if (value == null) return;
@@ -100,6 +141,7 @@ class DiagnosticLogService extends ChangeNotifier {
       ..writeln('构建时间：${AppBuildInfo.buildTime}')
       ..writeln('构建编号：${AppBuildInfo.buildId}')
       ..writeln('导出时间：${_formatTime(DateTime.now())}')
+      ..writeln('日志级别：${_levelSettingLabel(minimumLevel)}')
       ..writeln('日志条数：${_entries.length}')
       ..writeln(preserveSensitiveDetails
           ? '隐私说明：测试日志保留完整本机媒体、请求与会话信息；不会自动上传，请勿提交到 Git。'
@@ -258,8 +300,20 @@ class DiagnosticLogService extends ChangeNotifier {
       value.toLocal().toIso8601String().replaceFirst('T', ' ').split('.').first;
 
   static String _levelLabel(DiagnosticLogLevel level) => switch (level) {
+        DiagnosticLogLevel.debug => '调试',
         DiagnosticLogLevel.info => '信息',
         DiagnosticLogLevel.warning => '警告',
         DiagnosticLogLevel.error => '错误',
+        DiagnosticLogLevel.off => '关闭',
+      };
+
+  /// The recording threshold label for export headers, including what is
+  /// being dropped at the current level.
+  static String _levelSettingLabel(DiagnosticLogLevel level) => switch (level) {
+        DiagnosticLogLevel.debug => '调试（全部事件）',
+        DiagnosticLogLevel.info => '信息及以上（调试级事件未记录）',
+        DiagnosticLogLevel.warning => '警告及以上（信息、调试级事件未记录）',
+        DiagnosticLogLevel.error => '仅错误',
+        DiagnosticLogLevel.off => '关闭（未记录任何日志）',
       };
 }

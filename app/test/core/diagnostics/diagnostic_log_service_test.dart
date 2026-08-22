@@ -54,4 +54,73 @@ void main() {
     logs.clear();
     expect(logs.entries, isEmpty);
   });
+
+  test('drops entries below the configured level', () {
+    final logs = DiagnosticLogService(
+      minimumLevel: DiagnosticLogLevel.warning,
+    );
+
+    logs.debug('测试', '调试事件');
+    logs.info('测试', '信息事件');
+    logs.warning('测试', '警告事件');
+    logs.error('测试', '错误事件');
+
+    expect(logs.entries.map((entry) => entry.action),
+        containsAllInOrder(['警告事件', '错误事件']));
+  });
+
+  test('defaults to info level and hides debug events', () {
+    final logs = DiagnosticLogService();
+
+    expect(logs.minimumLevel, DiagnosticLogLevel.info);
+    logs.debug('测试', '调试事件');
+    logs.info('测试', '信息事件');
+
+    expect(logs.entries.map((entry) => entry.action), ['信息事件']);
+  });
+
+  test('records all events at debug level', () {
+    final logs = DiagnosticLogService(minimumLevel: DiagnosticLogLevel.debug);
+
+    logs.debug('测试', '调试事件');
+    logs.warning('测试', '警告事件');
+
+    expect(logs.entries, hasLength(2));
+    expect(logs.entries.first.level, DiagnosticLogLevel.debug);
+  });
+
+  test('records nothing when the level is off', () {
+    final logs = DiagnosticLogService(minimumLevel: DiagnosticLogLevel.off);
+
+    logs.debug('测试', '调试事件');
+    logs.error('测试', '错误事件');
+
+    expect(logs.entries, isEmpty);
+    expect(logs.formatForExport(), contains('关闭（未记录任何日志）'));
+  });
+
+  test('switching the level at runtime changes what is recorded', () {
+    final logs = DiagnosticLogService();
+
+    logs.debug('测试', '升级前调试事件');
+    logs.level = DiagnosticLogLevel.debug;
+    logs.debug('测试', '升级后调试事件');
+    logs.level = DiagnosticLogLevel.error;
+    logs.warning('测试', '降级后警告事件');
+    logs.error('测试', '错误事件');
+
+    expect(logs.entries.map((entry) => entry.action),
+        containsAllInOrder(['升级后调试事件', '错误事件']));
+    expect(logs.formatForExport(), contains('仅错误'));
+  });
+
+  test('export header states the recording level', () {
+    final logs = DiagnosticLogService();
+    logs.info('测试', '信息事件');
+
+    final exported = logs.formatForExport();
+
+    expect(exported, contains('日志级别：信息及以上'));
+    expect(exported, contains('信息 · 测试 · 信息事件'));
+  });
 }

@@ -1,17 +1,33 @@
 const defaultTranslationRequestTimeout = Duration(seconds: 40);
 
+/// A preceding timeline line sent as read-only context. The provider uses it
+/// to resolve pronouns and keep terminology consistent; the model must never
+/// translate these lines.
+class TranslationContextLine {
+  const TranslationContextLine({required this.text, this.translation});
+
+  final String text;
+  final String? translation;
+}
+
 class TranslationRequest {
   const TranslationRequest({
     required this.segmentId,
     required this.text,
     required this.sourceLanguage,
     required this.targetLanguage,
+    this.context = const [],
   });
 
   final String segmentId;
   final String text;
   final String sourceLanguage;
   final String targetLanguage;
+
+  /// Up to a few preceding lines by media time, oldest first. Context is a
+  /// snapshot taken when the request is built; it creates no ordering
+  /// dependency between concurrent requests.
+  final List<TranslationContextLine> context;
 }
 
 class TranslationResult {
@@ -39,6 +55,36 @@ abstract interface class TimedBatchTranslationService
     List<TranslationRequest> requests,
     Duration timeout,
   );
+}
+
+/// A single-request provider that owns its network timeout, so it can abort
+/// exactly one request (and its keep-alive connection) instead of tearing down
+/// a shared HttpClient.
+abstract interface class TimedTranslationService implements TranslationService {
+  Future<TranslationResult> translateWithTimeout(
+    TranslationRequest request,
+    Duration timeout,
+  );
+}
+
+/// Provider-level failure with retry guidance for the queue. HTTP 4xx
+/// configuration problems are fatal; 408/429/5xx and network errors are
+/// retryable, optionally after the server-requested delay.
+class TranslationProviderException implements Exception {
+  const TranslationProviderException(
+    this.message, {
+    this.statusCode,
+    this.retryable = true,
+    this.retryAfter,
+  });
+
+  final String message;
+  final int? statusCode;
+  final bool retryable;
+  final Duration? retryAfter;
+
+  @override
+  String toString() => message;
 }
 
 /// Optional cancellation support for a service that owns network requests.

@@ -16,6 +16,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
     required String targetLanguage,
     this.maxConcurrent = 2,
     this.batchSize = 1,
+    this.contextEnabled = true,
     this.maxQueued = 200,
     this.timeout = defaultTranslationRequestTimeout,
     this.maxAttempts = 3,
@@ -37,6 +38,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
   String _targetLanguage;
   int maxConcurrent;
   int batchSize;
+  bool contextEnabled;
   final int maxQueued;
   final Duration timeout;
   final int maxAttempts;
@@ -126,19 +128,25 @@ class TranscriptTranslationQueue extends ChangeNotifier {
   void updateScheduling({
     required int maxConcurrent,
     required int batchSize,
+    bool? contextEnabled,
   }) {
+    final nextContextEnabled = contextEnabled ?? this.contextEnabled;
     if (_disposed ||
-        (this.maxConcurrent == maxConcurrent && this.batchSize == batchSize)) {
+        (this.maxConcurrent == maxConcurrent &&
+            this.batchSize == batchSize &&
+            this.contextEnabled == nextContextEnabled)) {
       return;
     }
     this.maxConcurrent = maxConcurrent;
     this.batchSize = batchSize;
+    this.contextEnabled = nextContextEnabled;
     _validateLimits();
     _batchTimer?.cancel();
     _batchTimer = null;
     _logs?.info('翻译', '翻译调度设置已应用', {
       '每批字幕数': batchSize,
       '并发请求数': maxConcurrent,
+      '携带上文': nextContextEnabled ? '开' : '关',
     });
     _pump();
     _notifyMetrics();
@@ -298,6 +306,9 @@ class TranscriptTranslationQueue extends ChangeNotifier {
                 text: job.segment.text,
                 sourceLanguage: job.segment.language,
                 targetLanguage: targetLanguage,
+                context: contextEnabled
+                    ? _contextLinesBefore(job.segment)
+                    : const [],
               ))
           .toList(growable: false);
       final results = await _translate(requests);
@@ -328,7 +339,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
         _recordEndToEndWait(completedAt.difference(job.firstEnqueuedAt));
         _cancelRetryTimer(job.key);
       }
-      _logs?.info('翻译', '字幕批量翻译完成', {
+      _logs?.debug('翻译', '字幕批量翻译完成', {
         '会话 ID': jobs.first.sessionId,
         '片段数': jobs.length,
         '尝试次数': jobs.map((job) => job.attempt).reduce(_max),
@@ -343,6 +354,8 @@ class TranscriptTranslationQueue extends ChangeNotifier {
         if (!apiWaitRecorded) {
           _recordApiWait(requestTimer.elapsed, jobs.length);
         }
+        final retryable = _isRetryable(error);
+        final retryAfter = _retryAfterOf(error);
         for (final job in jobs) {
           _failedAttempts++;
           if (error is TimeoutException) _timeoutAttempts++;
@@ -353,18 +366,25 @@ class TranscriptTranslationQueue extends ChangeNotifier {
                 text: '',
                 status: TranscriptTranslationStatus.failed,
                 provider: serviceStatus.provider,
-                error: error.runtimeType.toString(),
+                error: _errorDescription(error),
               ));
-          _scheduleRetry(job, forceSingle: jobs.length > 1);
-          if (job.attempt >= maxAttempts) {
+          if (retryable) {
+            _scheduleRetry(job,
+                forceSingle: jobs.length > 1, retryAfter: retryAfter);
+            if (job.attempt >= maxAttempts) {
+              _terminalFailedSegments++;
+            }
+          } else {
             _terminalFailedSegments++;
           }
         }
-        _logs?.warning('翻译', '字幕批量翻译失败', {
+        _logs?.warning('翻译', '字幕翻译失败', {
           '会话 ID': jobs.first.sessionId,
           '片段数': jobs.length,
           '错误类型': error.runtimeType,
           '错误分类': _errorCategory(error),
+          '可重试': retryable,
+          if (retryAfter != null) '建议重试延迟 ms': retryAfter.inMilliseconds,
           '错误信息': error.toString(),
           '批量请求': jobs.length,
           ..._serviceDiagnostics,
@@ -385,9 +405,26 @@ class TranscriptTranslationQueue extends ChangeNotifier {
 
   String _errorCategory(Object error) => switch (error) {
         TimeoutException() => 'timeout',
+        TranslationProviderException() =>
+          error.retryable ? 'provider_retryable' : 'provider_fatal',
         FormatException() => 'response_format',
         _ => 'provider_error',
       };
+
+  bool _isRetryable(Object error) =>
+      error is! TranslationProviderException || error.retryable;
+
+  Duration? _retryAfterOf(Object error) =>
+      error is TranslationProviderException ? error.retryAfter : null;
+
+  String _errorDescription(Object error) {
+    if (error is TranslationProviderException) {
+      return error.retryable ? error.message : '${error.message}（不会自动重试）';
+    }
+    if (error is TimeoutException) return '翻译请求超时';
+    if (error is FormatException) return '翻译响应格式错误';
+    return error.runtimeType.toString();
+  }
 
   Map<String, Object?> get _serviceDiagnostics =>
       _service is TranslationServiceDiagnosticsProvider
@@ -406,7 +443,50 @@ class TranscriptTranslationQueue extends ChangeNotifier {
           .translateBatch(requests)
           .timeout(timeout);
     }
+    if (service is TimedTranslationService) {
+      return service
+          .translateWithTimeout(requests.single, timeout)
+          .then((result) => [result]);
+    }
     return Future.wait(requests.map(service.translate)).timeout(timeout);
+  }
+
+  static const _maximumContextLines = 3;
+
+  /// Preceding timeline lines by media time for pronoun and terminology
+  /// context. Translations are attached opportunistically when already done;
+  /// no request ever waits for another one to finish.
+  List<TranslationContextLine> _contextLinesBefore(TranscriptSegment segment) {
+    final document = _results.document;
+    if (document == null) return const [];
+    final preceding = <TranslationContextLine>[];
+    for (final candidate in document.orderedSegments) {
+      if (candidate.id == segment.id && candidate.text == segment.text) break;
+      if (candidate.endMs > segment.startMs) continue;
+      preceding.add(TranslationContextLine(
+        text: candidate.text,
+        translation: _translatedTextFor(document, candidate),
+      ));
+      if (preceding.length > _maximumContextLines) {
+        preceding.removeAt(0);
+      }
+    }
+    return List.unmodifiable(preceding);
+  }
+
+  String? _translatedTextFor(
+    TranscriptDocument document,
+    TranscriptSegment segment,
+  ) {
+    for (final translation in document.translations) {
+      if (translation.segmentId == segment.id &&
+          translation.targetLanguage == targetLanguage &&
+          translation.sourceText == segment.text &&
+          translation.status == TranscriptTranslationStatus.translated) {
+        return translation.text;
+      }
+    }
+    return null;
   }
 
   bool _hasTranslatedTranslation(
@@ -461,11 +541,17 @@ class TranscriptTranslationQueue extends ChangeNotifier {
   void _scheduleRetry(
     _TranslationJob job, {
     required bool forceSingle,
+    Duration? retryAfter,
   }) {
     if (job.attempt >= maxAttempts || _disposed) return;
     _retriedSegments++;
+    final delay = retryAfter == null
+        ? retryDelay * job.attempt
+        : (retryDelay * job.attempt > retryAfter
+            ? retryDelay * job.attempt
+            : retryAfter);
     _cancelRetryTimer(job.key);
-    _retryTimers[job.key] = Timer(retryDelay * job.attempt, () {
+    _retryTimers[job.key] = Timer(delay, () {
       _retryTimers.remove(job.key);
       if (!_isCurrent(job)) return;
       _tryEnqueueRetry(job, forceSingle: forceSingle);

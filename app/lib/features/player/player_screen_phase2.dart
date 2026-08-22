@@ -74,6 +74,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       targetLanguage: 'zh-CN',
       batchSize: ref.read(appSettingsProvider).translationBatchSize,
       maxConcurrent: ref.read(appSettingsProvider).translationMaxConcurrent,
+      contextEnabled: ref.read(appSettingsProvider).translationContextEnabled,
       logs: ref.read(diagnosticsLogProvider),
     );
     _recognitionResults.addListener(_onTranscriptChanged);
@@ -130,6 +131,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       _translationQueue.updateScheduling(
         batchSize: next.translationBatchSize,
         maxConcurrent: next.translationMaxConcurrent,
+        contextEnabled: next.translationContextEnabled,
       );
     }
     if (_startup != null &&
@@ -159,7 +161,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     try {
       final source = await ref.read(mediaPickerProvider).pickLocalVideo();
       if (source == null) {
-        logs.info('工作台', '用户取消选择本地视频');
+        logs.debug('工作台', '用户取消选择本地视频');
         return;
       }
       logs.info('工作台', '已选择本地视频', {
@@ -215,7 +217,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         (view != _WorkbenchView.browser || _browserHasBeenOpened)) {
       return;
     }
-    ref.read(diagnosticsLogProvider).info('工作台', '用户切换工作区', {
+    ref.read(diagnosticsLogProvider).debug('工作台', '用户切换工作区', {
       '从': _viewLabel(_activeView),
       '到': _viewLabel(view),
     });
@@ -552,7 +554,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _openFullscreen() async {
     final player = ref.read(playerServiceProvider);
     if (_snapshot.source == null || player is! MediaKitPlayerService) return;
-    ref.read(diagnosticsLogProvider).info('播放器', '用户进入全屏');
+    ref.read(diagnosticsLogProvider).debug('播放器', '用户进入全屏');
     setState(() => _isFullscreenOpen = true);
     try {
       await Navigator.of(context).push(
@@ -571,7 +573,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       );
     } finally {
       if (mounted) {
-        ref.read(diagnosticsLogProvider).info('播放器', '用户退出全屏');
+        ref.read(diagnosticsLogProvider).debug('播放器', '用户退出全屏');
         setState(() => _isFullscreenOpen = false);
       }
     }
