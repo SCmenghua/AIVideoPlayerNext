@@ -59,6 +59,8 @@ class StartupPreparation {
     required bool nextTranslationReady,
     required int completedTranslationCount,
     required int skippedWindowCount,
+    bool translationExpected = true,
+    int failedTranslationCount = 0,
   }) =>
       evaluatePlaybackStart(
         videoReady: videoReady,
@@ -68,6 +70,8 @@ class StartupPreparation {
         skippedWindowCount: skippedWindowCount,
         strategy: strategy,
         waitForSubtitlePreparation: waitForSubtitlePreparation,
+        translationExpected: translationExpected,
+        failedTranslationCount: failedTranslationCount,
       );
 
   bool canAutoPlay({
@@ -75,6 +79,8 @@ class StartupPreparation {
     int completedTranslationCount = 0,
     bool nextSubtitleReady = false,
     bool nextTranslationReady = false,
+    bool translationExpected = true,
+    int failedTranslationCount = 0,
   }) =>
       decision(
         videoReady: networkReady,
@@ -82,6 +88,8 @@ class StartupPreparation {
         nextTranslationReady: nextTranslationReady || translationReady,
         completedTranslationCount: completedTranslationCount,
         skippedWindowCount: windowsSkipped,
+        translationExpected: translationExpected,
+        failedTranslationCount: failedTranslationCount,
       ).canStart;
 
   bool shouldPrompt({
@@ -90,6 +98,8 @@ class StartupPreparation {
     int completedTranslationCount = 0,
     bool nextSubtitleReady = false,
     bool nextTranslationReady = false,
+    bool translationExpected = true,
+    int failedTranslationCount = 0,
   }) =>
       !promptShown &&
       !canAutoPlay(
@@ -97,6 +107,8 @@ class StartupPreparation {
         completedTranslationCount: completedTranslationCount,
         nextSubtitleReady: nextSubtitleReady,
         nextTranslationReady: nextTranslationReady,
+        translationExpected: translationExpected,
+        failedTranslationCount: failedTranslationCount,
       ) &&
       now.difference(startedAt) >= timeout;
 }

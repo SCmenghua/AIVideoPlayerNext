@@ -155,6 +155,40 @@ void main() {
     );
   });
 
+  test('unavailable translation opens the gate without any translations', () {
+    final state = preparation()..networkReadyAt = startedAt;
+    state.waitForSubtitlePreparation = true;
+
+    expect(
+      state.canAutoPlay(
+        windowsSkipped: 0,
+        translationExpected: false,
+      ),
+      isTrue,
+    );
+    expect(
+      state.shouldPrompt(
+        now: startedAt.add(const Duration(seconds: 30)),
+        windowsSkipped: 0,
+        translationExpected: false,
+      ),
+      isFalse,
+    );
+  });
+
+  test('two terminal translation failures open the startup gate', () {
+    final state = preparation()..networkReadyAt = startedAt;
+    state.waitForSubtitlePreparation = true;
+
+    expect(
+      state.canAutoPlay(
+        windowsSkipped: 0,
+        failedTranslationCount: 2,
+      ),
+      isTrue,
+    );
+  });
+
   test('timeout prompt starts at ten seconds while still blocked', () {
     final state = preparation();
 
@@ -277,12 +311,47 @@ void main() {
 
     expect(find.text('翻译准备时间较长'), findsOneWidget);
     expect(
-      find.text('已启用启动准备，等待两条翻译完成或跳过四个识别窗口。'),
+      find.text('已启用启动准备，等待前两条翻译完成（或失败），或跳过四个识别窗口。'),
       findsOneWidget,
     );
     expect(find.text('继续等待'), findsOneWidget);
     expect(find.text('立即播放'), findsNothing);
 
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('unavailable translation service never blocks playback',
+      (tester) async {
+    final player = MockPlayerService();
+    final recognition = _recognitionController(
+      player,
+      recognizer: _EmptyWindowRecognitionService(),
+    );
+    final settings = _settings(waitForSubtitlePreparation: true);
+    var now = startedAt;
+    await _pumpApp(
+      tester,
+      player: player,
+      recognition: recognition,
+      settings: settings,
+      translation: _UnavailableTranslationService(),
+      now: () => now,
+    );
+
+    await tester.tap(find.text('打开本地视频').first);
+    await tester.pump();
+    now = startedAt.add(const Duration(seconds: 15));
+    await tester.pump(const Duration(seconds: 15));
+
+    // The startup gate must release without any translation, the timeout
+    // dialog must not appear, and the translation-priority content policy
+    // must not pause playback when no translation can ever arrive.
+    expect(find.text('正在准备播放'), findsNothing);
+    expect(find.text('翻译准备时间较长'), findsNothing);
+    expect(find.text('播放中: 等待翻译返回中。'), findsNothing);
+    expect(find.byTooltip('暂停播放'), findsOneWidget);
+
+    await player.pause();
     await tester.pumpWidget(const SizedBox());
   });
 }
@@ -308,6 +377,17 @@ class _AvailableTranslationService
         text: request.text,
         provider: 'test',
       );
+}
+
+class _UnavailableTranslationService
+    implements TranslationService, TranslationServiceStatusProvider {
+  @override
+  TranslationServiceStatus get status => const TranslationServiceStatus
+      .unavailable(provider: 'test', message: '此设备不支持系统翻译。');
+
+  @override
+  Future<TranslationResult> translate(TranslationRequest request) async =>
+      throw StateError('此设备不支持系统翻译。');
 }
 
 RecognitionController _recognitionController(

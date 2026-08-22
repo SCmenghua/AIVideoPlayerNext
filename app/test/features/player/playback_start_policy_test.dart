@@ -12,6 +12,8 @@ void main() {
     int skippedWindowCount = 0,
     PlaybackStartStrategy strategy = PlaybackStartStrategy.subtitlePriority,
     bool waitForSubtitlePreparation = false,
+    bool translationExpected = true,
+    int failedTranslationCount = 0,
   }) =>
       evaluatePlaybackStart(
         videoReady: videoReady,
@@ -21,6 +23,8 @@ void main() {
         skippedWindowCount: skippedWindowCount,
         strategy: strategy,
         waitForSubtitlePreparation: waitForSubtitlePreparation,
+        translationExpected: translationExpected,
+        failedTranslationCount: failedTranslationCount,
       );
 
   test('video readiness is required for every strategy', () {
@@ -96,6 +100,32 @@ void main() {
     );
     expect(decision.canStart, isTrue);
     expect(decision.gateEnabled, isFalse);
+  });
+
+  test('preparation gate opens when no translation can ever arrive', () {
+    final decision = evaluate(
+      waitForSubtitlePreparation: true,
+      nextSubtitleReady: true,
+      translationExpected: false,
+    );
+
+    expect(decision.canStart, isTrue);
+    expect(decision.gateEnabled, isTrue);
+  });
+
+  test('preparation gate opens after two terminal translation failures', () {
+    final stillBlocked = evaluate(
+      waitForSubtitlePreparation: true,
+      completedTranslationCount: 0,
+      failedTranslationCount: 1,
+    );
+    expect(stillBlocked.canStart, isFalse);
+
+    final opens = evaluate(
+      waitForSubtitlePreparation: true,
+      failedTranslationCount: 2,
+    );
+    expect(opens.canStart, isTrue);
   });
 
   test(

@@ -15,9 +15,16 @@ import '../../domain/translation/translation_service.dart';
 class SystemTranslationService
     implements TranslationService, TranslationServiceStatusProvider {
   SystemTranslationService({bool Function()? isIOS})
-      : _isIOS = isIOS ?? _platformIsIOS;
+      : _isIOS = isIOS ?? _platformIsIOS {
+    // The probe must start eagerly: playback gates read [status] without
+    // touching [readiness], so a lazy probe would leave every consumer stuck
+    // on the "detecting" placeholder forever.
+    readiness = _probeAvailability();
+  }
 
   static const _channel = MethodChannel('ai_video_player/system_translation');
+
+  static const _fatalBridgeCodes = {'UNSUPPORTED_OS', 'LANGUAGE', 'PREPARE'};
 
   final bool Function() _isIOS;
   int _requestCounter = 0;
@@ -27,7 +34,7 @@ class SystemTranslationService
   /// Completes when the native availability probe has finished. The queue
   /// re-reads [status] on every recognition change, so callers normally do
   /// not need to await this; tests use it for deterministic assertions.
-  late final Future<void> readiness = _probeAvailability();
+  late final Future<void> readiness;
 
   @override
   TranslationServiceStatus get status {
@@ -57,6 +64,7 @@ class SystemTranslationService
 
   @override
   Future<TranslationResult> translate(TranslationRequest request) async {
+    await readiness;
     final serviceStatus = status;
     if (!serviceStatus.available) {
       throw StateError(serviceStatus.message ?? '系统翻译不可用。');
@@ -64,26 +72,35 @@ class SystemTranslationService
     final requestId = 'sys-${_requestCounter++}';
     // The standard codec always decodes maps as Map<Object?, Object?>, so the
     // reply is read defensively instead of relying on a typed cast.
-    final reply = await _channel.invokeMethod<Object?>('translate', {
-      'requestId': requestId,
-      'text': request.text,
-      'sourceLanguage': request.sourceLanguage,
-      'targetLanguage': request.targetLanguage,
-    });
-    final values = reply is Map ? reply : const <Object?, Object?>{};
-    final echoedRequestId = values['requestId'];
-    if (echoedRequestId != requestId) {
-      throw StateError('系统翻译响应与请求不匹配。');
+    try {
+      final reply = await _channel.invokeMethod<Object?>('translate', {
+        'requestId': requestId,
+        'text': request.text,
+        'sourceLanguage': request.sourceLanguage,
+        'targetLanguage': request.targetLanguage,
+      });
+      final values = reply is Map ? reply : const <Object?, Object?>{};
+      final echoedRequestId = values['requestId'];
+      if (echoedRequestId != requestId) {
+        throw StateError('系统翻译响应与请求不匹配。');
+      }
+      final text = values['text'];
+      if (text is! String || text.trim().isEmpty) {
+        throw const FormatException('系统翻译返回了空结果。');
+      }
+      return TranslationResult(
+        segmentId: request.segmentId,
+        text: text.trim(),
+        provider: 'system-translation',
+      );
+    } on PlatformException catch (error) {
+      // Missing language packs or an unsupported pair only recover after the
+      // user changes system settings; retrying the same segment is pointless.
+      throw TranslationProviderException(
+        error.message ?? '系统翻译调用失败。',
+        retryable: !_fatalBridgeCodes.contains(error.code),
+      );
     }
-    final text = values['text'];
-    if (text is! String || text.trim().isEmpty) {
-      throw const FormatException('系统翻译返回了空结果。');
-    }
-    return TranslationResult(
-      segmentId: request.segmentId,
-      text: text.trim(),
-      provider: 'system-translation',
-    );
   }
 
   Future<void> _probeAvailability() async {

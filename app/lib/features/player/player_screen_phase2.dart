@@ -329,6 +329,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       completedTranslationCount: _completedTranslationCount(),
       nextSubtitleReady: decision.nextSubtitleReady,
       nextTranslationReady: decision.nextTranslationReady,
+      translationExpected: _translationQueue.serviceStatus.available,
+      failedTranslationCount: _failedTranslationCount(),
     )) {
       session.promptShown = true;
       session.dialogActive = true;
@@ -367,12 +369,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         .where((segment) => segment.end > position)
         .firstOrNull;
     final subtitleReady = nextSegment != null;
-    final translationReady = nextSegment != null &&
-        document!.translations.any((translation) =>
-            translation.segmentId == nextSegment.id &&
-            translation.targetLanguage == 'zh-CN' &&
-            translation.status == TranscriptTranslationStatus.translated &&
-            translation.text.trim().isNotEmpty);
+    // With no usable translation provider the pipeline can never produce
+    // translations, so gating on them would pause playback forever.
+    final translationReady = !_translationQueue.serviceStatus.available ||
+        (nextSegment != null &&
+            _translationResolved(document!, nextSegment));
     return evaluatePlaybackContent(
       strategy: _settings.playbackStartStrategy,
       subtitleReadyAtPosition: subtitleReady,
@@ -390,18 +391,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         candidates == null || candidates.isEmpty ? null : candidates.first;
     final nextSubtitleReady = nextSegment != null;
     final nextTranslationReady = nextSegment != null &&
-        document!.translations.any((translation) =>
-            translation.segmentId == nextSegment.id &&
-            translation.targetLanguage == 'zh-CN' &&
-            translation.status == TranscriptTranslationStatus.translated &&
-            translation.text.trim().isNotEmpty);
+        _translationResolved(document!, nextSegment);
     return session.decision(
       videoReady: session.networkReady,
       nextSubtitleReady: nextSubtitleReady,
       nextTranslationReady: nextTranslationReady,
       completedTranslationCount: _completedTranslationCount(document),
       skippedWindowCount: _recognitionDiagnostics.windowsSkipped,
+      translationExpected: _translationQueue.serviceStatus.available,
+      failedTranslationCount: _failedTranslationCount(document),
     );
+  }
+
+  /// A segment's translation stops gating playback once the pipeline has
+  /// finished with it either way: a non-empty translation, or a terminal
+  /// failure that keeps the original text.
+  bool _translationResolved(
+      TranscriptDocument document, TranscriptSegment segment) {
+    for (final translation in document.translations) {
+      if (translation.segmentId != segment.id ||
+          translation.targetLanguage != 'zh-CN') {
+        continue;
+      }
+      if (translation.status == TranscriptTranslationStatus.translated &&
+          translation.text.trim().isNotEmpty) {
+        return true;
+      }
+      return translation.status == TranscriptTranslationStatus.failed;
+    }
+    return false;
   }
 
   int _completedTranslationCount([TranscriptDocument? document]) =>
@@ -411,6 +429,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               translation.targetLanguage == 'zh-CN' &&
               translation.status == TranscriptTranslationStatus.translated &&
               translation.text.trim().isNotEmpty)
+          .length ??
+      0;
+
+  int _failedTranslationCount([TranscriptDocument? document]) =>
+      (document ?? _recognitionResults.document)
+          ?.translations
+          .where((translation) =>
+              translation.targetLanguage == 'zh-CN' &&
+              translation.status == TranscriptTranslationStatus.failed)
           .length ??
       0;
 
@@ -436,7 +463,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       return _networkStartupDetail();
     }
     if (decision.waitingFor == PlaybackStartWaitingFor.translationPreparation) {
-      return '已启用启动准备，等待两条翻译完成或跳过四个识别窗口。';
+      return '已启用启动准备，等待前两条翻译完成（或失败），或跳过四个识别窗口。';
     }
     final reasons = <String>[];
     if (!session.networkReady) {

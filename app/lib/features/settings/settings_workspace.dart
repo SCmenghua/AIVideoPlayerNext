@@ -381,7 +381,7 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                     const SizedBox(height: 10),
                     SwitchListTile.adaptive(
                       contentPadding: EdgeInsets.zero,
-                      title: const Text('等待两条翻译或跳过四个窗口'),
+                      title: const Text('等待前两条翻译或跳过四个窗口'),
                       subtitle: const Text('仅控制自动开始播放前的翻译准备门槛。'),
                       value: settings.waitForSubtitlePreparation,
                       onChanged: (value) => ref

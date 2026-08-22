@@ -137,7 +137,7 @@ void main() {
     expect(find.text('字幕优先'), findsOneWidget);
     expect(find.text('翻译优先'), findsOneWidget);
     expect(find.text('播放优先'), findsOneWidget);
-    expect(find.text('等待两条翻译或跳过四个窗口'), findsOneWidget);
+    expect(find.text('等待前两条翻译或跳过四个窗口'), findsOneWidget);
     expect(find.textContaining('构建时间'), findsOneWidget);
 
     await tester.tap(find.text('按需预取'));

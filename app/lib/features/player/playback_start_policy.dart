@@ -47,6 +47,8 @@ PlaybackStartDecision evaluatePlaybackStart({
   required int skippedWindowCount,
   required PlaybackStartStrategy strategy,
   required bool waitForSubtitlePreparation,
+  bool translationExpected = true,
+  int failedTranslationCount = 0,
 }) {
   if (!videoReady) {
     return PlaybackStartDecision(
@@ -60,12 +62,19 @@ PlaybackStartDecision evaluatePlaybackStart({
   }
 
   // The preparation switch is the only automatic-start content gate. The
-  // selected playback strategy applies after playback has started.
+  // selected playback strategy applies after playback has started. When no
+  // translation can ever arrive (service unavailable) or the provider has
+  // already failed terminally, waiting longer cannot help, so the gate opens
+  // and subtitles keep their original text.
   final gateEnabled = waitForSubtitlePreparation;
-  if (gateEnabled && completedTranslationCount < 2 && skippedWindowCount < 4) {
+  if (gateEnabled &&
+      translationExpected &&
+      completedTranslationCount < 2 &&
+      failedTranslationCount < 2 &&
+      skippedWindowCount < 4) {
     return PlaybackStartDecision(
       canStart: false,
-      reason: '等待两条翻译完成或跳过四个识别窗口。',
+      reason: '等待前两条翻译完成（或失败），或跳过四个识别窗口。',
       waitingFor: PlaybackStartWaitingFor.translationPreparation,
       gateEnabled: true,
       nextSubtitleReady: nextSubtitleReady,

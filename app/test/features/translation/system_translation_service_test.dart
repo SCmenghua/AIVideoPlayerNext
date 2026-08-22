@@ -166,4 +166,65 @@ void main() {
     expect(seenIds, hasLength(2));
     expect(seenIds.toSet(), hasLength(2));
   });
+
+  test('probes availability eagerly even when nobody awaits readiness',
+      () async {
+    final calls = <MethodCall>[];
+    _mockChannel(calls, (call) {
+      if (call.method == 'availability') return {'available': true};
+      throw StateError('unexpected ${call.method}');
+    });
+
+    final service = SystemTranslationService(isIOS: () => true);
+    // No reference to service.readiness: the constructor must have started
+    // the probe, otherwise playback gates would wait on "detecting" forever.
+    await Future<void>.delayed(Duration.zero);
+
+    expect(calls.map((call) => call.method), ['availability']);
+    expect(service.status.available, isTrue);
+  });
+
+  test('treats missing language packs as a fatal provider error', () async {
+    _mockChannel(<MethodCall>[], (call) {
+      if (call.method == 'availability') return {'available': true};
+      if (call.method == 'translate') {
+        throw PlatformException(
+          code: 'PREPARE',
+          message: '系统翻译语言包尚未就绪',
+        );
+      }
+      throw StateError('unexpected ${call.method}');
+    });
+
+    final service = SystemTranslationService(isIOS: () => true);
+    await service.readiness;
+
+    await expectLater(
+      service.translate(_request),
+      throwsA(isA<TranslationProviderException>()
+          .having((error) => error.retryable, 'retryable', isFalse)),
+    );
+  });
+
+  test('keeps transient session errors retryable', () async {
+    _mockChannel(<MethodCall>[], (call) {
+      if (call.method == 'availability') return {'available': true};
+      if (call.method == 'translate') {
+        throw PlatformException(
+          code: 'SESSION',
+          message: '系统翻译会话失败',
+        );
+      }
+      throw StateError('unexpected ${call.method}');
+    });
+
+    final service = SystemTranslationService(isIOS: () => true);
+    await service.readiness;
+
+    await expectLater(
+      service.translate(_request),
+      throwsA(isA<TranslationProviderException>()
+          .having((error) => error.retryable, 'retryable', isTrue)),
+    );
+  });
 }
