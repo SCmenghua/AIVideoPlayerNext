@@ -137,7 +137,9 @@ private actor SystemTranslator {
       // error the caller may retry.
       cachedSession = nil
       cachedKey = nil
-      if !session.isReady {
+      // isReady is an asynchronous property in this SDK.
+      let sessionIsReady = await session.isReady
+      if !sessionIsReady {
         throw TranslationBridgeError.languagePackMissing(source: source, target: target)
       }
       throw TranslationBridgeError.sessionFailed(error.localizedDescription)
