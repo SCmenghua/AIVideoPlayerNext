@@ -138,6 +138,41 @@ void main() {
     await player.dispose();
   });
 
+  test('reopening the same media starts a fresh recognition session', () async {
+    final player = MockPlayerService();
+    final decoder = FakeAudioDecoder(chunks: [_chunk(0, last: true)]);
+    final recognizer = FakeWindowRecognitionService();
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: recognizer,
+      planner: _planner(),
+    );
+    final events = <RecognitionEvent>[];
+    final subscription = controller.events.listen(events.add);
+    final source = _source('reopened');
+
+    await player.open(source);
+    await player.play();
+    await _settle();
+    final firstSession = controller.diagnostic.sessionId;
+    expect(decoder.openCount, 1);
+
+    controller.prepareForMediaOpen();
+    await player.open(source);
+    await player.play();
+    await _settle();
+
+    expect(controller.diagnostic.sessionId, isNot(firstSession));
+    expect(decoder.openCount, 2);
+    expect(events.map((event) => event.sessionId).toSet(), hasLength(2));
+    expect(controller.diagnostic.windowsRecognized, 1);
+
+    await subscription.cancel();
+    await controller.dispose();
+    await player.dispose();
+  });
+
   test('seek does not request recognizer cancellation', () async {
     final player = MockPlayerService();
     final decoder = FakeAudioDecoder(chunks: [_chunk(0, last: true)]);

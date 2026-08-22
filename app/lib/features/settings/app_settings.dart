@@ -11,6 +11,14 @@ import '../../domain/translation/translation_service.dart';
 
 enum TranslationMode { deepl, genericApi, localModel }
 
+enum SubtitleDisplayMode { bilingual, original, translation }
+
+enum PlaybackStartStrategy {
+  subtitlePriority,
+  translationPriority,
+  playbackPriority,
+}
+
 class AppSettings {
   const AppSettings({
     required this.prefetchMode,
@@ -21,6 +29,11 @@ class AppSettings {
     required this.genericEndpoint,
     required this.genericApiKey,
     required this.genericModel,
+    required this.translationBatchSize,
+    required this.translationMaxConcurrent,
+    required this.subtitleDisplayMode,
+    required this.playbackStartStrategy,
+    required this.waitForSubtitlePreparation,
   });
 
   final RecognitionPrefetchMode prefetchMode;
@@ -31,6 +44,11 @@ class AppSettings {
   final Uri? genericEndpoint;
   final String? genericApiKey;
   final String genericModel;
+  final int translationBatchSize;
+  final int translationMaxConcurrent;
+  final SubtitleDisplayMode subtitleDisplayMode;
+  final PlaybackStartStrategy playbackStartStrategy;
+  final bool waitForSubtitlePreparation;
 
   bool sameTranslationConfiguration(AppSettings other) =>
       translationMode == other.translationMode &&
@@ -40,6 +58,10 @@ class AppSettings {
       genericEndpoint == other.genericEndpoint &&
       genericApiKey == other.genericApiKey &&
       genericModel == other.genericModel;
+
+  bool sameTranslationScheduling(AppSettings other) =>
+      translationBatchSize == other.translationBatchSize &&
+      translationMaxConcurrent == other.translationMaxConcurrent;
 }
 
 class AppSettingsController extends ChangeNotifier {
@@ -53,6 +75,12 @@ class AppSettingsController extends ChangeNotifier {
     Uri? genericEndpoint,
     String? genericApiKey,
     String genericModel = 'gpt-4.1-mini',
+    int translationBatchSize = 4,
+    int translationMaxConcurrent = 2,
+    SubtitleDisplayMode subtitleDisplayMode = SubtitleDisplayMode.bilingual,
+    PlaybackStartStrategy playbackStartStrategy =
+        PlaybackStartStrategy.translationPriority,
+    bool waitForSubtitlePreparation = true,
   })  : _prefetchMode = prefetchMode,
         _translationMode = translationMode,
         _localTranslationModel = localTranslationModel,
@@ -63,19 +91,23 @@ class AppSettingsController extends ChangeNotifier {
             : normalizeOpenAiCompatibleEndpoint(genericEndpoint),
         _genericApiKey = _clean(genericApiKey),
         _genericModel =
-            genericModel.trim().isEmpty ? 'gpt-4.1-mini' : genericModel.trim() {
+            genericModel.trim().isEmpty ? 'gpt-4.1-mini' : genericModel.trim(),
+        _translationBatchSize = _boundedBatchSize(translationBatchSize),
+        _translationMaxConcurrent =
+            _boundedConcurrency(translationMaxConcurrent),
+        _subtitleDisplayMode = subtitleDisplayMode,
+        _playbackStartStrategy = playbackStartStrategy,
+        _waitForSubtitlePreparation = waitForSubtitlePreparation {
     ready = _loadPersistedSettings();
   }
 
   factory AppSettingsController.fromEnvironment() {
-    final genericEndpoint = Uri.tryParse(
+    final genericEndpoint = parseOpenAiCompatibleEndpoint(
         Platform.environment['AI_VIDEO_TRANSLATION_ENDPOINT'] ?? '');
     final genericApiKey = Platform.environment['AI_VIDEO_TRANSLATION_API_KEY'];
     final genericModel = Platform.environment['AI_VIDEO_TRANSLATION_MODEL'];
-    final hasGenericConfiguration = genericEndpoint != null &&
-        (genericEndpoint.scheme == 'https' ||
-            genericEndpoint.scheme == 'http') &&
-        _clean(genericApiKey) != null;
+    final hasGenericConfiguration =
+        genericEndpoint != null && _clean(genericApiKey) != null;
     return AppSettingsController(
       translationMode: hasGenericConfiguration
           ? TranslationMode.genericApi
@@ -97,6 +129,11 @@ class AppSettingsController extends ChangeNotifier {
   Uri? _genericEndpoint;
   String? _genericApiKey;
   String _genericModel;
+  int _translationBatchSize;
+  int _translationMaxConcurrent;
+  SubtitleDisplayMode _subtitleDisplayMode;
+  PlaybackStartStrategy _playbackStartStrategy;
+  bool _waitForSubtitlePreparation;
   late final Future<void> ready;
   final Set<String> _changedBeforeLoad = <String>{};
   int _saveGeneration = 0;
@@ -109,6 +146,11 @@ class AppSettingsController extends ChangeNotifier {
   Uri? get genericEndpoint => _genericEndpoint;
   String? get genericApiKey => _genericApiKey;
   String get genericModel => _genericModel;
+  int get translationBatchSize => _translationBatchSize;
+  int get translationMaxConcurrent => _translationMaxConcurrent;
+  SubtitleDisplayMode get subtitleDisplayMode => _subtitleDisplayMode;
+  PlaybackStartStrategy get playbackStartStrategy => _playbackStartStrategy;
+  bool get waitForSubtitlePreparation => _waitForSubtitlePreparation;
 
   AppSettings get snapshot => AppSettings(
         prefetchMode: _prefetchMode,
@@ -119,6 +161,11 @@ class AppSettingsController extends ChangeNotifier {
         genericEndpoint: _genericEndpoint,
         genericApiKey: _genericApiKey,
         genericModel: _genericModel,
+        translationBatchSize: _translationBatchSize,
+        translationMaxConcurrent: _translationMaxConcurrent,
+        subtitleDisplayMode: _subtitleDisplayMode,
+        playbackStartStrategy: _playbackStartStrategy,
+        waitForSubtitlePreparation: _waitForSubtitlePreparation,
       );
 
   Future<void> _loadPersistedSettings() async {
@@ -155,14 +202,14 @@ class AppSettingsController extends ChangeNotifier {
       }
       if (!_changedBeforeLoad.contains('deeplApiKey') &&
           values.containsKey('deeplApiKey')) {
-        final value = _clean(values['deeplApiKey'] as String?);
+        final value = _clean(values['deeplApiKey']);
         if (value != _deeplApiKey) {
           _deeplApiKey = value;
           changed = true;
         }
       }
       if (!_changedBeforeLoad.contains('deeplEndpoint')) {
-        final value = _parseEndpoint(values['deeplEndpoint']);
+        final value = _parseDeepLEndpoint(values['deeplEndpoint']);
         if (value != null && value != _deeplEndpoint) {
           _deeplEndpoint = value;
           changed = true;
@@ -170,7 +217,7 @@ class AppSettingsController extends ChangeNotifier {
       }
       if (!_changedBeforeLoad.contains('genericEndpoint') &&
           values.containsKey('genericEndpoint')) {
-        final value = _parseEndpoint(values['genericEndpoint']);
+        final value = _parseGenericEndpoint(values['genericEndpoint']);
         if (value != _genericEndpoint) {
           _genericEndpoint = value;
           changed = true;
@@ -178,7 +225,7 @@ class AppSettingsController extends ChangeNotifier {
       }
       if (!_changedBeforeLoad.contains('genericApiKey') &&
           values.containsKey('genericApiKey')) {
-        final value = _clean(values['genericApiKey'] as String?);
+        final value = _clean(values['genericApiKey']);
         if (value != _genericApiKey) {
           _genericApiKey = value;
           changed = true;
@@ -191,6 +238,50 @@ class AppSettingsController extends ChangeNotifier {
             : 'gpt-4.1-mini';
         if (value != _genericModel) {
           _genericModel = value;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('translationBatchSize')) {
+        final raw = values['translationBatchSize'];
+        if (raw is num) {
+          final value = _boundedBatchSize(raw.toInt());
+          if (value != _translationBatchSize) {
+            _translationBatchSize = value;
+            changed = true;
+          }
+        }
+      }
+      if (!_changedBeforeLoad.contains('translationMaxConcurrent')) {
+        final raw = values['translationMaxConcurrent'];
+        if (raw is num) {
+          final value = _boundedConcurrency(raw.toInt());
+          if (value != _translationMaxConcurrent) {
+            _translationMaxConcurrent = value;
+            changed = true;
+          }
+        }
+      }
+      if (!_changedBeforeLoad.contains('subtitleDisplayMode')) {
+        final value = _enumValue(
+            values['subtitleDisplayMode'], SubtitleDisplayMode.values);
+        if (value != null && value != _subtitleDisplayMode) {
+          _subtitleDisplayMode = value;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('playbackStartStrategy')) {
+        final value = _enumValue(
+            values['playbackStartStrategy'], PlaybackStartStrategy.values);
+        if (value != null && value != _playbackStartStrategy) {
+          _playbackStartStrategy = value;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('waitForSubtitlePreparation') &&
+          values.containsKey('waitForSubtitlePreparation')) {
+        final raw = values['waitForSubtitlePreparation'];
+        if (raw is bool && raw != _waitForSubtitlePreparation) {
+          _waitForSubtitlePreparation = raw;
           changed = true;
         }
       }
@@ -224,12 +315,14 @@ class AppSettingsController extends ChangeNotifier {
     return null;
   }
 
-  static Uri? _parseEndpoint(Object? raw) {
+  static Uri? _parseDeepLEndpoint(Object? raw) {
     if (raw is! String) return null;
-    final endpoint = _optionalEndpoint(raw);
-    return endpoint == null
-        ? null
-        : normalizeOpenAiCompatibleEndpoint(endpoint);
+    return _optionalEndpoint(raw);
+  }
+
+  static Uri? _parseGenericEndpoint(Object? raw) {
+    if (raw is! String) return null;
+    return _optionalGenericEndpoint(raw);
   }
 
   void setPrefetchMode(RecognitionPrefetchMode value) {
@@ -266,15 +359,57 @@ class AppSettingsController extends ChangeNotifier {
     required String apiKey,
     required String model,
   }) {
-    final parsedEndpoint = _optionalEndpoint(endpoint);
-    _genericEndpoint = parsedEndpoint == null
-        ? null
-        : normalizeOpenAiCompatibleEndpoint(parsedEndpoint);
+    _genericEndpoint = _optionalGenericEndpoint(endpoint);
     _genericApiKey = _clean(apiKey);
     _genericModel = model.trim().isEmpty ? 'gpt-4.1-mini' : model.trim();
     _markChanged('genericEndpoint');
     _markChanged('genericApiKey');
     _markChanged('genericModel');
+    notifyListeners();
+  }
+
+  void setGenericModel(String model) {
+    final value = model.trim();
+    if (value.isEmpty || value == _genericModel) return;
+    _genericModel = value;
+    _markChanged('genericModel');
+    notifyListeners();
+  }
+
+  void setTranslationBatchSize(int value) {
+    final next = _boundedBatchSize(value);
+    if (_translationBatchSize == next) return;
+    _translationBatchSize = next;
+    _markChanged('translationBatchSize');
+    notifyListeners();
+  }
+
+  void setTranslationMaxConcurrent(int value) {
+    final next = _boundedConcurrency(value);
+    if (_translationMaxConcurrent == next) return;
+    _translationMaxConcurrent = next;
+    _markChanged('translationMaxConcurrent');
+    notifyListeners();
+  }
+
+  void setSubtitleDisplayMode(SubtitleDisplayMode value) {
+    if (_subtitleDisplayMode == value) return;
+    _subtitleDisplayMode = value;
+    _markChanged('subtitleDisplayMode');
+    notifyListeners();
+  }
+
+  void setPlaybackStartStrategy(PlaybackStartStrategy value) {
+    if (_playbackStartStrategy == value) return;
+    _playbackStartStrategy = value;
+    _markChanged('playbackStartStrategy');
+    notifyListeners();
+  }
+
+  void setWaitForSubtitlePreparation(bool value) {
+    if (_waitForSubtitlePreparation == value) return;
+    _waitForSubtitlePreparation = value;
+    _markChanged('waitForSubtitlePreparation');
     notifyListeners();
   }
 
@@ -284,16 +419,26 @@ class AppSettingsController extends ChangeNotifier {
   static Uri? _optionalEndpoint(String value) {
     final candidate = Uri.tryParse(value.trim());
     if (candidate == null ||
-        (candidate.scheme != 'https' && candidate.scheme != 'http')) {
+        (candidate.scheme != 'https' && candidate.scheme != 'http') ||
+        candidate.host.isEmpty ||
+        candidate.userInfo.isNotEmpty) {
       return null;
     }
     return candidate;
   }
 
-  static String? _clean(String? value) {
-    final result = value?.trim();
+  static Uri? _optionalGenericEndpoint(String value) {
+    return parseOpenAiCompatibleEndpoint(value);
+  }
+
+  static String? _clean(Object? value) {
+    final result = value is String ? value.trim() : null;
     return result == null || result.isEmpty ? null : result;
   }
+
+  static int _boundedBatchSize(int value) => value.clamp(1, 20);
+
+  static int _boundedConcurrency(int value) => value.clamp(1, 8);
 }
 
 class AppSettingsStore {
@@ -326,6 +471,11 @@ class AppSettingsStore {
       'genericEndpoint': settings.genericEndpoint?.toString(),
       'genericApiKey': settings.genericApiKey,
       'genericModel': settings.genericModel,
+      'translationBatchSize': settings.translationBatchSize,
+      'translationMaxConcurrent': settings.translationMaxConcurrent,
+      'subtitleDisplayMode': settings.subtitleDisplayMode.name,
+      'playbackStartStrategy': settings.playbackStartStrategy.name,
+      'waitForSubtitlePreparation': settings.waitForSubtitlePreparation,
     }));
     if (await file.exists()) await file.delete();
     await temporary.rename(file.path);

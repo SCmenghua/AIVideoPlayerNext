@@ -28,7 +28,11 @@ class DiagnosticsWorkspace extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-        animation: Listenable.merge([logs, results]),
+        animation: Listenable.merge([
+          logs,
+          results,
+          if (translationQueue != null) translationQueue!,
+        ]),
         builder: (context, _) {
           final entries = logs.entries.reversed.toList(growable: false);
           final recognitions = results.recognitions;
@@ -43,7 +47,10 @@ class DiagnosticsWorkspace extends StatelessWidget {
           return Column(
             children: [
               if (recognition != null)
-                _RecognitionSummary(diagnostics: recognition!),
+                _RecognitionSummary(
+                  diagnostics: recognition!,
+                  translationQueue: queue,
+                ),
               Expanded(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
@@ -486,9 +493,13 @@ String _formatMediaTime(Duration value) =>
     '${value.inMinutes.toString().padLeft(2, '0')}:${(value.inSeconds % 60).toString().padLeft(2, '0')}.${(value.inMilliseconds % 1000).toString().padLeft(3, '0')}';
 
 class _RecognitionSummary extends StatelessWidget {
-  const _RecognitionSummary({required this.diagnostics});
+  const _RecognitionSummary({
+    required this.diagnostics,
+    required this.translationQueue,
+  });
 
   final RecognitionDiagnostics diagnostics;
+  final TranscriptTranslationQueue? translationQueue;
 
   @override
   Widget build(BuildContext context) {
@@ -601,6 +612,41 @@ class _RecognitionSummary extends StatelessWidget {
                 value: _formatDuration(_recognizedLead(diagnostics)),
               ),
               const _Metric(label: '预取水位', value: '20s - 45s'),
+              _Metric(
+                label: '翻译调度',
+                value: _formatTranslationScheduling(translationQueue?.metrics),
+              ),
+              _Metric(
+                label: '翻译队列',
+                value: _formatTranslationQueue(translationQueue?.metrics),
+              ),
+              _Metric(
+                label: '请求批量',
+                value: _formatTranslationBatch(translationQueue?.metrics),
+              ),
+              _Metric(
+                label: 'API 往返',
+                value: _formatTranslationApiWait(translationQueue?.metrics),
+              ),
+              _Metric(
+                label: 'API P95',
+                value:
+                    _formatDurationMetric(translationQueue?.metrics.p95ApiWait),
+              ),
+              _Metric(
+                label: '排队等待',
+                value: _formatDurationMetric(
+                    translationQueue?.metrics.averageQueueWait),
+              ),
+              _Metric(
+                label: '端到端翻译',
+                value: _formatDurationMetric(
+                    translationQueue?.metrics.averageEndToEndWait),
+              ),
+              _Metric(
+                label: '翻译完成',
+                value: _formatTranslationCompleted(translationQueue?.metrics),
+              ),
             ],
           ),
           if (diagnostics.lastReason != null) ...[
@@ -648,6 +694,43 @@ class _RecognitionSummary extends StatelessWidget {
   Duration _recognizedLead(RecognitionDiagnostics diagnostics) {
     final lead = diagnostics.recognizedThrough - diagnostics.playbackPosition;
     return lead.isNegative ? Duration.zero : lead;
+  }
+
+  String _formatTranslationScheduling(TranslationQueueMetrics? metrics) {
+    if (metrics == null) return '暂无数据';
+    return '每批 ${metrics.configuredBatchSize} 条 / 并发 ${metrics.configuredMaxConcurrent}';
+  }
+
+  String _formatTranslationQueue(TranslationQueueMetrics? metrics) {
+    if (metrics == null) return '暂无数据';
+    return '${metrics.waitingSegments} 等待 / ${metrics.activeRequests} 请求中';
+  }
+
+  String _formatTranslationBatch(TranslationQueueMetrics? metrics) {
+    if (metrics == null) return '暂无数据';
+    final average = metrics.averageBatchSize;
+    return '均值 ${average == null ? '暂无数据' : average.toStringAsFixed(1)} 条'
+        ' / 峰值并发 ${metrics.maxObservedActiveRequests}';
+  }
+
+  String _formatTranslationApiWait(TranslationQueueMetrics? metrics) {
+    if (metrics?.averageApiWait == null) return '暂无数据';
+    return '均值 ${_formatDurationMetric(metrics!.averageApiWait)}'
+        ' / 最近 ${_formatDurationMetric(metrics.lastApiWait)}';
+  }
+
+  String _formatTranslationCompleted(TranslationQueueMetrics? metrics) {
+    if (metrics == null) return '暂无数据';
+    return '${metrics.completedSegments} 成功 / '
+        '${metrics.terminalFailedSegments} 最终失败 / '
+        '${metrics.timeoutAttempts} 超时 / '
+        '${metrics.failedAttempts} 失败尝试 / '
+        '${metrics.retriedSegments} 重试';
+  }
+
+  String _formatDurationMetric(Duration? duration) {
+    if (duration == null) return '暂无数据';
+    return '${duration.inMilliseconds} ms';
   }
 }
 

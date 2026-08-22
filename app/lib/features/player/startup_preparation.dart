@@ -1,5 +1,7 @@
 import '../../domain/player/player_service.dart';
 import '../../domain/subtitles/transcript_document.dart';
+import '../settings/app_settings.dart';
+import 'playback_start_policy.dart';
 
 const minimumNetworkStartupBuffer = Duration(seconds: 1);
 
@@ -22,10 +24,14 @@ bool hasStartupPlayableMediaData({
 class StartupPreparation {
   StartupPreparation({
     required this.startedAt,
+    this.strategy = PlaybackStartStrategy.translationPriority,
+    this.waitForSubtitlePreparation = true,
     this.timeout = const Duration(seconds: 10),
   });
 
   final DateTime startedAt;
+  PlaybackStartStrategy strategy;
+  bool waitForSubtitlePreparation;
   final Duration timeout;
   DateTime? networkReadyAt;
   DateTime? recognitionReadyAt;
@@ -39,22 +45,58 @@ class StartupPreparation {
   bool get recognitionReady => recognitionReadyAt != null;
   bool get translationReady => translationReadyAt != null;
 
+  void updatePolicy({
+    required PlaybackStartStrategy strategy,
+    required bool waitForSubtitlePreparation,
+  }) {
+    this.strategy = strategy;
+    this.waitForSubtitlePreparation = waitForSubtitlePreparation;
+  }
+
+  PlaybackStartDecision decision({
+    required bool videoReady,
+    required bool nextSubtitleReady,
+    required bool nextTranslationReady,
+    required int completedTranslationCount,
+    required int skippedWindowCount,
+  }) =>
+      evaluatePlaybackStart(
+        videoReady: videoReady,
+        nextSubtitleReady: nextSubtitleReady,
+        nextTranslationReady: nextTranslationReady,
+        completedTranslationCount: completedTranslationCount,
+        skippedWindowCount: skippedWindowCount,
+        strategy: strategy,
+        waitForSubtitlePreparation: waitForSubtitlePreparation,
+      );
+
   bool canAutoPlay({
     required int windowsSkipped,
-    bool hasRecognizedSubtitle = false,
+    int completedTranslationCount = 0,
+    bool nextSubtitleReady = false,
+    bool nextTranslationReady = false,
   }) =>
-      networkReady &&
-      (translationReady || (!hasRecognizedSubtitle && windowsSkipped >= 4));
+      decision(
+        videoReady: networkReady,
+        nextSubtitleReady: nextSubtitleReady,
+        nextTranslationReady: nextTranslationReady || translationReady,
+        completedTranslationCount: completedTranslationCount,
+        skippedWindowCount: windowsSkipped,
+      ).canStart;
 
   bool shouldPrompt({
     required DateTime now,
     required int windowsSkipped,
-    bool hasRecognizedSubtitle = false,
+    int completedTranslationCount = 0,
+    bool nextSubtitleReady = false,
+    bool nextTranslationReady = false,
   }) =>
       !promptShown &&
       !canAutoPlay(
         windowsSkipped: windowsSkipped,
-        hasRecognizedSubtitle: hasRecognizedSubtitle,
+        completedTranslationCount: completedTranslationCount,
+        nextSubtitleReady: nextSubtitleReady,
+        nextTranslationReady: nextTranslationReady,
       ) &&
       now.difference(startedAt) >= timeout;
 }

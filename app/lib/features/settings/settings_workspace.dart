@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -6,6 +8,7 @@ import '../../core/app_build_info.dart';
 import '../../domain/translation/translation_service.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../audio/recognition_controller.dart';
+import '../translation/translation_model_catalog.dart';
 import 'app_settings.dart';
 
 class SettingsWorkspace extends ConsumerStatefulWidget {
@@ -23,6 +26,10 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   late final TextEditingController _genericModel;
   String? _testResult;
   bool _testing = false;
+  bool _loadingModels = false;
+  List<String> _models = const [];
+  int _modelRequestGeneration = 0;
+  final TranslationModelCatalog _modelCatalog = TranslationModelCatalog();
   AppSettingsController? _settingsController;
 
   @override
@@ -80,12 +87,59 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   }
 
   void _applyGeneric() {
+    if (parseOpenAiCompatibleEndpoint(_genericEndpoint.text) == null) {
+      setState(() => _testResult = '通用 API 配置未应用：Endpoint 不是合法的 HTTP(S) 地址。');
+      return;
+    }
     ref.read(appSettingsProvider).updateGenericApi(
           endpoint: _genericEndpoint.text,
           apiKey: _genericKey.text,
           model: _genericModel.text,
         );
     setState(() => _testResult = '通用 API 配置已应用。');
+  }
+
+  Future<void> _loadModels() async {
+    final endpoint = parseOpenAiCompatibleEndpoint(_genericEndpoint.text);
+    if (endpoint == null) {
+      setState(() => _testResult = '模型列表下载失败：Endpoint 不是合法的 HTTP(S) 地址。');
+      return;
+    }
+    final controller = ref.read(appSettingsProvider);
+    controller.updateGenericApi(
+      endpoint: _genericEndpoint.text,
+      apiKey: _genericKey.text,
+      model: _genericModel.text,
+    );
+    final generation = ++_modelRequestGeneration;
+    setState(() {
+      _loadingModels = true;
+      _testResult = null;
+    });
+    try {
+      final models = await _modelCatalog.fetchModels(
+        endpoint: endpoint,
+        apiKey: _genericKey.text,
+      );
+      if (!mounted || generation != _modelRequestGeneration) return;
+      setState(() {
+        _models = models;
+        _testResult = '已下载 ${models.length} 个模型。';
+      });
+    } on Object catch (error) {
+      if (!mounted || generation != _modelRequestGeneration) return;
+      setState(() => _testResult = '模型列表下载失败：${_errorMessage(error)}');
+    } finally {
+      if (mounted && generation == _modelRequestGeneration) {
+        setState(() => _loadingModels = false);
+      }
+    }
+  }
+
+  String _errorMessage(Object error) {
+    if (error is HttpException) return error.message;
+    if (error is FormatException) return error.message;
+    return error.runtimeType.toString();
   }
 
   Future<void> _testConnection() async {
@@ -253,6 +307,79 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                         ],
                       ),
                     ],
+                    const SizedBox(height: 16),
+                    _translationSchedulingControls(settings),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingsSection(
+                title: '字幕显示',
+                icon: Icons.subtitles_outlined,
+                child: SegmentedButton<SubtitleDisplayMode>(
+                  segments: const [
+                    ButtonSegment(
+                      value: SubtitleDisplayMode.bilingual,
+                      label: Text('双语'),
+                      icon: Icon(Icons.view_agenda_outlined),
+                    ),
+                    ButtonSegment(
+                      value: SubtitleDisplayMode.original,
+                      label: Text('原文'),
+                      icon: Icon(Icons.text_fields_outlined),
+                    ),
+                    ButtonSegment(
+                      value: SubtitleDisplayMode.translation,
+                      label: Text('翻译'),
+                      icon: Icon(Icons.translate_outlined),
+                    ),
+                  ],
+                  selected: {settings.subtitleDisplayMode},
+                  onSelectionChanged: (selection) => ref
+                      .read(appSettingsProvider)
+                      .setSubtitleDisplayMode(selection.single),
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingsSection(
+                title: '播放启动策略',
+                icon: Icons.play_circle_outline,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SegmentedButton<PlaybackStartStrategy>(
+                      segments: const [
+                        ButtonSegment(
+                          value: PlaybackStartStrategy.subtitlePriority,
+                          label: Text('字幕优先'),
+                          icon: Icon(Icons.subtitles_outlined),
+                        ),
+                        ButtonSegment(
+                          value: PlaybackStartStrategy.translationPriority,
+                          label: Text('翻译优先'),
+                          icon: Icon(Icons.translate_outlined),
+                        ),
+                        ButtonSegment(
+                          value: PlaybackStartStrategy.playbackPriority,
+                          label: Text('播放优先'),
+                          icon: Icon(Icons.play_arrow_outlined),
+                        ),
+                      ],
+                      selected: {settings.playbackStartStrategy},
+                      onSelectionChanged: (selection) => ref
+                          .read(appSettingsProvider)
+                          .setPlaybackStartStrategy(selection.single),
+                    ),
+                    const SizedBox(height: 10),
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('等待两条翻译或跳过四个窗口'),
+                      subtitle: const Text('仅控制自动开始播放前的翻译准备门槛。'),
+                      value: settings.waitForSubtitlePreparation,
+                      onChanged: (value) => ref
+                          .read(appSettingsProvider)
+                          .setWaitForSubtitlePreparation(value),
+                    ),
                   ],
                 ),
               ),
@@ -324,13 +451,56 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
             ),
           ),
           const SizedBox(height: 10),
-          TextField(
-            controller: _genericModel,
-            decoration: const InputDecoration(
-              labelText: 'Model',
-              border: OutlineInputBorder(),
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _genericModel,
+                  decoration: const InputDecoration(
+                    labelText: 'Model',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              IconButton.filledTonal(
+                tooltip: '下载模型列表',
+                onPressed: _loadingModels ? null : _loadModels,
+                icon: _loadingModels
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_outlined),
+              ),
+            ],
           ),
+          if (_models.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _models.contains(_genericModel.text)
+                  ? _genericModel.text
+                  : null,
+              decoration: const InputDecoration(
+                labelText: '已下载模型',
+                border: OutlineInputBorder(),
+              ),
+              items: _models
+                  .map((model) => DropdownMenuItem<String>(
+                        value: model,
+                        child: Text(model),
+                      ))
+                  .toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                _genericModel.text = value;
+                ref.read(appSettingsProvider).setGenericModel(value);
+                setState(() {});
+              },
+            ),
+          ],
           const SizedBox(height: 10),
           Align(
             alignment: Alignment.centerLeft,
@@ -380,6 +550,44 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
           ),
         ],
       );
+
+  Widget _translationSchedulingControls(AppSettings settings) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('翻译调度', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _IntegerSetting(
+                  label: '每批字幕数',
+                  value: settings.translationBatchSize,
+                  minimum: 1,
+                  maximum: 20,
+                  onChanged:
+                      ref.read(appSettingsProvider).setTranslationBatchSize,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _IntegerSetting(
+                  label: '并发请求数',
+                  value: settings.translationMaxConcurrent,
+                  minimum: 1,
+                  maximum: 8,
+                  onChanged:
+                      ref.read(appSettingsProvider).setTranslationMaxConcurrent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '设置会立即应用到后续翻译请求；批次不足时最多等待约 300 ms 后发送。',
+            style: TextStyle(color: Color(0xFF9EA7AC)),
+          ),
+        ],
+      );
 }
 
 class _SettingsSection extends StatelessWidget {
@@ -394,25 +602,72 @@ class _SettingsSection extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: const Color(0xFF191C1E),
-          border: Border.all(color: const Color(0xFF2C3235)),
+  Widget build(BuildContext context) => Material(
+        color: const Color(0xFF191C1E),
+        shape: RoundedRectangleBorder(
+          side: const BorderSide(color: Color(0xFF2C3235)),
           borderRadius: BorderRadius.circular(6),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, size: 18, color: const Color(0xFF5ED6A0)),
+                  const SizedBox(width: 8),
+                  Text(title, style: Theme.of(context).textTheme.titleMedium),
+                ],
+              ),
+              const SizedBox(height: 16),
+              child,
+            ],
+          ),
+        ),
+      );
+}
+
+class _IntegerSetting extends StatelessWidget {
+  const _IntegerSetting({
+    required this.label,
+    required this.value,
+    required this.minimum,
+    required this.maximum,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final int minimum;
+  final int maximum;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) => InputDecorator(
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+        child: Row(
           children: [
-            Row(
-              children: [
-                Icon(icon, size: 18, color: const Color(0xFF5ED6A0)),
-                const SizedBox(width: 8),
-                Text(title, style: Theme.of(context).textTheme.titleMedium),
-              ],
+            IconButton(
+              tooltip: '减少$label',
+              onPressed: value <= minimum ? null : () => onChanged(value - 1),
+              icon: const Icon(Icons.remove_outlined),
             ),
-            const SizedBox(height: 16),
-            child,
+            Expanded(
+              child: Text(
+                '$value',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            IconButton(
+              tooltip: '增加$label',
+              onPressed: value >= maximum ? null : () => onChanged(value + 1),
+              icon: const Icon(Icons.add_outlined),
+            ),
           ],
         ),
       );

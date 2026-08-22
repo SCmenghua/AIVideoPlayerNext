@@ -18,12 +18,14 @@ import 'package:ai_video_player_next/features/settings/app_settings.dart';
 void main() {
   final startedAt = DateTime(2026, 8, 19, 12, 0);
 
-  StartupPreparation preparation() => StartupPreparation(startedAt: startedAt);
+  StartupPreparation preparation() => StartupPreparation(
+        startedAt: startedAt,
+        strategy: PlaybackStartStrategy.translationPriority,
+        waitForSubtitlePreparation: false,
+      );
 
-  test('requires network readiness and two completed translations', () {
+  test('translation priority does not delay automatic start', () {
     final state = preparation()..translationReadyAt = startedAt;
-
-    expect(state.canAutoPlay(windowsSkipped: 0), isFalse);
 
     state.networkReadyAt = startedAt.add(const Duration(milliseconds: 120));
     expect(state.canAutoPlay(windowsSkipped: 0), isTrue);
@@ -75,32 +77,35 @@ void main() {
         isTrue);
   });
 
-  test('four skipped windows can release playback without translation', () {
-    final state = preparation()
-      ..networkReadyAt = startedAt
-      ..translationReadyAt = null;
-
-    expect(state.canAutoPlay(windowsSkipped: 3), isFalse);
-    expect(state.canAutoPlay(windowsSkipped: 4), isTrue);
-  });
-
-  test('skipped windows cannot bypass translation after a subtitle is found',
+  test('the preparation gate can release playback after four skipped windows',
       () {
     final state = preparation()
       ..networkReadyAt = startedAt
       ..translationReadyAt = null;
+    state.waitForSubtitlePreparation = true;
 
+    expect(state.canAutoPlay(windowsSkipped: 3), isFalse);
     expect(
-      state.canAutoPlay(windowsSkipped: 4, hasRecognizedSubtitle: true),
-      isFalse,
+      state.canAutoPlay(
+        windowsSkipped: 4,
+        nextTranslationReady: true,
+      ),
+      isTrue,
     );
+  });
+
+  test('skipped windows only affect the optional startup gate', () {
+    final state = preparation()
+      ..networkReadyAt = startedAt
+      ..translationReadyAt = null;
+
+    expect(state.canAutoPlay(windowsSkipped: 4), isTrue);
     expect(
       state.shouldPrompt(
         now: startedAt.add(const Duration(seconds: 10)),
         windowsSkipped: 4,
-        hasRecognizedSubtitle: true,
       ),
-      isTrue,
+      isFalse,
     );
   });
 
@@ -136,11 +141,18 @@ void main() {
     );
   });
 
-  test('one recognized subtitle does not satisfy the startup gate', () {
+  test('one completed translation does not satisfy the startup gate', () {
     final state = preparation()..networkReadyAt = startedAt;
+    state.waitForSubtitlePreparation = true;
 
     state.recognitionReadyAt = startedAt.add(const Duration(seconds: 1));
-    expect(state.canAutoPlay(windowsSkipped: 0), isFalse);
+    expect(
+      state.canAutoPlay(
+        windowsSkipped: 0,
+        completedTranslationCount: 1,
+      ),
+      isFalse,
+    );
   });
 
   test('timeout prompt starts at ten seconds while still blocked', () {
@@ -162,7 +174,7 @@ void main() {
     );
   });
 
-  test('ready state suppresses timeout prompt', () {
+  test('two completed translations suppress the timeout prompt', () {
     final state = preparation()
       ..networkReadyAt = startedAt
       ..translationReadyAt = startedAt.add(const Duration(seconds: 2));
@@ -171,19 +183,21 @@ void main() {
       state.shouldPrompt(
         now: startedAt.add(const Duration(seconds: 20)),
         windowsSkipped: 0,
+        completedTranslationCount: 2,
       ),
       isFalse,
     );
   });
 
-  testWidgets('keeps the player paused until two translations return',
+  testWidgets(
+      'starts automatically, then waits during playback for translation',
       (tester) async {
     final player = MockPlayerService();
     final recognition = _recognitionController(
       player,
       recognizer: _EmptyWindowRecognitionService(),
     );
-    final settings = _settings();
+    final settings = _settings(waitForSubtitlePreparation: false);
     final translation = _AvailableTranslationService();
     await _pumpApp(
       tester,
@@ -199,8 +213,40 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
     }
 
-    expect(find.text('正在准备播放'), findsOneWidget);
+    expect(find.text('正在准备播放'), findsNothing);
+    expect(find.text('播放中: 等待翻译返回中。'), findsOneWidget);
     expect(find.byTooltip('开始播放'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('turning off preparation releases an already blocked startup',
+      (tester) async {
+    final player = MockPlayerService();
+    final recognition = _recognitionController(
+      player,
+      recognizer: _EmptyWindowRecognitionService(),
+    );
+    final settings = _settings(waitForSubtitlePreparation: true);
+    await _pumpApp(
+      tester,
+      player: player,
+      recognition: recognition,
+      settings: settings,
+      translation: _AvailableTranslationService(),
+    );
+
+    await tester.tap(find.text('打开本地视频').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('正在准备播放'), findsOneWidget);
+
+    settings.setWaitForSubtitlePreparation(false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('正在准备播放'), findsNothing);
+    expect(find.text('播放中: 等待翻译返回中。'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
   });
@@ -223,21 +269,20 @@ void main() {
       now: () => now,
     );
 
+    settings.setWaitForSubtitlePreparation(true);
     await tester.tap(find.text('打开本地视频').first);
     await tester.pump();
     now = startedAt.add(const Duration(seconds: 10, milliseconds: 200));
     await tester.pump(const Duration(seconds: 10, milliseconds: 200));
 
-    expect(find.text('字幕准备时间较长'), findsOneWidget);
-    expect(find.textContaining('翻译服务尚未返回 2 条完整字幕'), findsOneWidget);
+    expect(find.text('翻译准备时间较长'), findsOneWidget);
+    expect(
+      find.text('已启用启动准备，等待两条翻译完成或跳过四个识别窗口。'),
+      findsOneWidget,
+    );
     expect(find.text('继续等待'), findsOneWidget);
-    expect(find.text('立即播放'), findsOneWidget);
+    expect(find.text('立即播放'), findsNothing);
 
-    await tester.tap(find.text('立即播放'));
-    await tester.pump();
-    expect(find.byTooltip('暂停播放'), findsOneWidget);
-
-    await player.pause();
     await tester.pumpWidget(const SizedBox());
   });
 }
@@ -297,10 +342,12 @@ class _EmptyWindowRecognitionService implements WindowRecognitionService {
   Future<void> dispose() async {}
 }
 
-AppSettingsController _settings() => AppSettingsController(
+AppSettingsController _settings({bool waitForSubtitlePreparation = true}) =>
+    AppSettingsController(
       translationMode: TranslationMode.genericApi,
       genericEndpoint: Uri.parse('https://example.test'),
       genericApiKey: 'test-key',
+      waitForSubtitlePreparation: waitForSubtitlePreparation,
     );
 
 Future<void> _pumpApp(

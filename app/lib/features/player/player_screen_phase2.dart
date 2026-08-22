@@ -14,11 +14,11 @@ import '../../domain/speech/speech_models.dart';
 import '../../domain/subtitles/transcript_document.dart';
 import '../browser/browser_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
-import '../audio/recognition_controller.dart';
 import '../settings/app_settings.dart';
 import '../settings/settings_workspace.dart';
 import '../translation/transcript_translation_queue.dart';
 import 'media_kit_player_service.dart';
+import 'playback_start_policy.dart';
 import 'startup_preparation.dart';
 import 'subtitle_overlay.dart';
 
@@ -53,6 +53,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   double? _scrubPositionMs;
   _StartupSession? _startup;
   Timer? _startupTimer;
+  bool _policyPaused = false;
 
   @override
   void initState() {
@@ -63,6 +64,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       if (mounted) {
         setState(() => _snapshot = snapshot);
         _evaluateStartup();
+        _evaluatePlaybackContent();
       }
     });
     final recognition = ref.read(recognitionControllerProvider);
@@ -70,6 +72,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       results: _recognitionResults,
       service: ref.read(translationServiceProvider),
       targetLanguage: 'zh-CN',
+      batchSize: ref.read(appSettingsProvider).translationBatchSize,
+      maxConcurrent: ref.read(appSettingsProvider).translationMaxConcurrent,
       logs: ref.read(diagnosticsLogProvider),
     );
     _recognitionResults.addListener(_onTranscriptChanged);
@@ -91,6 +95,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     setState(() => _recognitionDiagnostics = diagnostics);
     _evaluateStartup();
+    _evaluatePlaybackContent();
   }
 
   void _onRecognitionEvent(RecognitionEvent event) {
@@ -102,6 +107,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!mounted) return;
     setState(() {});
     _evaluateStartup();
+    _evaluatePlaybackContent();
   }
 
   void _onSettingsChanged() {
@@ -120,8 +126,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         targetLanguage: 'zh-CN',
       );
     }
+    if (!next.sameTranslationScheduling(_lastSettings)) {
+      _translationQueue.updateScheduling(
+        batchSize: next.translationBatchSize,
+        maxConcurrent: next.translationMaxConcurrent,
+      );
+    }
+    if (_startup != null &&
+        (next.playbackStartStrategy != _lastSettings.playbackStartStrategy ||
+            next.waitForSubtitlePreparation !=
+                _lastSettings.waitForSubtitlePreparation)) {
+      final session = _startup!;
+      session.updatePolicy(
+        strategy: next.playbackStartStrategy,
+        waitForSubtitlePreparation: next.waitForSubtitlePreparation,
+      );
+      _evaluateStartup();
+      if (!next.waitForSubtitlePreparation &&
+          _lastSettings.waitForSubtitlePreparation &&
+          _startupDecision(session).canStart) {
+        unawaited(_releaseStartupAfterGateDisabled(session));
+      }
+    }
     _lastSettings = next;
     setState(() {});
+    _evaluatePlaybackContent();
   }
 
   Future<void> _openLocalMedia() async {
@@ -137,7 +166,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         '标题': source.title,
         '地址': source.uri,
       });
-      _recognitionResults.clear();
+      ref.read(recognitionControllerProvider).prepareForMediaOpen();
+      await _recognitionResults.clear();
+      _policyPaused = false;
       final startupStarted = _beginStartup(source);
       await ref.read(playerServiceProvider).open(source);
       _evaluateStartup();
@@ -154,17 +185,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
-  Future<void> _seekBy(Duration offset) =>
-      ref.read(recognitionControllerProvider).seek(_snapshot.position + offset);
+  Future<void> _seekBy(Duration offset) => _seekTo(_snapshot.position + offset);
+
+  Future<void> _seekTo(Duration position) {
+    final target = _boundedSeekPosition(position);
+    _translationQueue.prioritizeFrom(target);
+    return ref.read(recognitionControllerProvider).seek(target);
+  }
+
+  Duration _boundedSeekPosition(Duration position) {
+    if (position.isNegative) return Duration.zero;
+    final duration = _snapshot.duration;
+    return duration > Duration.zero && position > duration
+        ? duration
+        : position;
+  }
 
   void _previewSeek(double value) => setState(() => _scrubPositionMs = value);
 
   void _commitSeek(double value) {
     setState(() => _scrubPositionMs = null);
     unawaited(
-      ref
-          .read(recognitionControllerProvider)
-          .seek(Duration(milliseconds: value.round())),
+      _seekTo(Duration(milliseconds: value.round())),
     );
   }
 
@@ -197,7 +239,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _isOpeningBrowserMedia = true;
     try {
       final player = ref.read(playerServiceProvider);
-      _recognitionResults.clear();
+      ref.read(recognitionControllerProvider).prepareForMediaOpen();
+      await _recognitionResults.clear();
+      _policyPaused = false;
       final source = handoff.toMediaSource();
       final startupStarted = _beginStartup(source);
       await player.open(source);
@@ -224,14 +268,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
     _startupTimer?.cancel();
     final serviceStatus = _translationQueue.serviceStatus;
-    if (!serviceStatus.available) {
-      _startup = null;
-      return false;
-    }
     final session = _StartupSession(
       source: source,
       startedAt: widget.now(),
       translationProvider: serviceStatus.provider,
+      strategy: _settings.playbackStartStrategy,
+      waitForSubtitlePreparation: _settings.waitForSubtitlePreparation,
     );
     _startup = session;
     _startupTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -261,19 +303,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             _recognitionResults.recognitions.isNotEmpty)) {
       session.recognitionReadyAt = now;
     }
-    final translationEntries = _recognitionResults.document?.translations
-            .where((translation) => translation.targetLanguage == 'zh-CN')
-            .toList(growable: false) ??
-        const <TranscriptTranslation>[];
-    final translationsReady = hasEnoughTranslatedSubtitles(translationEntries);
-    final hasRecognizedSubtitle = _recognitionResults.recognitions.isNotEmpty;
-    if (!session.translationReady && translationsReady) {
+    final decision = _startupDecision(session);
+    if (!session.recognitionReady && decision.nextSubtitleReady) {
+      session.recognitionReadyAt = now;
+    }
+    if (!session.translationReady && _completedTranslationCount() >= 2) {
       session.translationReadyAt = now;
     }
-    if (session.canAutoPlay(
-      windowsSkipped: _recognitionDiagnostics.windowsSkipped,
-      hasRecognizedSubtitle: hasRecognizedSubtitle,
-    )) {
+    if (decision.canStart) {
       if (session.dialogActive) {
         if (!session.dialogClosing && mounted) {
           session.dialogClosing = true;
@@ -287,13 +324,93 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (session.shouldPrompt(
       now: now,
       windowsSkipped: _recognitionDiagnostics.windowsSkipped,
-      hasRecognizedSubtitle: hasRecognizedSubtitle,
+      completedTranslationCount: _completedTranslationCount(),
+      nextSubtitleReady: decision.nextSubtitleReady,
+      nextTranslationReady: decision.nextTranslationReady,
     )) {
       session.promptShown = true;
       session.dialogActive = true;
       unawaited(_showStartupTimeout(session));
     }
   }
+
+  void _evaluatePlaybackContent() {
+    if (!mounted ||
+        _startup != null ||
+        _snapshot.status == PlaybackStatus.idle) {
+      return;
+    }
+    final decision = _playbackContentDecision();
+    final player = ref.read(playerServiceProvider);
+    if (_snapshot.status == PlaybackStatus.playing && !decision.canContinue) {
+      if (_policyPaused) return;
+      _policyPaused = true;
+      unawaited(player.pause());
+      setState(() {});
+      return;
+    }
+    if (_snapshot.status == PlaybackStatus.paused &&
+        _policyPaused &&
+        decision.canContinue) {
+      _policyPaused = false;
+      unawaited(player.play());
+      setState(() {});
+    }
+  }
+
+  PlaybackContentDecision _playbackContentDecision() {
+    final document = _recognitionResults.document;
+    final position = _snapshot.position;
+    final nextSegment = document?.orderedSegments
+        .where((segment) => segment.end > position)
+        .firstOrNull;
+    final subtitleReady = nextSegment != null;
+    final translationReady = nextSegment != null &&
+        document!.translations.any((translation) =>
+            translation.segmentId == nextSegment.id &&
+            translation.targetLanguage == 'zh-CN' &&
+            translation.status == TranscriptTranslationStatus.translated &&
+            translation.text.trim().isNotEmpty);
+    return evaluatePlaybackContent(
+      strategy: _settings.playbackStartStrategy,
+      subtitleReadyAtPosition: subtitleReady,
+      translationReadyAtPosition: translationReady,
+    );
+  }
+
+  PlaybackStartDecision _startupDecision(_StartupSession session) {
+    final document = _recognitionResults.document;
+    final position = _snapshot.position.inMilliseconds;
+    final candidates = document?.orderedSegments
+        .where((segment) => segment.endMs > position)
+        .toList(growable: false);
+    final nextSegment =
+        candidates == null || candidates.isEmpty ? null : candidates.first;
+    final nextSubtitleReady = nextSegment != null;
+    final nextTranslationReady = nextSegment != null &&
+        document!.translations.any((translation) =>
+            translation.segmentId == nextSegment.id &&
+            translation.targetLanguage == 'zh-CN' &&
+            translation.status == TranscriptTranslationStatus.translated &&
+            translation.text.trim().isNotEmpty);
+    return session.decision(
+      videoReady: session.networkReady,
+      nextSubtitleReady: nextSubtitleReady,
+      nextTranslationReady: nextTranslationReady,
+      completedTranslationCount: _completedTranslationCount(document),
+      skippedWindowCount: _recognitionDiagnostics.windowsSkipped,
+    );
+  }
+
+  int _completedTranslationCount([TranscriptDocument? document]) =>
+      (document ?? _recognitionResults.document)
+          ?.translations
+          .where((translation) =>
+              translation.targetLanguage == 'zh-CN' &&
+              translation.status == TranscriptTranslationStatus.translated &&
+              translation.text.trim().isNotEmpty)
+          .length ??
+      0;
 
   Future<void> _showStartupTimeout(_StartupSession session) async {
     if (!mounted || _startup != session) return;
@@ -308,12 +425,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!mounted || _startup != session) return;
     session.dialogActive = false;
     session.dialogClosing = false;
-    if (result == true) {
-      await _releaseStartup(session, reason: '用户选择立即播放');
-    }
+    if (result == true) _evaluateStartup();
   }
 
   String _startupReason(_StartupSession session) {
+    final decision = _startupDecision(session);
+    if (decision.waitingFor == PlaybackStartWaitingFor.video) {
+      return _networkStartupDetail();
+    }
+    if (decision.waitingFor == PlaybackStartWaitingFor.translationPreparation) {
+      return '已启用启动准备，等待两条翻译完成或跳过四个识别窗口。';
+    }
     final reasons = <String>[];
     if (!session.networkReady) {
       if (_snapshot.status == PlaybackStatus.error) {
@@ -345,9 +467,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         reasons.add('Whisper 尚未识别到完整字幕，可能仍在处理音频窗口。');
       }
     }
-    if (!session.translationReady) {
-      reasons.add('翻译服务尚未返回 2 条完整字幕，可能是网络延迟或服务响应较慢。');
-    }
     return reasons.isEmpty ? '字幕准备流程遇到其他播放器或识别错误。' : reasons.join('\n');
   }
 
@@ -364,10 +483,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       '原因': reason,
       '网络缓冲耗时': _elapsedFrom(session.startedAt, session.networkReadyAt),
       '字幕识别耗时': _elapsedFrom(session.startedAt, session.recognitionReadyAt),
-      '翻译字幕耗时': _elapsedFrom(session.startedAt, session.translationReadyAt),
+      '两条翻译准备耗时': _elapsedFrom(session.startedAt, session.translationReadyAt),
     });
     if (mounted) setState(() {});
     await ref.read(playerServiceProvider).play();
+  }
+
+  Future<void> _releaseStartupAfterGateDisabled(_StartupSession session) async {
+    if (!mounted || _startup != session || session.bypassed) return;
+    if (session.dialogActive && !session.dialogClosing) {
+      session.dialogClosing = true;
+      Navigator.of(context, rootNavigator: true).pop(true);
+      await Future<void>.delayed(Duration.zero);
+    }
+    if (!mounted || _startup != session || session.bypassed) return;
+    await _releaseStartup(session, reason: '已关闭启动翻译准备等待');
   }
 
   Duration? _elapsedFrom(DateTime startedAt, DateTime? finishedAt) =>
@@ -382,17 +512,38 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _userPlay() async {
     final session = _startup;
     if (session != null) {
-      ref.read(diagnosticsLogProvider).info('播放器', '启动预备期间忽略播放请求', {
-        '已等待': widget.now().difference(session.startedAt),
-      });
+      final decision = _startupDecision(session);
+      if (decision.canStart) {
+        await _releaseStartup(session, reason: '用户按当前策略开始播放');
+      } else {
+        ref.read(diagnosticsLogProvider).info('播放器', '启动预备期间仍需等待', {
+          '原因': decision.reason,
+          '已等待': widget.now().difference(session.startedAt),
+        });
+      }
       return;
     }
+    if (_policyPaused) {
+      final decision = _playbackContentDecision();
+      if (!decision.canContinue) {
+        ref.read(diagnosticsLogProvider).info('播放器', '播放中等待条件尚未满足', {
+          '原因': decision.reason,
+        });
+        return;
+      }
+    }
+    _policyPaused = false;
     await ref.read(playerServiceProvider).play();
+  }
+
+  Future<void> _userPause() async {
+    _policyPaused = false;
+    await ref.read(playerServiceProvider).pause();
   }
 
   Future<void> _togglePlayback() async {
     if (_snapshot.status == PlaybackStatus.playing) {
-      await ref.read(playerServiceProvider).pause();
+      await _userPause();
     } else {
       await _userPlay();
     }
@@ -408,9 +559,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         MaterialPageRoute<void>(
           builder: (_) => _FullscreenPlayerScreen(
             player: player,
-            recognition: ref.read(recognitionControllerProvider),
             results: _recognitionResults,
+            onSeek: _seekTo,
             onUserPlay: _userPlay,
+            onUserPause: _userPause,
+            isPolicyPaused: () => _policyPaused,
+            playbackContentDecision: _playbackContentDecision,
+            settings: _settings,
           ),
         ),
       );
@@ -561,15 +716,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Widget _sourceRow(IconData icon, String title, String status,
           [VoidCallback? onTap]) =>
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: Icon(icon, size: 20, color: const Color(0xFF8A939A)),
-        title: Text(title),
-        subtitle: Text(
-          status,
-          style: const TextStyle(fontSize: 12, color: Color(0xFF8A939A)),
+      Material(
+        color: Colors.transparent,
+        child: ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(icon, size: 20, color: const Color(0xFF8A939A)),
+          title: Text(title),
+          subtitle: Text(
+            status,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF8A939A)),
+          ),
+          onTap: onTap,
         ),
-        onTap: onTap,
       );
 
   Widget _mobileNavigation() => Material(
@@ -669,6 +827,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                 _snapshot.position.inMilliseconds.toDouble())
                             .round(),
                       ),
+                      displayMode: _settings.subtitleDisplayMode,
                     ),
                   ),
                 if (_startup != null)
@@ -677,6 +836,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                     left: 8,
                     right: player is MediaKitPlayerService ? 56 : 8,
                     child: _startupStatusPanel(_startup!, compact: true),
+                  ),
+                if (_policyPaused)
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    bottom: player is MediaKitPlayerService ? 112 : 24,
+                    child: _playbackWaitPanel(),
                   ),
                 if (hasMedia && player is MediaKitPlayerService) ...[
                   Positioned(
@@ -757,7 +923,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               IconButton.filled(
                 onPressed: canControl
                     ? _snapshot.status == PlaybackStatus.playing
-                        ? () => ref.read(playerServiceProvider).pause()
+                        ? _userPause
                         : _togglePlayback
                     : null,
                 tooltip: _snapshot.status == PlaybackStatus.playing
@@ -821,6 +987,30 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         },
       );
 
+  Widget _playbackWaitPanel() {
+    final decision = _playbackContentDecision();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xE6191C1E),
+        border: Border.all(color: const Color(0xFFFFD166)),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.hourglass_top, size: 18, color: Color(0xFFFFD166)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '播放中: ${decision.reason}',
+              style: const TextStyle(color: Color(0xFFFFD166)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _videoVolumeControl({required bool hasMedia}) => Material(
         color: const Color(0xCC111516),
         borderRadius: BorderRadius.circular(4),
@@ -873,6 +1063,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               style: TextStyle(
                 fontWeight: FontWeight.w600,
                 fontSize: compact ? 12 : null,
+              ),
+            ),
+            SizedBox(height: compact ? 3 : 8),
+            Text(
+              _startupDecision(session).reason,
+              style: TextStyle(
+                color: const Color(0xFFFFD166),
+                fontSize: compact ? 11 : null,
               ),
             ),
             SizedBox(height: compact ? 3 : 8),
@@ -1005,7 +1203,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             .length ??
         0;
     if (failures > 0) return '已有 $failures 条翻译失败，等待其他字幕返回';
-    return '已返回 $translations/2 条完整翻译字幕';
+    return '已完成 $translations/2 条翻译';
   }
 
   String _format(Duration duration) =>
@@ -1024,6 +1222,8 @@ class _StartupSession extends StartupPreparation {
     required this.source,
     required super.startedAt,
     required this.translationProvider,
+    required super.strategy,
+    required super.waitForSubtitlePreparation,
   });
 
   final MediaSource source;
@@ -1062,7 +1262,7 @@ class _StartupTimeoutDialogState extends State<_StartupTimeoutDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-        title: const Text('字幕准备时间较长'),
+        title: const Text('翻译准备时间较长'),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1079,11 +1279,6 @@ class _StartupTimeoutDialogState extends State<_StartupTimeoutDialog> {
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('继续等待'),
           ),
-          FilledButton.icon(
-            onPressed: () => Navigator.of(context).pop(true),
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('立即播放'),
-          ),
         ],
       );
 }
@@ -1091,15 +1286,23 @@ class _StartupTimeoutDialogState extends State<_StartupTimeoutDialog> {
 class _FullscreenPlayerScreen extends StatefulWidget {
   const _FullscreenPlayerScreen({
     required this.player,
-    required this.recognition,
     required this.results,
+    required this.onSeek,
     required this.onUserPlay,
+    required this.onUserPause,
+    required this.isPolicyPaused,
+    required this.playbackContentDecision,
+    required this.settings,
   });
 
   final MediaKitPlayerService player;
-  final RecognitionController recognition;
   final RecognitionResultStore results;
+  final Future<void> Function(Duration position) onSeek;
   final Future<void> Function() onUserPlay;
+  final Future<void> Function() onUserPause;
+  final bool Function() isPolicyPaused;
+  final PlaybackContentDecision Function() playbackContentDecision;
+  final AppSettingsController settings;
 
   @override
   State<_FullscreenPlayerScreen> createState() =>
@@ -1110,10 +1313,13 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
   StreamSubscription<PlaybackSnapshot>? _subscription;
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
   double? _scrubPositionMs;
+  late SubtitleDisplayMode _displayMode;
 
   @override
   void initState() {
     super.initState();
+    _displayMode = widget.settings.subtitleDisplayMode;
+    widget.settings.addListener(_onSettingsChanged);
     _snapshot = widget.player.snapshot;
     _subscription = widget.player.snapshots.listen((snapshot) {
       if (mounted) setState(() => _snapshot = snapshot);
@@ -1130,6 +1336,7 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
   void dispose() {
     _subscription?.cancel();
     widget.results.removeListener(_onTranscriptChanged);
+    widget.settings.removeListener(_onSettingsChanged);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
@@ -1145,12 +1352,18 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
     if (mounted) setState(() {});
   }
 
+  void _onSettingsChanged() {
+    if (mounted) {
+      setState(() => _displayMode = widget.settings.subtitleDisplayMode);
+    }
+  }
+
   void _previewSeek(double value) => setState(() => _scrubPositionMs = value);
 
   void _commitSeek(double value) {
     setState(() => _scrubPositionMs = null);
     unawaited(
-      widget.recognition.seek(Duration(milliseconds: value.round())),
+      widget.onSeek(Duration(milliseconds: value.round())),
     );
   }
 
@@ -1183,8 +1396,18 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                             _snapshot.position.inMilliseconds.toDouble())
                         .round(),
                   ),
+                  displayMode: _displayMode,
                 ),
               ),
+              if (widget.isPolicyPaused())
+                Positioned(
+                  left: 32,
+                  right: 32,
+                  bottom: 164,
+                  child: _FullscreenPlaybackWaitPanel(
+                    decision: widget.playbackContentDecision(),
+                  ),
+                ),
               Positioned(
                 top: 12,
                 left: 12,
@@ -1247,7 +1470,7 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                 top: 12,
                 child: IconButton.filledTonal(
                   onPressed: _snapshot.status == PlaybackStatus.playing
-                      ? widget.player.pause
+                      ? widget.onUserPause
                       : widget.onUserPlay,
                   tooltip: _snapshot.status == PlaybackStatus.playing
                       ? '暂停播放'
@@ -1255,6 +1478,38 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                   icon: Icon(_snapshot.status == PlaybackStatus.playing
                       ? Icons.pause
                       : Icons.play_arrow),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
+class _FullscreenPlaybackWaitPanel extends StatelessWidget {
+  const _FullscreenPlaybackWaitPanel({required this.decision});
+
+  final PlaybackContentDecision decision;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: const Color(0xE6191C1E),
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            border: Border.all(color: const Color(0xFFFFD166)),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.hourglass_top,
+                  size: 18, color: Color(0xFFFFD166)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  decision.reason,
+                  style: const TextStyle(color: Color(0xFFFFD166)),
                 ),
               ),
             ],
@@ -1273,25 +1528,29 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         margin: const EdgeInsets.all(8),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
+        child: Material(
           color: const Color(0xFF191C1E),
-          border: Border.all(color: const Color(0xFF2C3235)),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+          shape: RoundedRectangleBorder(
+            side: const BorderSide(color: Color(0xFF2C3235)),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(icon, size: 18, color: const Color(0xFF5ED6A0)),
-                const SizedBox(width: 8),
-                Text(title, style: Theme.of(context).textTheme.titleSmall),
+                Row(
+                  children: [
+                    Icon(icon, size: 18, color: const Color(0xFF5ED6A0)),
+                    const SizedBox(width: 8),
+                    Text(title, style: Theme.of(context).textTheme.titleSmall),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                child,
               ],
             ),
-            const SizedBox(height: 16),
-            child,
-          ],
+          ),
         ),
       );
 }

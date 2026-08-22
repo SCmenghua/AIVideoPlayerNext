@@ -128,11 +128,30 @@ void main() {
     expect(find.text('DeepL'), findsOneWidget);
     expect(find.text('通用 API'), findsOneWidget);
     expect(find.text('本地模型'), findsOneWidget);
+    expect(find.text('字幕显示'), findsOneWidget);
+    expect(find.text('双语'), findsOneWidget);
+    expect(find.text('原文'), findsOneWidget);
+    expect(find.text('翻译'), findsOneWidget);
+    expect(find.text('播放启动策略'), findsOneWidget);
+    expect(find.text('字幕优先'), findsOneWidget);
+    expect(find.text('翻译优先'), findsOneWidget);
+    expect(find.text('播放优先'), findsOneWidget);
+    expect(find.text('等待两条翻译或跳过四个窗口'), findsOneWidget);
     expect(find.textContaining('构建时间'), findsOneWidget);
 
     await tester.tap(find.text('按需预取'));
     await tester.pump();
     expect(find.text('识别保持约 20 至 45 秒的前瞻缓冲。'), findsOneWidget);
+
+    final playbackPriority = find.text('播放优先');
+    await tester.ensureVisible(playbackPriority);
+    await tester.tap(playbackPriority);
+    await tester.pump();
+    final gateSwitch = tester.widget<SwitchListTile>(
+      find.byType(SwitchListTile).first,
+    );
+    expect(gateSwitch.onChanged, isNotNull);
+    expect(gateSwitch.value, isTrue);
 
     await player.dispose();
     await browser.dispose();

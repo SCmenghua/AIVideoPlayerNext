@@ -141,6 +141,34 @@ class RecognitionController {
   RecognitionDiagnostics get diagnostic => _diagnostic;
   RecognitionPrefetchMode get prefetchMode => _prefetchMode;
 
+  /// Invalidates the current recognition session before the player opens a
+  /// media source. This is required even when the URI is unchanged: reopening
+  /// the same file is a new transcript session, not a seek in the old one.
+  void prepareForMediaOpen() {
+    if (_disposed) return;
+    ++_generation;
+    ++_workEpoch;
+    _playing = false;
+    _acceptChunks = false;
+    _backpressurePaused = false;
+    _watermarkPaused = false;
+    _cursorTransitionPending = false;
+    _traversal = _RecognitionTraversal.sequential;
+    _priorityEnd = null;
+    _gapEnd = null;
+    _resumeAfterGap = null;
+    _coverage.clear();
+    _sequentialStart = Duration.zero;
+    _lastPlaybackPosition = Duration.zero;
+    _source = null;
+    _sessionId = null;
+    _queue.clear();
+    _deferredWindow = null;
+    _planner.reset(sessionId: 'media-pending');
+    _requestRecognizerStop();
+    _setDiagnostic(const RecognitionDiagnostics.idle());
+  }
+
   static RecognitionMediaCacheWorker _defaultMediaCacheWorker({
     required RecognitionMediaSource source,
     required String sessionId,

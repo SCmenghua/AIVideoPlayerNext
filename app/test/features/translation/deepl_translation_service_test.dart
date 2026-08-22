@@ -16,6 +16,21 @@ const _request = TranslationRequest(
   targetLanguage: 'zh-CN',
 );
 
+const _batchRequests = [
+  TranslationRequest(
+    segmentId: 'seg-000001',
+    text: 'Hello.',
+    sourceLanguage: 'en',
+    targetLanguage: 'zh-CN',
+  ),
+  TranslationRequest(
+    segmentId: 'seg-000002',
+    text: 'Goodbye.',
+    sourceLanguage: 'en',
+    targetLanguage: 'zh-CN',
+  ),
+];
+
 void main() {
   test('reports missing DeepL API key without a network request', () {
     final service = DeepLTranslationService(
@@ -89,6 +104,67 @@ void main() {
     );
 
     expect(service.translate(_request), throwsA(isA<FormatException>()));
+  });
+
+  test('sends and maps multiple DeepL texts in request order', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(server.close);
+    final received = Completer<Map<String, Object?>>();
+    server.listen((request) async {
+      final body = await utf8.decoder.bind(request).join();
+      received.complete(jsonDecode(body) as Map<String, Object?>);
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'translations': [
+            {'text': '你好。'},
+            {'text': '再见。'},
+          ],
+        }));
+      await request.response.close();
+    });
+    final service = DeepLTranslationService(
+      endpoint: Uri.parse(
+        'http://${server.address.address}:${server.port}/v2/translate',
+      ),
+      apiKey: 'test-secret',
+      clientFactory: _directClient,
+    );
+
+    final results = await service.translateBatch(_batchRequests);
+    final body = await received.future;
+
+    expect(body['text'], ['Hello.', 'Goodbye.']);
+    expect(results.map((result) => result.segmentId),
+        ['seg-000001', 'seg-000002']);
+    expect(results.map((result) => result.text), ['你好。', '再见。']);
+  });
+
+  test('closes the request and reports a timeout when the server stalls',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await request.drain();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await request.response.close();
+    });
+    final service = DeepLTranslationService(
+      endpoint: Uri.parse(
+        'http://${server.address.address}:${server.port}/v2/translate',
+      ),
+      apiKey: 'test-secret',
+      clientFactory: _directClient,
+    );
+
+    await expectLater(
+      service.translateBatchWithTimeout(
+        [_request],
+        const Duration(milliseconds: 50),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
   });
 }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../domain/subtitles/transcript_document.dart';
+import '../settings/app_settings.dart';
 
 class ActiveSubtitle {
   const ActiveSubtitle({
@@ -47,11 +48,13 @@ class SubtitleOverlay extends StatelessWidget {
     required this.document,
     required this.position,
     this.targetLanguage = 'zh-CN',
+    this.displayMode = SubtitleDisplayMode.bilingual,
   });
 
   final TranscriptDocument? document;
   final Duration position;
   final String targetLanguage;
+  final SubtitleDisplayMode displayMode;
 
   @override
   Widget build(BuildContext context) {
@@ -62,7 +65,14 @@ class SubtitleOverlay extends StatelessWidget {
     );
     if (subtitle == null) return const SizedBox.shrink();
 
-    final primaryText = subtitle.translationText ?? subtitle.sourceText;
+    final primaryText = switch (displayMode) {
+      SubtitleDisplayMode.bilingual =>
+        subtitle.translationText ?? subtitle.sourceText,
+      SubtitleDisplayMode.original => subtitle.sourceText,
+      SubtitleDisplayMode.translation => subtitle.translationText ?? '翻译准备中...',
+    };
+    final showSource =
+        displayMode == SubtitleDisplayMode.bilingual && subtitle.hasTranslation;
     return IgnorePointer(
       child: Center(
         child: Container(
@@ -89,7 +99,7 @@ class SubtitleOverlay extends StatelessWidget {
                   shadows: [Shadow(color: Colors.black, blurRadius: 3)],
                 ),
               ),
-              if (subtitle.hasTranslation) ...[
+              if (showSource) ...[
                 const SizedBox(height: 3),
                 Text(
                   subtitle.sourceText,

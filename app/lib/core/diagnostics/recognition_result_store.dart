@@ -82,9 +82,9 @@ class RecognitionResultStore extends ChangeNotifier {
     unawaited(_transcriptStore.beginSession(sessionId));
   }
 
-  void clear() {
+  Future<void> clear() async {
     _assembler.reset(sessionId: 'cleared');
-    unawaited(_transcriptStore.endSession());
+    await _transcriptStore.endSession();
   }
 
   void addRecognition(RecognitionEvent event) {

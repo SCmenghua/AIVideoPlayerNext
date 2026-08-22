@@ -14,6 +14,21 @@ TranslationRequest _request() => const TranslationRequest(
       targetLanguage: 'zh-CN',
     );
 
+List<TranslationRequest> _batchRequests() => const [
+      TranslationRequest(
+        segmentId: 'seg-000001',
+        text: 'Hello.',
+        sourceLanguage: 'en',
+        targetLanguage: 'zh-CN',
+      ),
+      TranslationRequest(
+        segmentId: 'seg-000002',
+        text: 'Goodbye.',
+        sourceLanguage: 'en',
+        targetLanguage: 'zh-CN',
+      ),
+    ];
+
 HttpClient _directClient() => HttpClient()..findProxy = (_) => 'DIRECT';
 
 void main() {
@@ -124,6 +139,121 @@ void main() {
     );
 
     expect(service.translate(_request()), throwsA(isA<FormatException>()));
+  });
+
+  test('sends batches with stable IDs and maps JSON results by ID', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(server.close);
+    final received = Completer<Map<String, Object?>>();
+    server.listen((request) async {
+      final body = await utf8.decoder.bind(request).join();
+      received.complete(jsonDecode(body) as Map<String, Object?>);
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'content': jsonEncode([
+                  {'id': 'seg-000002', 'translation': '再见。'},
+                  {'id': 'seg-000001', 'translation': '你好。'},
+                ]),
+              },
+            },
+          ],
+        }));
+      await request.response.close();
+    });
+    final service = OpenAiCompatibleTranslationService(
+      endpoint: Uri.parse(
+          'http://${server.address.address}:${server.port}/v1/chat/completions'),
+      apiKey: 'test-secret',
+      model: 'test-model',
+      clientFactory: _directClient,
+    );
+
+    final results = await service.translateBatch(_batchRequests());
+    final body = await received.future;
+    final messages = body['messages'] as List<Object?>;
+    final system = messages.first as Map<String, Object?>;
+    final user = messages.last as Map<String, Object?>;
+    final systemContent = system['content'] as String;
+    final content = user['content'] as String;
+    expect(systemContent, contains('"id"'));
+    expect(systemContent, contains('"translation"'));
+    expect(systemContent, contains('Required shape'));
+    expect(content, contains('seg-000001'));
+    expect(content, contains('seg-000002'));
+    expect(results.map((result) => result.segmentId),
+        containsAllInOrder(['seg-000002', 'seg-000001']));
+    expect(results.map((result) => result.text),
+        containsAllInOrder(['再见。', '你好。']));
+  });
+
+  test('accepts common text aliases and JSON markdown fences in batch output',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(server.close);
+    server.listen((request) async {
+      await request.drain();
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'content': '```json\n${jsonEncode([
+                  {'id': 'seg-000001', 'text': '你好。'},
+                  {'id': 'seg-000002', 'translation': '再见。'},
+                ])}\n```',
+              },
+            },
+          ],
+        }));
+      await request.response.close();
+    });
+    final service = OpenAiCompatibleTranslationService(
+      endpoint: Uri.parse(
+          'http://${server.address.address}:${server.port}/v1/chat/completions'),
+      apiKey: 'test-secret',
+      model: 'test-model',
+      clientFactory: _directClient,
+    );
+
+    final results = await service.translateBatch(_batchRequests());
+
+    expect(results.map((result) => result.segmentId),
+        containsAllInOrder(['seg-000001', 'seg-000002']));
+    expect(results.map((result) => result.text),
+        containsAllInOrder(['你好。', '再见。']));
+  });
+
+  test('closes the request and reports a timeout when the server stalls',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await request.drain();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await request.response.close();
+    });
+    final service = OpenAiCompatibleTranslationService(
+      endpoint: Uri.parse(
+          'http://${server.address.address}:${server.port}/v1/chat/completions'),
+      apiKey: 'test-secret',
+      model: 'test-model',
+      clientFactory: _directClient,
+    );
+
+    await expectLater(
+      service.translateBatchWithTimeout(
+        [_request()],
+        const Duration(milliseconds: 50),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
   });
 }
 
