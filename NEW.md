@@ -427,22 +427,17 @@ Phase 7 的实际实现已经提前交付了 Phase 8 原计划中的一部分基
 
 遗留（不阻塞结项，供后续阶段参考）：通用 API 的真实网络长时稳定性观察；系统翻译更多语言组合的覆盖；iOS 连续播放的发热/内存长时观察。
 
-### Phase 9：系统语音识别 Adapter
+### Phase 9（已跳过，2026-08-23）：系统语音识别 Adapter
 
-目标：接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider。
+状态：**已跳过，不阻塞后续开发。** 本阶段曾完成一轮完整实现（iOS Apple Speech 桥接、Windows Live Captions 原生 adapter、识别引擎设置/状态/降级接线、设置页与诊断集成，自动化测试 204 项通过），但用户实测中系统字幕引擎无法稳定产出字幕：日志确认引擎判定可用且无回退，两层进程内复现（真实 DLL → 推送事件；真实媒体 + 真实解码器 + 真实控制器 → 会话事件）却均无法复现零字幕问题；叠加 Live Captions 依赖的 UI Automation 窗口类名/AutomationId 属未文档化实现细节、字幕语言与语言文件需用户在系统侧配置、系统字幕对所有系统音频出字幕等固有约束，继续调试的成本超出收益。经用户决定跳过本阶段。
 
-- iOS：实现 `AppleSpeechRecognitionService`，使用 `SFSpeechRecognizer` 识别本应用取得的音频；
-  检查授权、设备端识别可用性、语言支持和联网要求，并将系统 partial/final 映射为
-  `RecognitionEvent`。
-- Windows：仅在 Windows 11 支持 Live Captions 的环境中启用 `WindowsLiveCaptionsService`；明确
-  用户配置、可用性、时间精度和语言限制，不将它伪装成播放器精确时间轴来源。
-- 两种系统 Provider 都必须可以在设置中选择、关闭、显示隐私/网络状态，并在不可用时切回
-  `WhisperCppSpeechRecognitionService`。
-- 使用 Windows Live Captions 快速验证翻译 Provider、透明 Overlay、历史和导出工作流；不影响
-  whisper.cpp 核心、播放器 PCM 路径或 Android 功能。
+处理方式：
 
-验收：关闭、未授权、语言不支持或不可用时，应用清晰降级且不影响本地播放器；适配层可独立测试和
-禁用，系统 Provider 输出不会污染 `whisper.cpp` 的回归结果。
+- 代码与本地 Release 已回退到 Phase 8 基线（版本 `0.8.0`），whisper.cpp 识别管线、翻译与字幕功能不受影响。
+- 本轮全部实现封存在分支 `phase-9-system-engines-archive`，不合并主线；未来若重启（例如仅采纳 iOS Apple Speech 部分），从该分支评估，不直接沿用未经真机验收的代码。
+- 后续开发从 Phase 10（视觉系统与移动端适配）继续。
+
+原定目标（留档）：接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider；不可用时可回退 `WhisperCppSpeechRecognitionService`；验收要求关闭、未授权、语言不支持或不可用时应用清晰降级且不影响本地播放器。
 
 ### Phase 10：视觉系统与移动端适配
 
