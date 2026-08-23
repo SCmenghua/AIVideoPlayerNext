@@ -189,6 +189,27 @@ void main() {
     );
   });
 
+  test('a terminal recognition failure opens the startup gate', () {
+    final state = preparation()..networkReadyAt = startedAt;
+    state.waitForSubtitlePreparation = true;
+
+    expect(
+      state.canAutoPlay(
+        windowsSkipped: 0,
+        recognitionExpected: false,
+      ),
+      isTrue,
+    );
+    expect(
+      state.shouldPrompt(
+        now: startedAt.add(const Duration(seconds: 30)),
+        windowsSkipped: 0,
+        recognitionExpected: false,
+      ),
+      isFalse,
+    );
+  });
+
   test('timeout prompt starts at ten seconds while still blocked', () {
     final state = preparation();
 

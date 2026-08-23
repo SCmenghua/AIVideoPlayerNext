@@ -331,6 +331,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       nextSubtitleReady: decision.nextSubtitleReady,
       nextTranslationReady: decision.nextTranslationReady,
       translationExpected: _translationQueue.serviceStatus.available,
+      recognitionExpected: _recognitionPipelineExpected(),
       failedTranslationCount: _failedTranslationCount(),
     )) {
       session.promptShown = true;
@@ -400,8 +401,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       completedTranslationCount: _completedTranslationCount(document),
       skippedWindowCount: _recognitionDiagnostics.windowsSkipped,
       translationExpected: _translationQueue.serviceStatus.available,
+      recognitionExpected: _recognitionPipelineExpected(),
       failedTranslationCount: _failedTranslationCount(document),
     );
+  }
+
+  /// Recognition failures are terminal for the current session: without a
+  /// decoder, a completed media cache, or a recognizer, no window can produce
+  /// a subtitle or translation, so the startup gate must not wait for them.
+  bool _recognitionPipelineExpected() {
+    final diagnostics = _recognitionDiagnostics;
+    if (diagnostics.decoder.state == AudioDecoderState.error) return false;
+    if (diagnostics.mediaPreparationState == 'failed') return false;
+    return diagnostics.recognizer.state != WindowRecognitionState.unavailable;
   }
 
   /// A segment's translation stops gating playback once the pipeline has
@@ -451,7 +463,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Future<void> _showStartupTimeout(_StartupSession session) async {
     if (!mounted || _startup != session) return;
-    final result = await showDialog<bool>(
+    final result = await showDialog<Object>(
       context: context,
       barrierDismissible: false,
       builder: (context) => _StartupTimeoutDialog(
@@ -462,6 +474,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!mounted || _startup != session) return;
     session.dialogActive = false;
     session.dialogClosing = false;
+    if (result == 'bypass') {
+      await _releaseStartup(session, reason: '用户跳过启动准备');
+      return;
+    }
     if (result == true) _evaluateStartup();
   }
 
@@ -470,7 +486,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (decision.waitingFor == PlaybackStartWaitingFor.video) {
       return _networkStartupDetail();
     }
-    if (decision.waitingFor == PlaybackStartWaitingFor.translationPreparation) {
+    if (decision.waitingFor == PlaybackStartWaitingFor.translationPreparation &&
+        _recognitionPipelineExpected()) {
       return '已启用启动准备，等待前两条翻译完成（或失败），或跳过四个识别窗口。';
     }
     final reasons = <String>[];
@@ -1315,6 +1332,10 @@ class _StartupTimeoutDialogState extends State<_StartupTimeoutDialog> {
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('继续等待'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop('bypass'),
+            child: const Text('跳过准备，直接播放'),
           ),
         ],
       );

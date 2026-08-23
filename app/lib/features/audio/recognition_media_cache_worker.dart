@@ -278,8 +278,7 @@ class RecognitionMediaCacheWorker {
       }
       if (_cancelled) return _cancelledSnapshot();
       if (_state == RecognitionMediaCacheState.directFallback) return snapshot;
-      _path = temporary.path.replaceFirst('.partial', '.media');
-      await temporary.rename(_path!);
+      _path = await _promoteCompletedCache(temporary, directory.path);
       _state = RecognitionMediaCacheState.complete;
       _emit();
       return snapshot;
@@ -288,6 +287,13 @@ class RecognitionMediaCacheWorker {
       return _fail(error.toString());
     }
   }
+
+  /// Carries a real container extension in the loopback proxy path (for
+  /// example `/media.mp4`). Windows keeps the extensionless `/media` default;
+  /// iOS experimental streaming opts in because AVFoundation prefers a
+  /// format hint when the upstream Content-Type is generic. Set before
+  /// [startProxy]; the source URL extension decides, defaulting to `mp4`.
+  bool proxyPathCarriesExtension = false;
 
   /// Starts an HTTP loopback endpoint owned by this recognition session.
   ///
@@ -321,11 +327,14 @@ class RecognitionMediaCacheWorker {
       _proxyServer!.listen((request) {
         unawaited(_serveProxyRequest(request));
       });
+      final proxyPath = proxyPathCarriesExtension
+          ? 'media.${containerExtensionFromUri(source.uri) ?? 'mp4'}'
+          : 'media';
       _proxyUri = Uri(
         scheme: 'http',
         host: InternetAddress.loopbackIPv4.address,
         port: _proxyServer!.port,
-        path: '/media',
+        path: proxyPath,
       );
       _state = RecognitionMediaCacheState.downloading;
       _emit();
@@ -399,6 +408,88 @@ class RecognitionMediaCacheWorker {
     _disposed = true;
     await _snapshots.close();
     await _requestEvents.close();
+  }
+
+  /// Renames the completed download from its `.partial` working name to
+  /// `media.<container>`. AVFoundation resolves a local container through the
+  /// file extension (UTI), so an internal name like `media.media` makes the
+  /// decoder fail with "Cannot Open" even though the bytes are a valid MP4.
+  Future<String> _promoteCompletedCache(
+    File temporary,
+    String directoryPath,
+  ) async {
+    final extension = await _detectContainerExtension(temporary);
+    final target =
+        '$directoryPath${Platform.pathSeparator}media.$extension';
+    await temporary.rename(target);
+    return target;
+  }
+
+  /// Content sniffing wins over the URL because handoff URLs frequently end
+  /// in extensionless segments or query strings; `mp4` is the final fallback
+  /// because it dominates browser media handoffs.
+  Future<String> _detectContainerExtension(File file) async {
+    List<int>? header;
+    try {
+      final handle = await file.open(mode: FileMode.read);
+      try {
+        header = await handle.read(32);
+      } finally {
+        await handle.close();
+      }
+    } on Object {
+      header = null;
+    }
+    if (header != null) {
+      final sniffed = containerExtensionFromBytes(header);
+      if (sniffed != null) return sniffed;
+    }
+    return containerExtensionFromUri(source.uri) ?? 'mp4';
+  }
+
+  static String? containerExtensionFromBytes(List<int> bytes) {
+    bool ascii(int offset, String text) {
+      if (offset + text.length > bytes.length) return false;
+      for (var index = 0; index < text.length; index++) {
+        if (bytes[offset + index] != text.codeUnitAt(index)) return false;
+      }
+      return true;
+    }
+
+    if (ascii(4, 'ftyp')) {
+      if (ascii(8, 'qt')) return 'mov';
+      if (ascii(8, 'M4A')) return 'm4a';
+      return 'mp4';
+    }
+    if (ascii(0, 'RIFF') && ascii(8, 'WAVE')) return 'wav';
+    if (ascii(0, 'FLV')) return 'flv';
+    if (ascii(0, 'OggS')) return 'ogg';
+    if (ascii(0, 'ID3')) return 'mp3';
+    if (ascii(0, 'fLaC')) return 'flac';
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x1A && bytes[1] == 0x45 &&
+        bytes[2] == 0xDF && bytes[3] == 0xA3) {
+      return 'webm';
+    }
+    if (bytes.length >= 2 && bytes[0] == 0xFF) {
+      if (bytes[1] == 0xF1 || bytes[1] == 0xF9) return 'aac';
+      if (bytes[1] & 0xE0 == 0xE0) return 'mp3';
+    }
+    return null;
+  }
+
+  static const knownMediaExtensions = <String>{
+    'mp4', 'm4v', 'mov', 'm4a', 'mp3', 'aac', 'wav', 'webm', 'mkv', 'flv',
+    'ogg', 'ogv', 'flac', 'ts', 'mpeg', 'mpg', 'avi', 'wmv', 'opus',
+  };
+
+  static String? containerExtensionFromUri(Uri uri) {
+    if (uri.pathSegments.isEmpty) return null;
+    final segment = uri.pathSegments.last;
+    final dot = segment.lastIndexOf('.');
+    if (dot <= 0 || dot == segment.length - 1) return null;
+    final extension = segment.substring(dot + 1).toLowerCase();
+    return knownMediaExtensions.contains(extension) ? extension : null;
   }
 
   Future<void> _download(RandomAccessFile output) async {

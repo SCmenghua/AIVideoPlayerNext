@@ -60,6 +60,7 @@ class StartupPreparation {
     required int completedTranslationCount,
     required int skippedWindowCount,
     bool translationExpected = true,
+    bool recognitionExpected = true,
     int failedTranslationCount = 0,
   }) =>
       evaluatePlaybackStart(
@@ -71,6 +72,7 @@ class StartupPreparation {
         strategy: strategy,
         waitForSubtitlePreparation: waitForSubtitlePreparation,
         translationExpected: translationExpected,
+        recognitionExpected: recognitionExpected,
         failedTranslationCount: failedTranslationCount,
       );
 
@@ -80,6 +82,7 @@ class StartupPreparation {
     bool nextSubtitleReady = false,
     bool nextTranslationReady = false,
     bool translationExpected = true,
+    bool recognitionExpected = true,
     int failedTranslationCount = 0,
   }) =>
       decision(
@@ -89,6 +92,7 @@ class StartupPreparation {
         completedTranslationCount: completedTranslationCount,
         skippedWindowCount: windowsSkipped,
         translationExpected: translationExpected,
+        recognitionExpected: recognitionExpected,
         failedTranslationCount: failedTranslationCount,
       ).canStart;
 
@@ -99,6 +103,7 @@ class StartupPreparation {
     bool nextSubtitleReady = false,
     bool nextTranslationReady = false,
     bool translationExpected = true,
+    bool recognitionExpected = true,
     int failedTranslationCount = 0,
   }) =>
       !promptShown &&
@@ -108,6 +113,7 @@ class StartupPreparation {
         nextSubtitleReady: nextSubtitleReady,
         nextTranslationReady: nextTranslationReady,
         translationExpected: translationExpected,
+        recognitionExpected: recognitionExpected,
         failedTranslationCount: failedTranslationCount,
       ) &&
       now.difference(startedAt) >= timeout;

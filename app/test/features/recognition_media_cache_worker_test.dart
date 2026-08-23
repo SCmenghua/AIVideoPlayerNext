@@ -92,6 +92,124 @@ void main() {
     await worker.dispose();
   });
 
+  test('completed cache keeps an MP4 container extension for AVFoundation',
+      () async {
+    final directory =
+        await Directory.systemTemp.createTemp('recognition-cache-');
+    // Real MP4 header: size, 'ftyp', 'isom' brand.
+    final mp4Header = [
+      0, 0, 0, 24, ...'ftyp'.codeUnits, ...'isom'.codeUnits,
+      ...'mp42'.codeUnits,
+    ];
+    final transport = _FakeTransport(
+      (_, __) => _response(200, String.fromCharCodes(mp4Header), const {}),
+    );
+    final worker = RecognitionMediaCacheWorker(
+      source: _networkSource(),
+      sessionId: 'session-mp4',
+      policy: const RecognitionMediaCachePolicy(chunkBytes: 64, maxBytes: 256),
+      cacheDirectory: directory,
+      transport: transport,
+    );
+
+    final result = await worker.prepare();
+
+    expect(result.state, RecognitionMediaCacheState.complete);
+    expect(result.path, endsWith('media.mp4'));
+
+    await worker.dispose();
+    await directory.delete(recursive: true);
+  });
+
+  test('completed cache falls back to the URL extension without magic bytes',
+      () async {
+    final directory =
+        await Directory.systemTemp.createTemp('recognition-cache-');
+    final transport =
+        _FakeTransport((_, __) => _response(200, 'plain-bytes', const {}));
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('https://example.test/get/clip.webm'),
+        title: 'clip.webm',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-webm',
+      policy: const RecognitionMediaCachePolicy(chunkBytes: 64, maxBytes: 256),
+      cacheDirectory: directory,
+      transport: transport,
+    );
+
+    final result = await worker.prepare();
+
+    expect(result.state, RecognitionMediaCacheState.complete);
+    expect(result.path, endsWith('media.webm'));
+
+    await worker.dispose();
+    await directory.delete(recursive: true);
+  });
+
+  test('completed cache defaults to mp4 when nothing identifies the container',
+      () async {
+    final directory =
+        await Directory.systemTemp.createTemp('recognition-cache-');
+    final transport =
+        _FakeTransport((_, __) => _response(200, 'plain-bytes', const {}));
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('https://example.test/get_file/34461?token=1'),
+        title: 'untitled media',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-unknown',
+      policy: const RecognitionMediaCachePolicy(chunkBytes: 64, maxBytes: 256),
+      cacheDirectory: directory,
+      transport: transport,
+    );
+
+    final result = await worker.prepare();
+
+    expect(result.state, RecognitionMediaCacheState.complete);
+    expect(result.path, endsWith('media.mp4'));
+
+    await worker.dispose();
+    await directory.delete(recursive: true);
+  });
+
+  test('proxy path stays extensionless unless explicitly opted in', () async {
+    final directory =
+        await Directory.systemTemp.createTemp('recognition-proxy-path-');
+    final worker = RecognitionMediaCacheWorker(
+      source: _networkSource(),
+      sessionId: 'session-path-default',
+      cacheDirectory: directory,
+    );
+
+    final proxy = await worker.startProxy();
+
+    expect(proxy.proxyUri!.path, '/media');
+
+    await worker.dispose();
+    await directory.delete(recursive: true);
+  });
+
+  test('opted-in proxy path carries the container extension', () async {
+    final directory =
+        await Directory.systemTemp.createTemp('recognition-proxy-ext-');
+    final worker = RecognitionMediaCacheWorker(
+      source: _networkSource(),
+      sessionId: 'session-path-ext',
+      cacheDirectory: directory,
+    );
+    worker.proxyPathCarriesExtension = true;
+
+    final proxy = await worker.startProxy();
+
+    expect(proxy.proxyUri!.path, '/media.mp4');
+
+    await worker.dispose();
+    await directory.delete(recursive: true);
+  });
+
   test('proxy forwards authorization and serves a repeated range from cache',
       () async {
     final directory =

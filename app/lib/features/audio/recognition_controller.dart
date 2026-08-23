@@ -31,6 +31,7 @@ class RecognitionController {
       required String sessionId,
     })? mediaCacheWorkerFactory,
     bool Function()? isIosPlatform,
+    bool Function()? iosStreamingProxyEnabled,
     RecognitionPrefetchMode prefetchMode = RecognitionPrefetchMode.fullMedia,
     this.lowWatermark = const Duration(seconds: 20),
     this.highWatermark = const Duration(seconds: 45),
@@ -46,6 +47,8 @@ class RecognitionController {
         _mediaCacheWorkerFactory =
             mediaCacheWorkerFactory ?? _defaultMediaCacheWorker,
         _isIosPlatform = isIosPlatform ?? _defaultIsIosPlatform,
+        _iosStreamingProxyEnabled =
+            iosStreamingProxyEnabled ?? _defaultIosStreamingProxyEnabled,
         _prefetchMode = prefetchMode,
         seekPriorityLead = priorityLead ?? highWatermark {
     if (lowWatermark.isNegative || highWatermark <= lowWatermark) {
@@ -81,6 +84,10 @@ class RecognitionController {
     required String sessionId,
   }) _mediaCacheWorkerFactory;
   final bool Function() _isIosPlatform;
+
+  /// Experimental: when true, iOS network recognition first streams through
+  /// the loopback proxy and falls back to the full cache on any failure.
+  final bool Function() _iosStreamingProxyEnabled;
   RecognitionPrefetchMode _prefetchMode;
   final Duration lowWatermark;
   final Duration highWatermark;
@@ -118,6 +125,10 @@ class RecognitionController {
   int _lastLoggedDecoderChunks = -1;
   bool _hasLoggedAudioChunk = false;
   bool _hasLoggedRecognition = false;
+
+  /// True while the current iOS session reads through the experimental
+  /// streaming proxy; a decoder-open failure then retries via the full cache.
+  bool _iosProxySourceActive = false;
   DateTime? _decoderOpenRequestedAt;
   DateTime? _prioritySeekRequestedAt;
   Duration? _prioritySeekStart;
@@ -176,6 +187,8 @@ class RecognitionController {
       RecognitionMediaCacheWorker(source: source, sessionId: sessionId);
 
   static bool _defaultIsIosPlatform() => Platform.isIOS;
+
+  static bool _defaultIosStreamingProxyEnabled() => false;
 
   Future<void> seek(Duration position) async {
     if (_disposed || _sessionId == null) return;
@@ -508,6 +521,7 @@ class RecognitionController {
     _lastLoggedDecoderChunks = -1;
     _hasLoggedAudioChunk = false;
     _hasLoggedRecognition = false;
+    _iosProxySourceActive = false;
     _decoderOpenRequestedAt = DateTime.now();
     _setDiagnostic(RecognitionDiagnostics(
       sessionId: sessionId,
@@ -539,6 +553,7 @@ class RecognitionController {
     // leave its current inference must not hold a newer seek or media change.
     // New windows wait for this barrier before calling the shared model again.
     _requestRecognizerStop();
+    Object? openError;
     try {
       final decoderSource = await _prepareDecoderSource(
         source: source,
@@ -552,7 +567,38 @@ class RecognitionController {
         start: position,
       ));
     } on Object catch (error) {
+      openError = error;
+    }
+    if (generation != _generation || _disposed) return;
+    if (openError != null && _iosProxySourceActive) {
+      // The experimental iOS streaming proxy could not be opened by
+      // AVFoundation; one retry through the full cache keeps the session
+      // alive instead of dropping recognition for the whole media.
+      _iosProxySourceActive = false;
+      _logs?.warning('识别音频', 'iOS 流式识别解码打开失败，回退完整缓存', {
+        '会话 ID': sessionId,
+        '错误类型': openError.runtimeType,
+        '错误信息': openError.toString(),
+      });
+      try {
+        final fallbackSource = await _prepareIosFullCacheSource(
+          source: source,
+          sessionId: sessionId,
+          generation: generation,
+        );
+        if (generation != _generation || _disposed) return;
+        await _decoder.open(AudioDecoderRequest(
+          sessionId: sessionId,
+          source: fallbackSource,
+          start: position,
+        ));
+        openError = null;
+      } on Object catch (error) {
+        openError = error;
+      }
       if (generation != _generation || _disposed) return;
+    }
+    if (openError != null) {
       _playing = false;
       _setDiagnostic(_diagnostic.copyWith(
         decoder: _decoder.status,
@@ -560,8 +606,8 @@ class RecognitionController {
         lastReason: 'decoder_open_failed',
       ));
       _logs?.error('识别音频', '音频解码打开失败', {
-        '错误类型': error.runtimeType,
-        '错误信息': error.toString(),
+        '错误类型': openError.runtimeType,
+        '错误信息': openError.toString(),
       });
       return;
     }
@@ -607,48 +653,27 @@ class RecognitionController {
     final recognitionSource = RecognitionMediaSource.fromPlayerSource(source);
     if (!recognitionSource.isNetwork) return source;
 
-    final worker = _mediaCacheWorkerFactory(
-      source: recognitionSource,
-      sessionId: sessionId,
-    );
-    _mediaCacheWorker = worker;
-    _lastMediaCacheLogAt = null;
-    _mediaCacheSubscription = worker.snapshots.listen(_onMediaCacheSnapshot);
-    _mediaCacheRequestSubscription = worker.requestEvents.listen(
-      _onMediaCacheRequestEvent,
-    );
     if (_isIosPlatform()) {
-      _logs?.info('识别媒体缓存', 'iOS 网络媒体开始完整缓存', {
-        '会话 ID': sessionId,
-        '原始地址': source.uri,
-        '缓存上限字节': worker.policy.maxBytes,
-      });
-      final snapshot = await worker.prepare();
-      if (generation != _generation ||
-          _disposed ||
-          !identical(worker, _mediaCacheWorker)) {
-        return source;
+      if (_iosStreamingProxyEnabled()) {
+        final proxySource = await _tryIosStreamingProxySource(
+          source: source,
+          recognitionSource: recognitionSource,
+          sessionId: sessionId,
+          generation: generation,
+        );
+        if (proxySource != null) return proxySource;
       }
-      if (snapshot.state != RecognitionMediaCacheState.complete ||
-          snapshot.path == null) {
-        throw StateError(snapshot.message ?? 'iOS 识别媒体缓存未完成。');
-      }
-      final localUri = Uri.file(snapshot.path!);
-      _logs?.info('识别媒体缓存', 'iOS 识别媒体缓存完成', {
-        '会话 ID': sessionId,
-        '本地地址': localUri,
-        '媒体总字节': snapshot.contentLength,
-        '顺序下载回退': snapshot.usedSequentialDownload,
-      });
-      return MediaSource(
-        uri: localUri,
-        title: source.title,
-        kind: source.kind,
-        originPage: source.originPage,
-        browserSessionId: source.browserSessionId,
+      return _prepareIosFullCacheSource(
+        source: source,
+        sessionId: sessionId,
+        generation: generation,
       );
     }
 
+    final worker = _attachMediaCacheWorker(
+      recognitionSource: recognitionSource,
+      sessionId: sessionId,
+    );
     final snapshot = await worker.startProxy();
     if (generation != _generation ||
         _disposed ||
@@ -668,6 +693,111 @@ class RecognitionController {
     });
     return MediaSource(
       uri: proxyUri,
+      title: source.title,
+      kind: source.kind,
+      originPage: source.originPage,
+      browserSessionId: source.browserSessionId,
+    );
+  }
+
+  RecognitionMediaCacheWorker _attachMediaCacheWorker({
+    required RecognitionMediaSource recognitionSource,
+    required String sessionId,
+  }) {
+    final worker = _mediaCacheWorkerFactory(
+      source: recognitionSource,
+      sessionId: sessionId,
+    );
+    _mediaCacheWorker = worker;
+    _lastMediaCacheLogAt = null;
+    _mediaCacheSubscription = worker.snapshots.listen(_onMediaCacheSnapshot);
+    _mediaCacheRequestSubscription = worker.requestEvents.listen(
+      _onMediaCacheRequestEvent,
+    );
+    return worker;
+  }
+
+  /// Experimental iOS streaming path. Returns null when the proxy fails to
+  /// start so the caller falls back to the full cache; returns [source] only
+  /// for a session that was already superseded.
+  Future<MediaSource?> _tryIosStreamingProxySource({
+    required MediaSource source,
+    required RecognitionMediaSource recognitionSource,
+    required String sessionId,
+    required int generation,
+  }) async {
+    final worker = _attachMediaCacheWorker(
+      recognitionSource: recognitionSource,
+      sessionId: sessionId,
+    );
+    worker.proxyPathCarriesExtension = true;
+    final snapshot = await worker.startProxy();
+    if (generation != _generation ||
+        _disposed ||
+        !identical(worker, _mediaCacheWorker)) {
+      return source;
+    }
+    final proxyUri = snapshot.proxyUri;
+    if (snapshot.state == RecognitionMediaCacheState.failed ||
+        proxyUri == null) {
+      _logs?.warning('识别媒体缓存', 'iOS 流式识别代理启动失败，回退完整缓存', {
+        '会话 ID': sessionId,
+        '原始地址': source.uri,
+        '说明': snapshot.message,
+      });
+      await _releaseMediaCacheWorker();
+      return null;
+    }
+    _iosProxySourceActive = true;
+    _logs?.info('识别媒体缓存', 'iOS 流式识别代理已启动（实验）', {
+      '会话 ID': sessionId,
+      '原始地址': source.uri,
+      '代理地址': proxyUri,
+      '缓存上限字节': worker.policy.maxBytes,
+    });
+    return MediaSource(
+      uri: proxyUri,
+      title: source.title,
+      kind: source.kind,
+      originPage: source.originPage,
+      browserSessionId: source.browserSessionId,
+    );
+  }
+
+  Future<MediaSource> _prepareIosFullCacheSource({
+    required MediaSource source,
+    required String sessionId,
+    required int generation,
+  }) async {
+    await _releaseMediaCacheWorker();
+    final worker = _attachMediaCacheWorker(
+      recognitionSource: RecognitionMediaSource.fromPlayerSource(source),
+      sessionId: sessionId,
+    );
+    _logs?.info('识别媒体缓存', 'iOS 网络媒体开始完整缓存', {
+      '会话 ID': sessionId,
+      '原始地址': source.uri,
+      '缓存上限字节': worker.policy.maxBytes,
+    });
+    final snapshot = await worker.prepare();
+    if (generation != _generation ||
+        _disposed ||
+        !identical(worker, _mediaCacheWorker)) {
+      return source;
+    }
+    if (snapshot.state != RecognitionMediaCacheState.complete ||
+        snapshot.path == null) {
+      throw StateError(snapshot.message ?? 'iOS 识别媒体缓存未完成。');
+    }
+    final localUri = Uri.file(snapshot.path!);
+    _logs?.info('识别媒体缓存', 'iOS 识别媒体缓存完成', {
+      '会话 ID': sessionId,
+      '本地地址': localUri,
+      '媒体总字节': snapshot.contentLength,
+      '顺序下载回退': snapshot.usedSequentialDownload,
+    });
+    return MediaSource(
+      uri: localUri,
       title: source.title,
       kind: source.kind,
       originPage: source.originPage,

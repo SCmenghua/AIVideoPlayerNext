@@ -13,6 +13,7 @@ void main() {
     PlaybackStartStrategy strategy = PlaybackStartStrategy.subtitlePriority,
     bool waitForSubtitlePreparation = false,
     bool translationExpected = true,
+    bool recognitionExpected = true,
     int failedTranslationCount = 0,
   }) =>
       evaluatePlaybackStart(
@@ -24,6 +25,7 @@ void main() {
         strategy: strategy,
         waitForSubtitlePreparation: waitForSubtitlePreparation,
         translationExpected: translationExpected,
+        recognitionExpected: recognitionExpected,
         failedTranslationCount: failedTranslationCount,
       );
 
@@ -107,6 +109,17 @@ void main() {
       waitForSubtitlePreparation: true,
       nextSubtitleReady: true,
       translationExpected: false,
+    );
+
+    expect(decision.canStart, isTrue);
+    expect(decision.gateEnabled, isTrue);
+  });
+
+  test('preparation gate opens when recognition has terminally failed', () {
+    final decision = evaluate(
+      waitForSubtitlePreparation: true,
+      translationExpected: true,
+      recognitionExpected: false,
     );
 
     expect(decision.canStart, isTrue);

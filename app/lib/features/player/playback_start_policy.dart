@@ -48,6 +48,7 @@ PlaybackStartDecision evaluatePlaybackStart({
   required PlaybackStartStrategy strategy,
   required bool waitForSubtitlePreparation,
   bool translationExpected = true,
+  bool recognitionExpected = true,
   int failedTranslationCount = 0,
 }) {
   if (!videoReady) {
@@ -65,10 +66,13 @@ PlaybackStartDecision evaluatePlaybackStart({
   // selected playback strategy applies after playback has started. When no
   // translation can ever arrive (service unavailable) or the provider has
   // already failed terminally, waiting longer cannot help, so the gate opens
-  // and subtitles keep their original text.
+  // and subtitles keep their original text. A terminal recognition failure
+  // (decoder error, cache failure, no recognizer) releases the gate for the
+  // same reason: no windows means no subtitles and no translations.
   final gateEnabled = waitForSubtitlePreparation;
   if (gateEnabled &&
       translationExpected &&
+      recognitionExpected &&
       completedTranslationCount < 2 &&
       failedTranslationCount < 2 &&
       skippedWindowCount < 4) {

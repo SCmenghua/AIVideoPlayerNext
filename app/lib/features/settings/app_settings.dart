@@ -35,6 +35,7 @@ class AppSettings {
     required this.subtitleDisplayMode,
     required this.playbackStartStrategy,
     required this.waitForSubtitlePreparation,
+    required this.iosRecognitionStreamingProxy,
   });
 
   final RecognitionPrefetchMode prefetchMode;
@@ -51,6 +52,11 @@ class AppSettings {
   final SubtitleDisplayMode subtitleDisplayMode;
   final PlaybackStartStrategy playbackStartStrategy;
   final bool waitForSubtitlePreparation;
+
+  /// Experimental: stream iOS network recognition through the loopback proxy
+  /// instead of fully downloading the media before decoding. Failure falls
+  /// back to the full cache automatically.
+  final bool iosRecognitionStreamingProxy;
 
   bool sameTranslationConfiguration(AppSettings other) =>
       translationMode == other.translationMode &&
@@ -85,6 +91,7 @@ class AppSettingsController extends ChangeNotifier {
     PlaybackStartStrategy playbackStartStrategy =
         PlaybackStartStrategy.translationPriority,
     bool waitForSubtitlePreparation = true,
+    bool iosRecognitionStreamingProxy = false,
   })  : _prefetchMode = prefetchMode,
         _translationMode = translationMode,
         _localTranslationModel = localTranslationModel,
@@ -102,7 +109,8 @@ class AppSettingsController extends ChangeNotifier {
         _translationContextEnabled = translationContextEnabled,
         _subtitleDisplayMode = subtitleDisplayMode,
         _playbackStartStrategy = playbackStartStrategy,
-        _waitForSubtitlePreparation = waitForSubtitlePreparation {
+        _waitForSubtitlePreparation = waitForSubtitlePreparation,
+        _iosRecognitionStreamingProxy = iosRecognitionStreamingProxy {
     ready = _loadPersistedSettings();
   }
 
@@ -140,6 +148,7 @@ class AppSettingsController extends ChangeNotifier {
   SubtitleDisplayMode _subtitleDisplayMode;
   PlaybackStartStrategy _playbackStartStrategy;
   bool _waitForSubtitlePreparation;
+  bool _iosRecognitionStreamingProxy;
   late final Future<void> ready;
   final Set<String> _changedBeforeLoad = <String>{};
   int _saveGeneration = 0;
@@ -158,6 +167,7 @@ class AppSettingsController extends ChangeNotifier {
   SubtitleDisplayMode get subtitleDisplayMode => _subtitleDisplayMode;
   PlaybackStartStrategy get playbackStartStrategy => _playbackStartStrategy;
   bool get waitForSubtitlePreparation => _waitForSubtitlePreparation;
+  bool get iosRecognitionStreamingProxy => _iosRecognitionStreamingProxy;
 
   AppSettings get snapshot => AppSettings(
         prefetchMode: _prefetchMode,
@@ -174,6 +184,7 @@ class AppSettingsController extends ChangeNotifier {
         subtitleDisplayMode: _subtitleDisplayMode,
         playbackStartStrategy: _playbackStartStrategy,
         waitForSubtitlePreparation: _waitForSubtitlePreparation,
+        iosRecognitionStreamingProxy: _iosRecognitionStreamingProxy,
       );
 
   Future<void> _loadPersistedSettings() async {
@@ -298,6 +309,14 @@ class AppSettingsController extends ChangeNotifier {
         final raw = values['waitForSubtitlePreparation'];
         if (raw is bool && raw != _waitForSubtitlePreparation) {
           _waitForSubtitlePreparation = raw;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('iosRecognitionStreamingProxy') &&
+          values.containsKey('iosRecognitionStreamingProxy')) {
+        final raw = values['iosRecognitionStreamingProxy'];
+        if (raw is bool && raw != _iosRecognitionStreamingProxy) {
+          _iosRecognitionStreamingProxy = raw;
           changed = true;
         }
       }
@@ -436,6 +455,13 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setIosRecognitionStreamingProxy(bool value) {
+    if (_iosRecognitionStreamingProxy == value) return;
+    _iosRecognitionStreamingProxy = value;
+    _markChanged('iosRecognitionStreamingProxy');
+    notifyListeners();
+  }
+
   static Uri _validatedEndpoint(String value, Uri fallback) =>
       _optionalEndpoint(value) ?? fallback;
 
@@ -500,6 +526,7 @@ class AppSettingsStore {
       'subtitleDisplayMode': settings.subtitleDisplayMode.name,
       'playbackStartStrategy': settings.playbackStartStrategy.name,
       'waitForSubtitlePreparation': settings.waitForSubtitlePreparation,
+      'iosRecognitionStreamingProxy': settings.iosRecognitionStreamingProxy,
     }));
     if (await file.exists()) await file.delete();
     await temporary.rename(file.path);

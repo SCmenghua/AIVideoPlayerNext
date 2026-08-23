@@ -395,6 +395,21 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                           .read(appSettingsProvider)
                           .setWaitForSubtitlePreparation(value),
                     ),
+                    if (Platform.isIOS) ...[
+                      const SizedBox(height: 10),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('网络识别流式读取（实验）'),
+                        subtitle: const Text(
+                          '播放网络视频时识别边下边读，不再先完整缓存；'
+                          '失败时自动回退完整缓存。',
+                        ),
+                        value: settings.iosRecognitionStreamingProxy,
+                        onChanged: (value) => ref
+                            .read(appSettingsProvider)
+                            .setIosRecognitionStreamingProxy(value),
+                      ),
+                    ],
                   ],
                 ),
               ),

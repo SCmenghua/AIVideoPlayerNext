@@ -413,6 +413,140 @@ void main() {
     await player.dispose();
   });
 
+  test('iOS streaming experiment opens the decoder through the loopback proxy',
+      () async {
+    final player = MockPlayerService();
+    final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
+    _IosStreamingRecordingWorker? worker;
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: FakeWindowRecognitionService(),
+      planner: _planner(),
+      isIosPlatform: () => true,
+      iosStreamingProxyEnabled: () => true,
+      mediaCacheWorkerFactory: ({required source, required sessionId}) {
+        return worker = _IosStreamingRecordingWorker(
+          source: source,
+          sessionId: sessionId,
+        );
+      },
+    );
+
+    await player.open(
+      MediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+    );
+    await player.play();
+    await _settle();
+
+    expect(worker, isNotNull);
+    expect(worker!.proxyCalls, 1);
+    expect(worker!.prepareCalls, 0);
+    expect(worker!.proxyPathCarriesExtensionObserved, isTrue);
+    expect(decoder.openRequest?.source.uri.scheme, 'http');
+    expect(decoder.openRequest?.source.uri.path, '/media.mp4');
+
+    await controller.dispose();
+    await player.dispose();
+  });
+
+  test('iOS streaming experiment falls back to the full cache on proxy failure',
+      () async {
+    final player = MockPlayerService();
+    final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
+    final workers = <_IosStreamingRecordingWorker>[];
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: FakeWindowRecognitionService(),
+      planner: _planner(),
+      isIosPlatform: () => true,
+      iosStreamingProxyEnabled: () => true,
+      mediaCacheWorkerFactory: ({required source, required sessionId}) {
+        final worker = _IosStreamingRecordingWorker(
+          source: source,
+          sessionId: sessionId,
+          startProxyFails: true,
+        );
+        workers.add(worker);
+        return worker;
+      },
+    );
+
+    await player.open(
+      MediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+    );
+    await player.play();
+    await _settle();
+
+    expect(workers, hasLength(2));
+    expect(workers.first.proxyCalls, 1);
+    expect(workers.first.prepareCalls, 0);
+    expect(workers.last.proxyCalls, 0);
+    expect(workers.last.prepareCalls, 1);
+    expect(decoder.openRequest?.source.uri, Uri.file(r'C:\cache\media.mp4'));
+
+    await controller.dispose();
+    await player.dispose();
+  });
+
+  test(
+      'iOS streaming experiment retries the full cache after a proxy decoder open failure',
+      () async {
+    final player = MockPlayerService();
+    final decoder = _FailingProxyOpenDecoder(chunks: [_chunk(0, last: true)]);
+    final workers = <_IosStreamingRecordingWorker>[];
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: FakeWindowRecognitionService(),
+      planner: _planner(),
+      isIosPlatform: () => true,
+      iosStreamingProxyEnabled: () => true,
+      mediaCacheWorkerFactory: ({required source, required sessionId}) {
+        final worker = _IosStreamingRecordingWorker(
+          source: source,
+          sessionId: sessionId,
+        );
+        workers.add(worker);
+        return worker;
+      },
+    );
+
+    await player.open(
+      MediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+    );
+    await player.play();
+    await _settle();
+
+    expect(workers, hasLength(2));
+    expect(workers.first.proxyCalls, 1);
+    expect(workers.last.prepareCalls, 1);
+    expect(decoder.openRequests, hasLength(2));
+    expect(decoder.openRequests.first.source.uri.scheme, 'http');
+    expect(
+      decoder.openRequests.last.source.uri,
+      Uri.file(r'C:\cache\media.mp4'),
+    );
+    expect(decoder.startCount, 1);
+    expect(controller.diagnostic.lastReason, isNull);
+
+    await controller.dispose();
+    await player.dispose();
+  });
+
   test('high watermark pauses and low watermark resumes the decoder', () async {
     final player = MockPlayerService();
     final decoder = FakeAudioDecoder(
@@ -673,6 +807,63 @@ class _IosCacheRecordingWorker extends RecognitionMediaCacheWorker {
   }
 }
 
+class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
+  _IosStreamingRecordingWorker({
+    required super.source,
+    required super.sessionId,
+    this.startProxyFails = false,
+  });
+
+  final bool startProxyFails;
+  int prepareCalls = 0;
+  int proxyCalls = 0;
+  bool proxyPathCarriesExtensionObserved = false;
+
+  @override
+  Future<RecognitionMediaCacheSnapshot> prepare() async {
+    ++prepareCalls;
+    return RecognitionMediaCacheSnapshot(
+      sessionId: sessionId,
+      mode: RecognitionMediaReadMode.localFile,
+      state: RecognitionMediaCacheState.complete,
+      cursor: RecognitionMediaCursor(
+        sessionId: sessionId,
+        mode: RecognitionMediaReadMode.localFile,
+      ),
+      path: r'C:\cache\media.mp4',
+      contentLength: 1234,
+    );
+  }
+
+  @override
+  Future<RecognitionMediaCacheSnapshot> startProxy() async {
+    ++proxyCalls;
+    proxyPathCarriesExtensionObserved = proxyPathCarriesExtension;
+    if (startProxyFails) {
+      return RecognitionMediaCacheSnapshot(
+        sessionId: sessionId,
+        mode: RecognitionMediaReadMode.progressiveSegmentCache,
+        state: RecognitionMediaCacheState.failed,
+        cursor: RecognitionMediaCursor(
+          sessionId: sessionId,
+          mode: RecognitionMediaReadMode.progressiveSegmentCache,
+        ),
+        message: 'proxy unavailable',
+      );
+    }
+    return RecognitionMediaCacheSnapshot(
+      sessionId: sessionId,
+      mode: RecognitionMediaReadMode.progressiveSegmentCache,
+      state: RecognitionMediaCacheState.downloading,
+      cursor: RecognitionMediaCursor(
+        sessionId: sessionId,
+        mode: RecognitionMediaReadMode.progressiveSegmentCache,
+      ),
+      proxyUri: Uri.parse('http://127.0.0.1:9/media.mp4'),
+    );
+  }
+}
+
 class _RecordingAudioDecoder extends FakeAudioDecoder {
   _RecordingAudioDecoder({required super.chunks});
 
@@ -681,6 +872,25 @@ class _RecordingAudioDecoder extends FakeAudioDecoder {
   @override
   Future<void> open(AudioDecoderRequest request) async {
     openRequest = request;
+    await super.open(request);
+  }
+}
+
+/// Simulates AVFoundation rejecting the loopback proxy source while
+/// accepting the same media from the fully cached local file.
+class _FailingProxyOpenDecoder extends FakeAudioDecoder {
+  _FailingProxyOpenDecoder({required super.chunks});
+
+  final List<AudioDecoderRequest> openRequests = [];
+  bool _rejectedProxyOnce = false;
+
+  @override
+  Future<void> open(AudioDecoderRequest request) async {
+    openRequests.add(request);
+    if (!_rejectedProxyOnce && request.source.uri.scheme == 'http') {
+      _rejectedProxyOnce = true;
+      throw StateError('Cannot Open');
+    }
     await super.open(request);
   }
 }

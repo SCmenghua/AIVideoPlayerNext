@@ -185,6 +185,10 @@ final recognitionControllerProvider = Provider<RecognitionController>((ref) {
     recognizer: ref.read(windowRecognitionServiceProvider),
     logs: ref.read(diagnosticsLogProvider),
     prefetchMode: settings.prefetchMode,
+    iosStreamingProxyEnabled: () => ref
+        .read(appSettingsProvider)
+        .snapshot
+        .iosRecognitionStreamingProxy,
   );
   ref.onDispose(controller.dispose);
   return controller;
