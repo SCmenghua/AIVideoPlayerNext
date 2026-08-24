@@ -492,6 +492,16 @@ class RecognitionMediaCacheWorker {
     return knownMediaExtensions.contains(extension) ? extension : null;
   }
 
+  /// Maps a loopback proxy URI to the custom scheme consumed by the iOS
+  /// AVAssetResourceLoader decoder. Host, port, path and query are preserved
+  /// verbatim so the native loader restores an http request that still hits
+  /// this same HttpServer; only the scheme changes. Windows keeps plain http.
+  static Uri customSchemeProxyUri(
+    Uri proxyUri, {
+    String scheme = 'aivpmedia',
+  }) =>
+      proxyUri.replace(scheme: scheme);
+
   Future<void> _download(RandomAccessFile output) async {
     var offset = 0;
     while (!_cancelled) {

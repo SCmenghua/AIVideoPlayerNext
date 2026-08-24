@@ -466,6 +466,18 @@ CI：GitHub Actions macOS 构建未签名 IPA 成功，Release `ios-unsigned-v0.
 
 状态：**未结项，待真机回归。** 验收要求：(1) 默认路径（开关关闭）播放网络视频，完整缓存完成后识别恢复出字幕，无 Cannot Open；(2) 打开实验开关重播同一视频，依据诊断日志判定流式代理成立（字幕边播边出）或自动回退完整缓存（体验不差于现状）；(3) 无论哪条路径，识别失败时播放不再卡死且可手动跳过。若流式代理被 AVFoundation 拒绝，凭日志转入 `AVAssetResourceLoaderDelegate` 方案再验证。
 
+#### Phase 9.9 第二轮执行记录（2026-08-24）：AVAssetResourceLoader 流式方案
+
+真机回归结果：实验开关生效、回环代理成功启动（`http://127.0.0.1:<port>/media.mp4`），但 AVFoundation 自带 HTTP 栈约 7 秒后以泛化错误 "Operation Stopped" 拒绝打开该源；三层回退与启动闸门放行均正常工作（播放未卡死，自动转完整缓存）。这正是本阶段预留的转入分支。
+
+已交付 `AVAssetResourceLoaderDelegate` 自定义 scheme 方案：
+
+1. **Dart 端**：`RecognitionMediaCacheWorker.customSchemeProxyUri` 把回环代理 URI 映射为 `aivpmedia://127.0.0.1:<port>/media.mp4`（host/port/path 原样保留）；`_tryIosStreamingProxySource` 把映射后地址交给解码器。Windows 透明代理路径零改动。
+2. **iOS 端**：新建 `IOSMediaResourceLoader`——AVURLAsset 用自定义 scheme 创建并挂 resourceLoader delegate；每个 `AVAssetResourceLoadingRequest` 转成对同一 Dart 回环代理的 URLSession Range 请求，字节分块（≤128KB）`respond(with:)` 喂回。元数据探测用 GET bytes=0-0（不用 HEAD，保留代理缓存头部能力）；上游返回 200 时丢弃偏移前缀；超时 15s 空闲/120s 总上限；didCancel 后绝不触碰 loadingRequest；bridge stop() 先 invalidate loader 再取消 reader，seek 重开自动重建。`IOSAudioDecoderBridge` 错误富化：loadTracks 与读循环的 NSError 现在携带 domain/code/underlying 链，替代裸 "Operation Stopped"。
+3. **诊断提升**：每个识别会话的前 12 条代理请求事件按信息级记录（默认日志级别即可见流式握手过程），之后回落调试级。
+
+自动化基线：`flutter analyze` 无问题；测试套件通过（含 customSchemeProxyUri 新测试与 aivpmedia scheme 断言更新）。真机验收判据不变：(2) 开启开关播放网络视频，日志应不再出现 "Operation Stopped"，而是"识别解码器打开完成"且字幕边播边出；前 12 条上游请求事件现在应为信息级可见；若仍失败，新错误消息应含 domain/code 定位根因，随后自动回退完整缓存。
+
 ### Phase 10：视觉系统与移动端适配
 
 目标：完成功能稳定后的高品质 UI。

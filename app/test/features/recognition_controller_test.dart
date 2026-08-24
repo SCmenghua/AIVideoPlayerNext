@@ -447,8 +447,10 @@ void main() {
     expect(worker!.proxyCalls, 1);
     expect(worker!.prepareCalls, 0);
     expect(worker!.proxyPathCarriesExtensionObserved, isTrue);
-    expect(decoder.openRequest?.source.uri.scheme, 'http');
-    expect(decoder.openRequest?.source.uri.path, '/media.mp4');
+    expect(
+      decoder.openRequest?.source.uri,
+      Uri.parse('aivpmedia://127.0.0.1:9/media.mp4'),
+    );
 
     await controller.dispose();
     await player.dispose();
@@ -535,7 +537,7 @@ void main() {
     expect(workers.first.proxyCalls, 1);
     expect(workers.last.prepareCalls, 1);
     expect(decoder.openRequests, hasLength(2));
-    expect(decoder.openRequests.first.source.uri.scheme, 'http');
+    expect(decoder.openRequests.first.source.uri.scheme, 'aivpmedia');
     expect(
       decoder.openRequests.last.source.uri,
       Uri.file(r'C:\cache\media.mp4'),
@@ -877,7 +879,8 @@ class _RecordingAudioDecoder extends FakeAudioDecoder {
 }
 
 /// Simulates AVFoundation rejecting the loopback proxy source while
-/// accepting the same media from the fully cached local file.
+/// accepting the same media from the fully cached local file. The proxy URI
+/// reaches the decoder through the aivpmedia custom scheme.
 class _FailingProxyOpenDecoder extends FakeAudioDecoder {
   _FailingProxyOpenDecoder({required super.chunks});
 
@@ -887,7 +890,7 @@ class _FailingProxyOpenDecoder extends FakeAudioDecoder {
   @override
   Future<void> open(AudioDecoderRequest request) async {
     openRequests.add(request);
-    if (!_rejectedProxyOnce && request.source.uri.scheme == 'http') {
+    if (!_rejectedProxyOnce && request.source.uri.scheme == 'aivpmedia') {
       _rejectedProxyOnce = true;
       throw StateError('Cannot Open');
     }

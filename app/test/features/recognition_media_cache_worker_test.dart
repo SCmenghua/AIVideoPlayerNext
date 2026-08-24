@@ -9,6 +9,20 @@ import 'package:ai_video_player_next/domain/player/player_service.dart';
 import 'package:ai_video_player_next/features/audio/recognition_media_cache_worker.dart';
 
 void main() {
+  test('customSchemeProxyUri keeps host, port, path and query', () {
+    final proxy = Uri.parse(
+      'http://127.0.0.1:52638/media.mp4?a=1&b=2',
+    );
+    final mapped = RecognitionMediaCacheWorker.customSchemeProxyUri(proxy);
+    expect(mapped.scheme, 'aivpmedia');
+    expect(mapped.host, '127.0.0.1');
+    expect(mapped.port, 52638);
+    expect(mapped.path, '/media.mp4');
+    expect(mapped.query, 'a=1&b=2');
+    // The inverse mapping must still address the same loopback endpoint.
+    expect(mapped.replace(scheme: 'http'), proxy);
+  });
+
   test('downloads contiguous ranges into a session-owned media file', () async {
     final directory =
         await Directory.systemTemp.createTemp('recognition-cache-');

@@ -23,6 +23,10 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var inflightSends = 0
   private var securityScopedURL: URL?
   private var securityScopeActive = false
+  /// Owns the custom-scheme resource loader for one streaming session. The
+  /// bridge holds it strongly because AVAssetResourceLoader does not retain
+  /// its delegate.
+  private var mediaLoader: IOSMediaResourceLoader?
 
   func register(with registrar: FlutterApplicationRegistrar) {
     let methods = FlutterMethodChannel(
@@ -119,12 +123,40 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
         releaseSecurityScopedAccess()
       }
     }
+    // The experimental streaming path arrives as a custom scheme so this
+    // bridge, not AVFoundation's HTTP stack, owns the loopback fetch. The
+    // loader must be attached before tracks load; it is kept alive by the
+    // bridge until stop() invalidates it.
+    var loader: IOSMediaResourceLoader?
+    if url.scheme == "aivpmedia" {
+      var components = URLComponents()
+      components.scheme = "http"
+      components.host = url.host
+      components.port = url.port
+      components.path = url.path
+      guard let target = components.url else {
+        throw BridgeError.message("回环代理地址无效")
+      }
+      loader = IOSMediaResourceLoader(customURL: target, headers: headers)
+      assetURL = url
+    }
+    defer {
+      if let loader, mediaLoader !== loader {
+        loader.invalidate()
+      }
+    }
     var options: [String: Any] = [:]
-    if !headers.isEmpty && !url.isFileURL {
+    if !headers.isEmpty && !url.isFileURL && url.scheme != "aivpmedia" {
       options["AVURLAssetHTTPHeaderFieldsKey"] = headers
     }
     let asset = AVURLAsset(url: assetURL, options: options.isEmpty ? nil : options)
-    let tracks = try await loadTracks(asset)
+    loader?.attach(to: asset)
+    let tracks: [AVAssetTrack]
+    do {
+      tracks = try await loadTracks(asset)
+    } catch {
+      throw BridgeError.message(Self.errorDetail(error, prefix: "音频轨道加载失败"))
+    }
     lock.lock()
     let stillCurrent = generation == openToken
     lock.unlock()
@@ -151,12 +183,31 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     reader.add(output)
     self.reader = reader
     self.output = output
+    self.mediaLoader = loader
     self.sessionID = sessionID
     self.sourceURL = url
     self.sourceHeaders = headers
     self.accepting = false
     self.generation += 1
     keepSecurityScope = true
+  }
+
+  /// Flattens an NSError into "prefix: domain=... code=... ...; underlying=..."
+  /// so Dart diagnostics can distinguish connect/timeout/protocol failures
+  /// that a bare localizedDescription ("Operation Stopped") hides.
+  private static func errorDetail(_ error: Error, prefix: String) -> String {
+    let ns = error as NSError
+    var detail =
+        "\(prefix): domain=\(ns.domain) code=\(ns.code) \(ns.localizedDescription)"
+    var underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+    var depth = 0
+    while let current = underlying, depth < 2 {
+      detail +=
+        "; underlying=\(current.domain)/\(current.code) \(current.localizedDescription)"
+      underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError
+      depth += 1
+    }
+    return detail
   }
 
   /// A document-picker URL may be security-scoped. Keep access alive for the
@@ -191,7 +242,8 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     lock.unlock()
     if reader.status == .unknown {
       guard reader.startReading() else {
-        let message = reader.error?.localizedDescription ?? "iOS 媒体读取器启动失败"
+        let message = reader.error.map { Self.errorDetail($0, prefix: "iOS 媒体读取器启动失败") }
+          ?? "iOS 媒体读取器启动失败"
         self.send(["type": "error", "sessionId": session, "message": message])
         self.lock.lock(); self.accepting = false; self.lock.unlock()
         return
@@ -210,8 +262,9 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
           self.lock.lock(); let stillActive = self.accepting && self.generation == token; self.accepting = false; self.lock.unlock()
           if stillActive {
             if reader.status == .failed {
-              self.send(["type": "error", "sessionId": session,
-                         "message": reader.error?.localizedDescription ?? "iOS 媒体读取失败"])
+              let message = reader.error.map { Self.errorDetail($0, prefix: "iOS 媒体读取失败") }
+                ?? "iOS 媒体读取失败"
+              self.send(["type": "error", "sessionId": session, "message": message])
             } else {
               self.sendTail(sessionID: session, ended: true)
             }
@@ -260,6 +313,10 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private func stop() {
     lock.lock(); accepting = false; generation += 1; lock.unlock()
     worker?.cancel(); worker = nil
+    // Invalidate the streaming loader before cancelling the reader so no
+    // resource-loader callback can still be feeding a dying asset. seek()
+    // reaches this through open()'s leading stop().
+    mediaLoader?.invalidate(); mediaLoader = nil
     reader?.cancelReading(); reader = nil; output = nil
     sessionID = ""
     sourceURL = nil

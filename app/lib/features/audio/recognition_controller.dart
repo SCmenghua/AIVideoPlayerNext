@@ -137,6 +137,13 @@ class RecognitionController {
   bool _priorityFirstSubtitlePending = false;
   RecognitionMediaCacheWorker? _mediaCacheWorker;
   DateTime? _lastMediaCacheLogAt;
+
+  /// Per-session budget of proxy request events recorded at info level. The
+  /// default log level is "info", so promoting the first requests of each
+  /// session keeps the streaming handshake visible in user exports while
+  /// steady-state traffic stays at debug.
+  int _mediaCacheRequestInfoBudget = 0;
+  static const _mediaCacheRequestInfoBudgetReset = 12;
   Duration? _lastPlaybackPosition;
   Duration _sequentialStart = Duration.zero;
   final _RecognitionCoverage _coverage = _RecognitionCoverage();
@@ -710,6 +717,7 @@ class RecognitionController {
     );
     _mediaCacheWorker = worker;
     _lastMediaCacheLogAt = null;
+    _mediaCacheRequestInfoBudget = _mediaCacheRequestInfoBudgetReset;
     _mediaCacheSubscription = worker.snapshots.listen(_onMediaCacheSnapshot);
     _mediaCacheRequestSubscription = worker.requestEvents.listen(
       _onMediaCacheRequestEvent,
@@ -749,14 +757,16 @@ class RecognitionController {
       return null;
     }
     _iosProxySourceActive = true;
+    final decoderUri = RecognitionMediaCacheWorker.customSchemeProxyUri(proxyUri);
     _logs?.info('识别媒体缓存', 'iOS 流式识别代理已启动（实验）', {
       '会话 ID': sessionId,
       '原始地址': source.uri,
       '代理地址': proxyUri,
+      '解码地址': decoderUri,
       '缓存上限字节': worker.policy.maxBytes,
     });
     return MediaSource(
-      uri: proxyUri,
+      uri: decoderUri,
       title: source.title,
       kind: source.kind,
       originPage: source.originPage,
@@ -840,19 +850,19 @@ class RecognitionController {
         _logs?.debug('识别媒体缓存', '网络目标区域优先意图已登记', details);
         return;
       case RecognitionMediaCacheRequestEventKind.cacheHit:
-        _logs?.debug('识别媒体缓存', '代理 Range 命中识别缓存', details);
+        _logRequestEvent('代理 Range 命中识别缓存', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamStarted:
-        _logs?.debug('识别媒体缓存', '上游 Range 请求已开始', details);
+        _logRequestEvent('上游 Range 请求已开始', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamResponse:
-        _logs?.debug('识别媒体缓存', '上游实际 Range 已响应', details);
+        _logRequestEvent('上游实际 Range 已响应', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamFirstByte:
-        _logs?.debug('识别媒体缓存', '上游 Range 首字节已到达', details);
+        _logRequestEvent('上游 Range 首字节已到达', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamCompleted:
-        _logs?.debug('识别媒体缓存', '上游 Range 请求已完成', details);
+        _logRequestEvent('上游 Range 请求已完成', details);
         return;
       case RecognitionMediaCacheRequestEventKind.upstreamCancelled:
         _logs?.debug('识别媒体缓存', '旧上游 Range 已为新位置取消', details);
@@ -860,6 +870,18 @@ class RecognitionController {
       case RecognitionMediaCacheRequestEventKind.upstreamFailed:
         _logs?.error('识别媒体缓存', '上游 Range 请求失败', details);
         return;
+    }
+  }
+
+  /// Records proxy request traffic at info level until the per-session
+  /// budget is spent, then falls back to debug so steady-state streaming
+  /// does not flood the default "info" log.
+  void _logRequestEvent(String action, Map<String, Object?> details) {
+    if (_mediaCacheRequestInfoBudget > 0) {
+      _mediaCacheRequestInfoBudget--;
+      _logs?.info('识别媒体缓存', action, details);
+    } else {
+      _logs?.debug('识别媒体缓存', action, details);
     }
   }
 
