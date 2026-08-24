@@ -90,7 +90,9 @@ void main() {
     final transport = _FakeTransport((_, __) => throw StateError('network'));
     final worker = RecognitionMediaCacheWorker(
       source: RecognitionMediaSource(
-        uri: Uri.file(r'C:\media\clip.mp4'),
+        uri: Uri.file(
+          Platform.isWindows ? r'C:\media\clip.mp4' : '/media/clip.mp4',
+        ),
         title: 'clip.mp4',
         kind: MediaSourceKind.localFile,
       ),

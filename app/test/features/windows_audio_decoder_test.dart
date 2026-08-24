@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_video_player_next/domain/player/player_service.dart';
@@ -5,14 +7,19 @@ import 'package:ai_video_player_next/features/audio/windows_audio_decoder.dart';
 
 void main() {
   test('uses a Windows path for local media', () {
+    // Uri.file only yields a file scheme when the input matches the host
+    // path style; a backslash literal is a relative POSIX path on macOS.
+    final path = Platform.isWindows
+        ? r'C:\media\local video.mp4'
+        : '/media/local video.mp4';
     final source = MediaSource.localFile(
-      path: r'C:\media\local video.mp4',
+      path: path,
       title: 'local video.mp4',
     );
 
     expect(
       windowsAudioDecoderInputFor(source),
-      r'C:\media\local video.mp4',
+      source.uri.toFilePath(windows: true),
     );
   });
 
