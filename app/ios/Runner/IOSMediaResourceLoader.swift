@@ -188,12 +188,13 @@ final class IOSMediaResourceLoader: NSObject {
     _ record: RequestRecord, response: HTTPURLResponse
   ) {
     guard let info = record.loadingRequest.contentInformationRequest else { return }
-    info.isByteRangeSupported = true
-    info.contentType = Self.contentTypeIdentifier(from: response)
-    info.contentLength = Self.totalLength(
-      from: response,
-      rangeRequested: response.statusCode == 206
-    )
+    info.isByteRangeAccessSupported = true
+    info.contentType = contentTypeIdentifier(from: response)
+    // Leave contentLength untouched when unknown rather than guessing: a wrong
+    // length breaks tail probing or hangs the reader.
+    if let length = Self.totalLength(from: response, rangeRequested: response.statusCode == 206) {
+      info.contentLength = length
+    }
   }
 }
 
@@ -306,7 +307,7 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
         // Bounded chunks keep peak memory flat; respond copies into
         // AVFoundation immediately.
         let chunkLength = min(128 * 1024, payload.count - offset, respondCap - sent)
-        dataRequest.respond(with: payload.subdata(in: offset..<offset + chunkLength))
+        dataRequest.respond(with: Data(payload[offset..<offset + chunkLength]))
         record.respondedBytes += chunkLength
         sent += chunkLength
         offset += chunkLength
