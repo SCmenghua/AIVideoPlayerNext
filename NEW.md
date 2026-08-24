@@ -439,6 +439,33 @@ Phase 7 的实际实现已经提前交付了 Phase 8 原计划中的一部分基
 
 原定目标（留档）：接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider；不可用时可回退 `WhisperCppSpeechRecognitionService`；验收要求关闭、未授权、语言不支持或不可用时应用清晰降级且不影响本地播放器。
 
+### Phase 9.9：iOS 网络识别修复与流式实验
+
+背景：Phase 8 结项后的真机遗留 bug——播放网络视频时永久卡在"正在准备播放 / 等待前两条翻译"，诊断日志显示完整缓存完成后识别解码失败：`PlatformException(AUDIO, Cannot Open, null, null)`。
+
+#### Phase 9.9 执行记录（2026-08-24）
+
+**根因定位**：iOS 网络识别此前必须先完整下载媒体，缓存 worker 把成品命名为 `media.media`；AVFoundation 通过文件扩展名（UTI）识别本地容器，`.media` 属未知扩展名，`AVURLAsset` 加载音轨直接报 `AVFoundationErrorDomain -11828 "Cannot Open"`。Windows 不受影响，因为其回环 HTTP 代理靠 Content-Type/Range 传输字节，扩展名无关。
+
+已交付三项修复（提交 `f3c16d1`，13 文件，+719/-44）：
+
+1. **完整缓存文件改用真实容器扩展名**：下载完成后嗅探文件头魔数决定扩展名（`ftyp`→mp4/mov/m4a、EBML→webm、`FLV`、`ID3`/帧同步→mp3、`RIFF`+`WAVE`→wav、`OggS`、`fLaC`、ADTS→aac），嗅探不出时退回源 URL 扩展名（如 `34461.mp4`→`.mp4`），最终兜底 `mp4`。修复后 `AVURLAsset` 可正常打开缓存文件，识别在完整缓存完成后立即开始。
+2. **启动闸门韧性**：`evaluatePlaybackStart` 新增 `recognitionExpected`——解码器 error、识别缓存 failed、识别服务 unavailable 任一终态失败时，"等待前两条翻译"门槛自动放行（与既有"翻译服务不可用即放行"同一语义），播放不再永久卡死；启动超时对话框（10 秒）新增"跳过准备，直接播放"按钮（原先只有"继续等待"），任何未预见的启动阻塞用户都能手动脱困。HTTP 403 缓存失败与 Cannot Open 解码失败两条路径均被覆盖。
+3. **iOS 流式识别实验开关**（设置 → 播放启动策略 → "网络识别流式读取（实验）"，仅 iOS 显示，默认关）：开启后 iOS 网络识别改走 Windows 已验证的回环代理 `startProxy()`，边下边读、有界分段缓存（256MB 上限），不再先完整下载整个视频；代理路径携带容器扩展名（`/media.mp4`，仅此模式启用，Windows 保持 `/media` 不变）以最大化 AVFoundation 格式识别成功率。三层自动回退保证最坏等于现状：代理启动失败转完整缓存；AVFoundation 打不开代理源时自动改用完整缓存重开解码器（识别会话不中断）；播放中途流式读失败沿用闸门放行。诊断日志关键词：`iOS 流式识别代理已启动（实验）`、`iOS 流式识别代理启动失败，回退完整缓存`、`iOS 流式识别解码打开失败，回退完整缓存`。
+
+历史澄清：2026-08-19 的 `cef4890`（ATS 本地网络例外）→ `f497421`（iOS 改完整缓存）切换中，iOS 实际短暂使用过回环代理但失败原因未留档；本实验开关即验证代理路线在当前 AVFoundation 行为下是否成立的对照实验，若真机仍拒绝代理源，下一步方案为 `AVAssetResourceLoaderDelegate` 自定义 scheme 流式喂数据。
+
+附带发现：
+
+- 媒体交接 Referer 为广告 iframe（juicyads）地址时源站返回 403，第二次交接带真实页面 Referer 即成功——属站点行为；闸门修复后此类下载失败不再卡播放。
+- 本机 `ALL_PROXY=127.0.0.1:10808` 会劫持 flutter_tester 的本地 WebSocket 握手导致全部测试加载失败，运行测试需临时去除该变量（与既有记录一致）。
+
+自动化基线：`flutter analyze` 无问题；`flutter test --concurrency=1` 193 项全部通过（Phase 8 基线 182 项 + 本阶段新增 11 项：容器扩展名 3、代理路径 2、启动闸门策略 1、启动准备 1、iOS 流式控制器 3、设置 1）。
+
+CI：GitHub Actions macOS 构建未签名 IPA 成功，Release `ios-unsigned-v0.8.0-32`（`AI-Video-Player-Next-com.scmenghua.aivideoplayernext-unsigned.ipa`，523.62 MB，Whisper 模型 SHA-256 校验通过）——该构建在 Phase 9.9 立项前产出，仍为 `0.8.0`。立项后版本号已按 8.0 强制规则升级为 `0.9.9`（`pubspec.yaml` 与 `AppBuildInfo` 默认值同步），后续验收构建以此为准。
+
+状态：**未结项，待真机回归。** 验收要求：(1) 默认路径（开关关闭）播放网络视频，完整缓存完成后识别恢复出字幕，无 Cannot Open；(2) 打开实验开关重播同一视频，依据诊断日志判定流式代理成立（字幕边播边出）或自动回退完整缓存（体验不差于现状）；(3) 无论哪条路径，识别失败时播放不再卡死且可手动跳过。若流式代理被 AVFoundation 拒绝，凭日志转入 `AVAssetResourceLoaderDelegate` 方案再验证。
+
 ### Phase 10：视觉系统与移动端适配
 
 目标：完成功能稳定后的高品质 UI。
