@@ -12,10 +12,18 @@ import UniformTypeIdentifiers
 /// the received bytes are responded back to AVFoundation. The Dart proxy,
 /// cache, priority and diagnostics infrastructure is unchanged.
 ///
+/// Bandwidth discipline: AVFoundation routinely asks for "all data to the end
+/// of resource". Serving those reads as open-ended upstream ranges made every
+/// sequential read pin a full tail download (device logs showed a 2 MB clip
+/// pulled roughly ten times its size). Upstream fetches are therefore bounded
+/// to fixed windows and chained while the reader still wants more; superseded
+/// reads are finished promptly; the Dart proxy caches every window that passes
+/// through it, so repeated reads are served locally instead of upstream.
+///
 /// Discipline required by AVFoundation: every loading request answered with
 /// `true` here must eventually receive exactly one finishLoading call, and
 /// must never be touched again after didCancel. Both are enforced through the
-/// pending map plus the per-record `finished` flag.
+/// pending map plus the per-record `finished` flag and `isFinished` check.
 final class IOSMediaResourceLoader: NSObject {
   /// Serial queue owning all mutable state. Resource-loader and URLSession
   /// delegate callbacks are both hopped onto this queue, so no additional
@@ -26,6 +34,14 @@ final class IOSMediaResourceLoader: NSObject {
   private let targetURL: URL
   private let headers: [String: String]
 
+  /// Upstream fetch granularity. Chained windows keep a superseded or stalled
+  /// read from pinning an unbounded tail download.
+  private static let fetchWindowBytes: Int64 = 2 * 1024 * 1024
+
+  /// respond(with:) copies into AVFoundation immediately; bounded chunks keep
+  /// peak memory flat.
+  private static let respondChunkBytes = 128 * 1024
+
   /// Keyed by ObjectIdentifier of the loading request. Only accessed on queue.
   private var pending: [ObjectIdentifier: RequestRecord] = [:]
 
@@ -35,21 +51,31 @@ final class IOSMediaResourceLoader: NSObject {
     }
 
     let loadingRequest: AVAssetResourceLoadingRequest
+    /// Exclusive end of the byte range this loading request wants; nil means
+    /// "all data to the end of the resource".
+    var windowEndExclusive: Int64?
     var dataTask: URLSessionDataTask?
     var statusCode = 0
-    /// Bytes dropped from the head of a 200 response so far (the upstream
-    /// ignored our Range header).
-    var skippedBytes = 0
-    /// Offset this fetch must resume from when the upstream answers with an
-    /// undifferentiated 200 instead of honoring Range.
+    /// Absolute offset the in-flight fetch must resume from when the upstream
+    /// answers with an undifferentiated 200 instead of honoring Range.
     var requestSkipTo: Int64 = 0
-    var respondedBytes = 0
+    /// Bytes dropped from the head of a 200 response so far.
+    var skippedBytes = 0
+    /// Offset the in-flight upstream fetch started at.
+    var fetchStart: Int64 = 0
+    /// Media bytes received within the in-flight fetch, excluding any skipped
+    /// 200-prefix. Chaining resumes from fetchStart + mediaReceived.
+    var mediaReceived: Int64 = 0
     var finished = false
 
+    /// AVFoundation may have cancelled this request before our queued block
+    /// runs; finishing a cancelled request crashes, so defer to isFinished.
     func finish(with error: NSError? = nil) {
-      guard !finished else { return }
+      guard !finished, !loadingRequest.isFinished else {
+        finished = true
+        return
+      }
       finished = true
-      dataTask?.cancel()
       if let error {
         loadingRequest.finishLoading(with: error)
       } else {
@@ -66,7 +92,7 @@ final class IOSMediaResourceLoader: NSObject {
     // Idle timeout between received bytes; also covers connect + TTFB. The
     // loopback hop itself is sub-100 ms, the bottleneck is the upstream site.
     configuration.timeoutIntervalForRequest = 15
-    // Hard cap for one fetch's total lifetime.
+    // Hard cap for one fetch window's lifetime.
     configuration.timeoutIntervalForResource = 120
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     session = URLSession(
@@ -95,36 +121,124 @@ final class IOSMediaResourceLoader: NSObject {
             userInfo: [NSLocalizedDescriptionKey: "解码器已停止，流式读取已取消"]
           )
         )
+        record.dataTask?.cancel()
       }
       self.session.invalidateAndCancel()
     }
   }
 
+  // MARK: - Fetch plumbing
+
   private func record(for task: URLSessionTask) -> RequestRecord? {
     pending.values.first { $0.dataTask === task }
   }
 
-  /// Continuation reads must resume from currentOffset, not requestedOffset:
-  /// responding advances currentOffset within one loading request.
-  private static func rangeHeader(for data: AVAssetResourceLoadingDataRequest) -> String {
-    let offset = data.currentOffset
-    if data.requestsAllDataToEndOfResource {
-      return "bytes=\(offset)-"
-    }
-    let end = data.requestedOffset + Int64(data.requestedLength) - 1
-    return "bytes=\(offset)-\(max(offset, end))"
+  private func remove(_ record: RequestRecord) {
+    pending.removeValue(forKey: ObjectIdentifier(record.loadingRequest))
   }
 
-  private func startFetch(_ record: RequestRecord, range: String) {
+  private func finishAndRemove(
+    _ record: RequestRecord, error: NSError? = nil, cancelTask: Bool = true
+  ) {
+    record.finish(with: error)
+    remove(record)
+    if cancelTask {
+      record.dataTask?.cancel()
+    }
+    record.dataTask = nil
+  }
+
+  private func upstreamRequest(range: String) -> URLRequest {
     var request = URLRequest(url: targetURL)
     request.httpMethod = "GET"
     request.setValue(range, forHTTPHeaderField: "Range")
     for (name, value) in headers {
       request.setValue(value, forHTTPHeaderField: name)
     }
-    let task = session.dataTask(with: request)
+    return request
+  }
+
+  /// Starts one bounded upstream window beginning at `offset`.
+  private func beginFetch(_ record: RequestRecord, from offset: Int64) {
+    record.fetchStart = offset
+    record.mediaReceived = 0
+    record.skippedBytes = 0
+    record.requestSkipTo = offset
+    let endInclusive: Int64
+    if let windowEnd = record.windowEndExclusive {
+      endInclusive = min(windowEnd - 1, offset + Self.fetchWindowBytes - 1)
+    } else {
+      endInclusive = offset + Self.fetchWindowBytes - 1
+    }
+    let task = session.dataTask(
+      with: upstreamRequest(range: "bytes=\(offset)-\(endInclusive)"))
     record.dataTask = task
     task.resume()
+  }
+
+  /// Metadata-only probes fetch exactly two bytes: the Content-Range tail
+  /// carries the total length, and the tiny response still warms the Dart
+  /// proxy's container-head cache. HEAD is avoided because it never writes
+  /// the proxy cache.
+  private func beginProbe(_ record: RequestRecord) {
+    record.fetchStart = 0
+    record.mediaReceived = 0
+    record.skippedBytes = 0
+    record.requestSkipTo = 0
+    let task = session.dataTask(with: upstreamRequest(range: "bytes=0-0"))
+    record.dataTask = task
+    task.resume()
+  }
+
+  /// Chains the next window after a fully received one, or finishes the
+  /// record when the media really ended.
+  private func advanceAfterCompletedFetch(_ record: RequestRecord) {
+    guard let dataRequest = record.loadingRequest.dataRequest else {
+      finishAndRemove(record)
+      return
+    }
+    let plannedEnd: Int64
+    if let windowEnd = record.windowEndExclusive {
+      plannedEnd = min(windowEnd - 1, record.fetchStart + Self.fetchWindowBytes - 1)
+    } else {
+      plannedEnd = record.fetchStart + Self.fetchWindowBytes - 1
+    }
+    let expected = plannedEnd - record.fetchStart + 1
+    if record.mediaReceived < expected {
+      // Upstream ended before the planned window: this is the end of media.
+      finishAndRemove(record)
+      return
+    }
+    if let windowEnd = record.windowEndExclusive,
+      dataRequest.currentOffset >= windowEnd {
+      finishAndRemove(record)
+      return
+    }
+    beginFetch(record, from: record.fetchStart + record.mediaReceived)
+  }
+
+  /// Finishes reads that the newest read head has provably moved past.
+  ///
+  /// Bounded windows ending at/below the new offset are done by definition.
+  /// Older open-ended crawlers starting at/below the new offset are redundant:
+  /// the newest request reflects AVFoundation's current position, and the
+  /// bytes they would still deliver were already streamed through (and cached
+  /// by) the Dart proxy. Leaving them running multiplied upstream traffic.
+  private func supersedeStaleRecords(newOffset: Int64, keep: RequestRecord) {
+    for (key, other) in pending where other !== keep && !other.finished {
+      let stale: Bool
+      if let windowEnd = other.windowEndExclusive {
+        stale = windowEnd <= newOffset
+      } else {
+        stale = other.fetchStart <= newOffset
+      }
+      if stale {
+        remove(other)
+        other.finish()
+        other.dataTask?.cancel()
+        other.dataTask = nil
+      }
+    }
   }
 
   /// Wraps an upstream error with its domain/code chain so the Dart log shows
@@ -151,8 +265,8 @@ final class IOSMediaResourceLoader: NSObject {
   }
 
   /// Parses the total length out of a Content-Range tail (`bytes x-y/total`),
-  /// falling back to Content-Length only when it can only be valid. Never
-  /// guesses: a wrong length breaks tail probing or hangs the reader.
+  /// falling back to Content-Length only for a plain 200. Never guesses: a
+  /// wrong length breaks tail probing or hangs the reader.
   private static func totalLength(from response: HTTPURLResponse, rangeRequested: Bool) -> Int64? {
     if let contentRange = response.value(forHTTPHeaderField: "Content-Range") {
       let slash = contentRange.lastIndex(of: "/")
@@ -204,22 +318,19 @@ extension IOSMediaResourceLoader: AVAssetResourceLoaderDelegate {
     shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
   ) -> Bool {
     let record = RequestRecord(loadingRequest: loadingRequest)
-    pending[ObjectIdentifier(loadingRequest)] = record
 
     if let data = loadingRequest.dataRequest {
-      // Where the body must resume if the upstream answers with an
-      // undifferentiated 200 instead of honoring Range.
-      record.requestSkipTo = data.currentOffset
-      startFetch(record, range: Self.rangeHeader(for: data))
+      record.windowEndExclusive = data.requestsAllDataToEndOfResource
+        ? nil : data.requestedOffset + Int64(data.requestedLength)
+      pending[ObjectIdentifier(loadingRequest)] = record
+      supersedeStaleRecords(newOffset: data.currentOffset, keep: record)
+      beginFetch(record, from: data.currentOffset)
     } else if loadingRequest.contentInformationRequest != nil {
-      // Metadata-only probing. Use GET bytes=0-0 instead of HEAD: the ranged
-      // response carries the total length in Content-Range and lets the Dart
-      // proxy warm/caches the container head, which HEAD never writes.
-      startFetch(record, range: "bytes=0-0")
+      pending[ObjectIdentifier(loadingRequest)] = record
+      beginProbe(record)
     } else {
       // Nothing answerable; do not strand AVFoundation waiting.
       record.finish()
-      pending.removeValue(forKey: ObjectIdentifier(loadingRequest))
     }
     return true
   }
@@ -234,6 +345,7 @@ extension IOSMediaResourceLoader: AVAssetResourceLoaderDelegate {
         let record = self.pending.removeValue(forKey: ObjectIdentifier(loadingRequest))
       else { return }
       record.dataTask?.cancel()
+      record.dataTask = nil
       // loadingRequest belongs to AVFoundation now; never touch it again.
     }
   }
@@ -252,13 +364,12 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
       }
       guard let http = response as? HTTPURLResponse else {
         completionHandler(.cancel)
-        record.finish(
-          with: NSError(
+        finishAndRemove(
+          record,
+          error: NSError(
             domain: "AIVPMediaResourceLoader", code: -1,
             userInfo: [NSLocalizedDescriptionKey: "流式代理响应不是 HTTP 响应"]
-          )
-        )
-        pending.removeValue(forKey: ObjectIdentifier(record.loadingRequest))
+          ))
         return
       }
       record.statusCode = http.statusCode
@@ -266,8 +377,7 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
       if record.loadingRequest.dataRequest == nil {
         // Metadata-only request satisfied by the response headers.
         completionHandler(.cancel)
-        record.finish()
-        pending.removeValue(forKey: ObjectIdentifier(record.loadingRequest))
+        finishAndRemove(record)
         return
       }
       completionHandler(.allow)
@@ -287,30 +397,26 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
           record.skippedBytes += payload.count
           return
         }
-        payload = Array(payload.dropFirst(need))
-        record.skippedBytes = Int(record.requestSkipTo)
+        payload.removeFirst(need)
+        record.skippedBytes += need
       }
+      record.mediaReceived += Int64(payload.count)
       var sent = 0
-      var offset = 0
-      // Cap the response at requestedLength: responding beyond it raises an
-      // NSInvalidArgumentException inside AVFoundation.
-      let respondCap: Int =
-        dataRequest.requestsAllDataToEndOfResource
-        ? Int.max
-        : max(
-          0,
-          Int(
-            dataRequest.requestedOffset + Int64(dataRequest.requestedLength)
-            - dataRequest.currentOffset)
-        )
-      while offset < payload.count && sent < respondCap {
-        // Bounded chunks keep peak memory flat; respond copies into
-        // AVFoundation immediately.
-        let chunkLength = min(128 * 1024, payload.count - offset, respondCap - sent)
-        dataRequest.respond(with: Data(payload[offset..<offset + chunkLength]))
-        record.respondedBytes += chunkLength
+      while sent < payload.count {
+        var remaining = Int64.max
+        if let windowEnd = record.windowEndExclusive {
+          remaining = windowEnd - dataRequest.currentOffset
+        }
+        if remaining <= 0 { break }
+        let chunkLength = min(Self.respondChunkBytes, payload.count - sent, Int(remaining))
+        dataRequest.respond(with: Data(payload[sent..<sent + chunkLength]))
         sent += chunkLength
-        offset += chunkLength
+      }
+      if let windowEnd = record.windowEndExclusive,
+        dataRequest.currentOffset >= windowEnd {
+        // The reader has everything this loading request asked for; stop the
+        // upstream window instead of draining it to EOF.
+        finishAndRemove(record)
       }
     }
   }
@@ -318,14 +424,11 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     queue.async { [weak self] in
       guard let self, let record = self.record(for: task) else { return }
-      defer { pending.removeValue(forKey: ObjectIdentifier(record.loadingRequest)) }
       if let error {
-        record.finish(with: Self.enrichedError(error))
+        finishAndRemove(record, error: Self.enrichedError(error))
         return
       }
-      // Normal EOF. A short body is acceptable: AVFoundation issues follow-up
-      // requests or treats the position as the media end on its own.
-      record.finish()
+      advanceAfterCompletedFetch(record)
     }
   }
 }
