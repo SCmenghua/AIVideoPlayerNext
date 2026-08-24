@@ -98,10 +98,22 @@ PlaybackStartDecision evaluatePlaybackStart({
 /// Playback priorities apply to the running media clock, rather than to the
 /// automatic start decision above. The player supplies availability at the
 /// current media position, so missing future results cannot be skipped.
+///
+/// Subtitle/translation priority may pause the media while the pipeline is
+/// catching up, but only for a bounded grace period. Speech gaps (silence,
+/// credits, music) never produce subtitles, so an indefinite wait would
+/// freeze the player: after [maxWait] playback resumes, extended once to
+/// [maxWait * 2] while recognition is still visibly advancing (a live
+/// pipeline is likely about to deliver the line). The gate re-engages
+/// normally as soon as content is available again at the position.
 PlaybackContentDecision evaluatePlaybackContent({
   required PlaybackStartStrategy strategy,
   required bool subtitleReadyAtPosition,
   required bool translationReadyAtPosition,
+  bool recognitionProgressing = true,
+  Duration waited = Duration.zero,
+  Duration maxWait = const Duration(seconds: 8),
+  bool suppressWait = false,
 }) {
   if (strategy == PlaybackStartStrategy.playbackPriority) {
     return const PlaybackContentDecision(
@@ -109,24 +121,38 @@ PlaybackContentDecision evaluatePlaybackContent({
       reason: '播放优先，不等待字幕或翻译。',
     );
   }
+  final hardLimit = recognitionProgressing ? maxWait * 2 : maxWait;
+  final String waitingReason;
+  PlaybackContentWaitingFor? waitingFor;
   if (strategy == PlaybackStartStrategy.subtitlePriority &&
       !subtitleReadyAtPosition) {
-    return const PlaybackContentDecision(
-      canContinue: false,
-      reason: '等待字幕返回中。',
-      waitingFor: PlaybackContentWaitingFor.subtitle,
-    );
-  }
-  if (strategy == PlaybackStartStrategy.translationPriority &&
+    waitingReason = '等待字幕返回中。';
+    waitingFor = PlaybackContentWaitingFor.subtitle;
+  } else if (strategy == PlaybackStartStrategy.translationPriority &&
       !translationReadyAtPosition) {
+    waitingReason = '等待翻译返回中。';
+    waitingFor = PlaybackContentWaitingFor.translation;
+  } else {
     return const PlaybackContentDecision(
-      canContinue: false,
-      reason: '等待翻译返回中。',
-      waitingFor: PlaybackContentWaitingFor.translation,
+      canContinue: true,
+      reason: '当前字幕内容已返回。',
     );
   }
-  return const PlaybackContentDecision(
+  if (suppressWait) {
+    return const PlaybackContentDecision(
+      canContinue: true,
+      reason: '当前字幕内容已返回。',
+    );
+  }
+  if (waited < hardLimit) {
+    return PlaybackContentDecision(
+      canContinue: false,
+      reason: waitingReason,
+      waitingFor: waitingFor,
+    );
+  }
+  return PlaybackContentDecision(
     canContinue: true,
-    reason: '当前字幕内容已返回。',
+    reason: '$waitingReason 已超过 ${hardLimit.inSeconds} 秒，继续播放以避免卡住。',
   );
 }

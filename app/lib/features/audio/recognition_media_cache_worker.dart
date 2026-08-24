@@ -227,6 +227,16 @@ class RecognitionMediaCacheWorker {
   bool _disposed = false;
   int _priorityEpoch = 0;
   int _nextRequestId = 0;
+
+  /// Shared keep-alive upstream client. Per-request HttpClient instances paid
+  /// a full TCP+TLS handshake for every decoder range (measured TTFB 2.5-4 s
+  /// on real sites); reusing one connection pool removes that cost from all
+  /// but the first request of a session.
+  HttpClient? _sharedUpstreamClient;
+  HttpClient get _upstreamClient =>
+      _sharedUpstreamClient ??= HttpClient()
+        ..maxConnectionsPerHost = 4
+        ..idleTimeout = const Duration(seconds: 30);
   final Map<int, _ActiveProxyRequest> _activeProxyRequests = {};
   final Map<int, _ActiveProxyRequest> _warmupRequests = {};
   Future<void> _cacheWrites = Future<void>.value();
@@ -398,6 +408,10 @@ class RecognitionMediaCacheWorker {
       request.cancel('worker_cancelled');
     }
     await _transport.close();
+    // The shared pool outlives individual requests; it is torn down with the
+    // session that owns it.
+    _sharedUpstreamClient?.close(force: true);
+    _sharedUpstreamClient = null;
     _state = RecognitionMediaCacheState.cancelled;
     _emit();
   }
@@ -744,7 +758,7 @@ class RecognitionMediaCacheWorker {
     } finally {
       if (active != null) {
         _activeProxyRequests.remove(active.id);
-        active.dispose();
+        // The shared upstream pool is worker-owned; nothing to close per request.
       }
     }
   }
@@ -760,13 +774,21 @@ class RecognitionMediaCacheWorker {
       // falling back to Media Foundation's direct network reader.
       throw StateError('识别媒体代理需要 IO HTTP transport。');
     }
-    final upstream = await active.client.openUrl(method, source.uri);
+    final upstream = await _upstreamClient.openUrl(method, source.uri);
     source.requestHeaders
         .forEach((name, value) => upstream.headers.set(name, value));
     if (range != null && range.isNotEmpty) {
       upstream.headers.set(HttpHeaders.rangeHeader, range);
     }
+    // Remember the in-flight request so a superseded decoder position can
+    // abort its socket promptly instead of draining the old response.
+    active.upstreamRequest = upstream;
     final origin = await upstream.close();
+    active.upstreamResponse = origin;
+    if (active.cancelled) {
+      upstream.abort();
+      throw StateError('识别媒体上游请求已被取消。');
+    }
     final headers = <String, String>{};
     origin.headers.forEach((name, values) {
       headers[name.toLowerCase()] = values.join(',');
@@ -1059,7 +1081,6 @@ class RecognitionMediaCacheWorker {
         _completeWarmup(tail);
       } finally {
         _warmupRequests.remove(tail.id);
-        tail.dispose();
       }
     } on Object catch (error) {
       if (!(head?.cancelled ?? false) && !_cancelled) {
@@ -1070,7 +1091,6 @@ class RecognitionMediaCacheWorker {
       if (head != null) {
         if (!headCompleted) _completeWarmup(head);
         _warmupRequests.remove(head.id);
-        head.dispose();
       }
     }
   }
@@ -1256,7 +1276,8 @@ class _ActiveProxyRequest {
   final int priorityEpoch;
   final String requestRole;
   final DateTime startedAt;
-  final HttpClient client = HttpClient();
+  HttpClientRequest? upstreamRequest;
+  HttpClientResponse? upstreamResponse;
   bool cancelled = false;
   String? cancelReason;
   bool hasFirstByte = false;
@@ -1277,14 +1298,15 @@ class _ActiveProxyRequest {
     return seconds <= 0 ? null : bytesTransferred / seconds;
   }
 
+  /// Marks the logical request cancelled and aborts its in-flight socket so
+  /// a superseded position stops consuming bandwidth. The shared pool is
+  /// worker-owned; aborting one request's socket only recycles that socket.
   void cancel(String reason) {
     if (cancelled) return;
     cancelled = true;
     cancelReason = reason;
-    client.close(force: true);
+    upstreamRequest?.abort();
   }
-
-  void dispose() => client.close(force: true);
 }
 
 class _CachedProxyRange {

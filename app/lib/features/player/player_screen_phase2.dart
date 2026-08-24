@@ -172,6 +172,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       ref.read(recognitionControllerProvider).prepareForMediaOpen();
       await _recognitionResults.clear();
       _policyPaused = false;
+      _contentWaitStartedAt = null;
+      _contentGateSuppressed = false;
       final startupStarted = _beginStartup(source);
       await ref.read(playerServiceProvider).open(source);
       _evaluateStartup();
@@ -193,6 +195,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _seekTo(Duration position) {
     final target = _boundedSeekPosition(position);
     _translationQueue.prioritizeFrom(target);
+    // A seek moves the content gate to a new position; the bounded wait must
+    // restart from zero rather than inherit the old wait.
+    _contentWaitStartedAt = null;
     return ref.read(recognitionControllerProvider).seek(target);
   }
 
@@ -245,6 +250,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       ref.read(recognitionControllerProvider).prepareForMediaOpen();
       await _recognitionResults.clear();
       _policyPaused = false;
+      _contentWaitStartedAt = null;
+      _contentGateSuppressed = false;
       final source = handoff.toMediaSource();
       final startupStarted = _beginStartup(source);
       await player.open(source);
@@ -364,7 +371,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
+  /// Wall-clock time the current content gap began. Owned by
+  /// [_playbackContentDecision]: it starts when content first goes missing at
+  /// the position and clears only when content is available again (or on
+  /// seek), so the bounded wait cannot flicker between pause and resume.
+  DateTime? _contentWaitStartedAt;
+
+  /// Set when the user explicitly resumes during an unsatisfied content
+  /// gate. Suppresses the gate until content catches up; the user's intent
+  /// outranks the automatic wait.
+  bool _contentGateSuppressed = false;
+
+  /// Whether recognition is visibly advancing: its processed cursor moved
+  /// within the last two seconds. A stalled pipeline gets the short grace
+  /// period; an active one may use the extended one.
+  /// Whether recognition is visibly advancing: its processed cursor moved
+  /// within the last two seconds. A stalled pipeline gets the short grace
+  /// period; an active one may use the extended one.
+  bool _recognitionProgressing() {
+    final processedAt = _recognitionProcessedAt;
+    if (processedAt == null) return false;
+    return widget.now().difference(processedAt) <= const Duration(seconds: 2);
+  }
+
+  DateTime? _recognitionProcessedAt;
+  Duration? _lastProcessedThrough;
+
   PlaybackContentDecision _playbackContentDecision() {
+    // Track whether the recognition cursor has advanced so the bounded wait
+    // knows whether the pipeline is alive.
+    final processedThrough = _recognitionDiagnostics.processedThrough;
+    if (processedThrough != _lastProcessedThrough) {
+      _lastProcessedThrough = processedThrough;
+      _recognitionProcessedAt = widget.now();
+    }
     final document = _recognitionResults.document;
     final position = _snapshot.position;
     final nextSegment = document?.orderedSegments
@@ -376,10 +416,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final translationReady = !_translationQueue.serviceStatus.available ||
         (nextSegment != null &&
             _translationResolved(document!, nextSegment));
+    final strategy = _settings.playbackStartStrategy;
+    final contentMissing =
+        (strategy == PlaybackStartStrategy.subtitlePriority &&
+                !subtitleReady) ||
+            (strategy == PlaybackStartStrategy.translationPriority &&
+                !translationReady);
+    if (!contentMissing) {
+      _contentWaitStartedAt = null;
+      _contentGateSuppressed = false;
+    } else {
+      _contentWaitStartedAt ??= widget.now();
+    }
     return evaluatePlaybackContent(
-      strategy: _settings.playbackStartStrategy,
+      strategy: strategy,
       subtitleReadyAtPosition: subtitleReady,
       translationReadyAtPosition: translationReady,
+      recognitionProgressing: _recognitionProgressing(),
+      waited: _contentWaitStartedAt == null
+          ? Duration.zero
+          : widget.now().difference(_contentWaitStartedAt!),
+      suppressWait: _contentGateSuppressed,
     );
   }
 
@@ -580,18 +637,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (_policyPaused) {
       final decision = _playbackContentDecision();
       if (!decision.canContinue) {
-        ref.read(diagnosticsLogProvider).info('播放器', '播放中等待条件尚未满足', {
+        // The user explicitly pressed play during a content wait. Honor the
+        // request and suppress the gate until content catches up, instead of
+        // trapping them in a paused player.
+        _contentGateSuppressed = true;
+        ref.read(diagnosticsLogProvider).info('播放器', '用户在等待字幕期间手动恢复播放', {
           '原因': decision.reason,
+          '已等待': _contentWaitStartedAt == null
+              ? Duration.zero
+              : widget.now().difference(_contentWaitStartedAt!),
         });
-        return;
       }
     }
+    // Either the gate has opened or the user explicitly overrode a long wait.
     _policyPaused = false;
     await ref.read(playerServiceProvider).play();
   }
 
   Future<void> _userPause() async {
     _policyPaused = false;
+    // An explicit user pause is a deliberate stop; the content gate restarts
+    // its wait clock from scratch on the next gap.
+    _contentWaitStartedAt = null;
     await ref.read(playerServiceProvider).pause();
   }
 
@@ -1043,6 +1110,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Widget _playbackWaitPanel() {
     final decision = _playbackContentDecision();
+    final waited = _contentWaitStartedAt == null
+        ? Duration.zero
+        : widget.now().difference(_contentWaitStartedAt!);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -1056,7 +1126,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '播放中: ${decision.reason}',
+              '播放中: ${decision.reason}（已等待 ${waited.inSeconds} 秒）',
               style: const TextStyle(color: Color(0xFFFFD166)),
             ),
           ),

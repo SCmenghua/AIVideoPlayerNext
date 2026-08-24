@@ -179,4 +179,86 @@ void main() {
     expect(decision.canContinue, isTrue);
     expect(decision.waitingFor, isNull);
   });
+
+  test('bounded wait pauses within the grace period even without progress', () {
+    final decision = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.subtitlePriority,
+      subtitleReadyAtPosition: false,
+      translationReadyAtPosition: false,
+      recognitionProgressing: false,
+      waited: const Duration(seconds: 3),
+    );
+
+    expect(decision.canContinue, isFalse);
+    expect(decision.waitingFor, PlaybackContentWaitingFor.subtitle);
+  });
+
+  test(
+      'stalled recognition releases the pause once the short grace expires',
+      () {
+    final decision = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.subtitlePriority,
+      subtitleReadyAtPosition: false,
+      translationReadyAtPosition: false,
+      recognitionProgressing: false,
+      waited: const Duration(seconds: 9),
+    );
+
+    expect(decision.canContinue, isTrue);
+    expect(decision.waitingFor, isNull);
+  });
+
+  test(
+      'progressing recognition extends the grace before releasing the pause',
+      () {
+    final stillWaiting = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.subtitlePriority,
+      subtitleReadyAtPosition: false,
+      translationReadyAtPosition: false,
+      recognitionProgressing: true,
+      waited: const Duration(seconds: 12),
+    );
+    expect(stillWaiting.canContinue, isFalse);
+
+    final released = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.subtitlePriority,
+      subtitleReadyAtPosition: false,
+      translationReadyAtPosition: false,
+      recognitionProgressing: true,
+      waited: const Duration(seconds: 17),
+    );
+    expect(released.canContinue, isTrue);
+  });
+
+  test('translation priority obeys the same bounded wait', () {
+    final waiting = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.translationPriority,
+      subtitleReadyAtPosition: true,
+      translationReadyAtPosition: false,
+      recognitionProgressing: false,
+      waited: const Duration(seconds: 2),
+    );
+    expect(waiting.canContinue, isFalse);
+    expect(waiting.reason, '等待翻译返回中。');
+
+    final released = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.translationPriority,
+      subtitleReadyAtPosition: true,
+      translationReadyAtPosition: false,
+      recognitionProgressing: false,
+      waited: const Duration(seconds: 10),
+    );
+    expect(released.canContinue, isTrue);
+  });
+
+  test('suppressed gate keeps playing until content returns', () {
+    final decision = evaluatePlaybackContent(
+      strategy: PlaybackStartStrategy.subtitlePriority,
+      subtitleReadyAtPosition: false,
+      translationReadyAtPosition: false,
+      suppressWait: true,
+    );
+
+    expect(decision.canContinue, isTrue);
+  });
 }

@@ -269,7 +269,12 @@ void main() {
     }
 
     expect(find.text('正在准备播放'), findsNothing);
-    expect(find.text('播放中: 等待翻译返回中。'), findsOneWidget);
+    // The bounded wait panel now appends the elapsed seconds, so match a
+    // prefix instead of the whole string.
+    expect(
+      find.textContaining('播放中: 等待翻译返回中。'),
+      findsOneWidget,
+    );
     expect(find.byTooltip('开始播放'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
@@ -301,7 +306,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('正在准备播放'), findsNothing);
-    expect(find.text('播放中: 等待翻译返回中。'), findsOneWidget);
+    expect(
+      find.textContaining('播放中: 等待翻译返回中。'),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(const SizedBox());
   });

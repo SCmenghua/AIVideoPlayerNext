@@ -66,6 +66,25 @@ final class IOSMediaResourceLoader: NSObject {
     /// Media bytes received within the in-flight fetch, excluding any skipped
     /// 200-prefix. Chaining resumes from fetchStart + mediaReceived.
     var mediaReceived: Int64 = 0
+    /// The next-window fetch started early while this one is still streaming,
+    /// so its TTFB overlaps this window's transfer instead of serializing
+    /// behind it. Guarded against double-start.
+    var prefetchStarted = false
+    /// The in-flight next-window task, if prefetch has fired.
+    var prefetchTask: URLSessionDataTask?
+    /// Bytes already received from the prefetch window, replayed to the
+    /// reader once the main window completes and the prefetch is adopted.
+    var prefetchBuffer: [UInt8] = []
+    /// The prefetch response is a 206 whose bytes provably start at
+    /// `prefetchStart`; cleared by any prefetch failure or cancellation.
+    /// Completion alone does not clear it: the prefetch may finish before
+    /// the main window, and its buffer must survive until adoption.
+    var prefetchUsable = false
+    /// Absolute offset the prefetch window starts at.
+    var prefetchStart: Int64 = 0
+    /// Bytes received within the currently streaming fetch (main or
+    /// prefetch-drain), used to time the half-window prefetch trigger.
+    var receivedThisFetch = 0
     var finished = false
 
     /// AVFoundation may have cancelled this request before our queued block
@@ -130,7 +149,7 @@ final class IOSMediaResourceLoader: NSObject {
   // MARK: - Fetch plumbing
 
   private func record(for task: URLSessionTask) -> RequestRecord? {
-    pending.values.first { $0.dataTask === task }
+    pending.values.first { $0.dataTask === task || $0.prefetchTask === task }
   }
 
   private func remove(_ record: RequestRecord) {
@@ -144,8 +163,10 @@ final class IOSMediaResourceLoader: NSObject {
     remove(record)
     if cancelTask {
       record.dataTask?.cancel()
+      record.prefetchTask?.cancel()
     }
     record.dataTask = nil
+    record.prefetchTask = nil
   }
 
   private func upstreamRequest(range: String) -> URLRequest {
@@ -164,6 +185,7 @@ final class IOSMediaResourceLoader: NSObject {
     record.mediaReceived = 0
     record.skippedBytes = 0
     record.requestSkipTo = offset
+    record.receivedThisFetch = 0
     let endInclusive: Int64
     if let windowEnd = record.windowEndExclusive {
       endInclusive = min(windowEnd - 1, offset + Self.fetchWindowBytes - 1)
@@ -174,6 +196,43 @@ final class IOSMediaResourceLoader: NSObject {
       with: upstreamRequest(range: "bytes=\(offset)-\(endInclusive)"))
     record.dataTask = task
     task.resume()
+  }
+
+  /// Starts the next window while the current one is still streaming.
+  ///
+  /// Serial chaining paid the full upstream TTFB (2.5-4 s measured on real
+  /// sites) between every 2 MB window. Issuing the next window once the
+  /// current one has delivered half its bytes hides that latency behind the
+  /// ongoing transfer: by the time the main window finishes, the next one is
+  /// already streaming through — and being cached by — the Dart proxy, so
+  /// chaining adopts it instead of paying a fresh TTFB.
+  private func maybeBeginPrefetch(_ record: RequestRecord) {
+    guard !record.prefetchStarted, record.prefetchTask == nil,
+      let task = record.dataTask else { return }
+    // Only overlap while the current fetch is actually streaming; a finished
+    // or failed task chains through advanceAfterCompletedFetch instead.
+    guard task.state == .running else { return }
+    if let windowEnd = record.windowEndExclusive,
+      record.fetchStart + Self.fetchWindowBytes >= windowEnd {
+      return
+    }
+    let plannedEnd: Int64
+    if let windowEnd = record.windowEndExclusive {
+      plannedEnd = min(windowEnd - 1, record.fetchStart + Self.fetchWindowBytes - 1)
+    } else {
+      plannedEnd = record.fetchStart + Self.fetchWindowBytes - 1
+    }
+    let received = Int64(record.receivedThisFetch)
+    let expected = plannedEnd - record.fetchStart + 1
+    guard received * 2 >= expected else { return }
+    record.prefetchStarted = true
+    let nextOffset = record.fetchStart + Self.fetchWindowBytes
+    record.prefetchStart = nextOffset
+    record.prefetchUsable = false
+    let prefetchTask = session.dataTask(
+      with: upstreamRequest(range: "bytes=\(nextOffset)-\(nextOffset + Self.fetchWindowBytes - 1)"))
+    record.prefetchTask = prefetchTask
+    prefetchTask.resume()
   }
 
   /// Metadata-only probes fetch exactly two bytes: the Content-Range tail
@@ -214,7 +273,61 @@ final class IOSMediaResourceLoader: NSObject {
       finishAndRemove(record)
       return
     }
-    beginFetch(record, from: record.fetchStart + record.mediaReceived)
+    let nextOffset = record.fetchStart + record.mediaReceived
+    if record.prefetchUsable, nextOffset == record.prefetchStart {
+      // Adopt the prefetched window as the new main window: its TTFB was
+      // paid during the previous transfer, so chaining is latency-free.
+      // Buffered bytes are replayed to the reader first; any still-in-flight
+      // prefetch task becomes the main data task.
+      record.dataTask?.cancel()
+      record.dataTask = record.prefetchTask
+      record.prefetchTask = nil
+      record.fetchStart = nextOffset
+      record.skippedBytes = 0
+      record.requestSkipTo = nextOffset
+      record.statusCode = 206
+      record.receivedThisFetch = 0
+      record.prefetchStarted = false
+      record.prefetchUsable = false
+      let buffered = record.prefetchBuffer
+      record.prefetchBuffer = []
+      record.mediaReceived = Int64(buffered.count)
+      if !buffered.isEmpty {
+        var sent = 0
+        while sent < buffered.count {
+          var remaining = Int64.max
+          if let windowEnd = record.windowEndExclusive {
+            remaining = windowEnd - dataRequest.currentOffset
+          }
+          if remaining <= 0 { break }
+          let chunkLength = min(
+            Self.respondChunkBytes, buffered.count - sent, Int(remaining))
+          dataRequest.respond(with: Data(buffered[sent..<sent + chunkLength]))
+          sent += chunkLength
+        }
+        maybeBeginPrefetch(record)
+        if let windowEnd = record.windowEndExclusive,
+          dataRequest.currentOffset >= windowEnd {
+          finishAndRemove(record)
+          return
+        }
+      }
+      if record.dataTask == nil {
+        // The adopted prefetch had already completed before the main window,
+        // so no completion callback will fire for this window; drive the
+        // chain forward right now (bounded by media length).
+        advanceAfterCompletedFetch(record)
+      }
+      return
+    }
+    // Adoption did not apply (no usable prefetch or offset mismatch): drop
+    // the leftover prefetch so the fresh fetch does not race a duplicate of
+    // the same range.
+    record.prefetchTask?.cancel()
+    record.prefetchTask = nil
+    record.prefetchBuffer = []
+    record.prefetchUsable = false
+    beginFetch(record, from: nextOffset)
   }
 
   /// Finishes reads that the newest read head has provably moved past.
@@ -236,7 +349,9 @@ final class IOSMediaResourceLoader: NSObject {
         remove(other)
         other.finish()
         other.dataTask?.cancel()
+        other.prefetchTask?.cancel()
         other.dataTask = nil
+        other.prefetchTask = nil
       }
     }
   }
@@ -345,7 +460,9 @@ extension IOSMediaResourceLoader: AVAssetResourceLoaderDelegate {
         let record = self.pending.removeValue(forKey: ObjectIdentifier(loadingRequest))
       else { return }
       record.dataTask?.cancel()
+      record.prefetchTask?.cancel()
       record.dataTask = nil
+      record.prefetchTask = nil
       // loadingRequest belongs to AVFoundation now; never touch it again.
     }
   }
@@ -360,6 +477,18 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
     queue.async { [weak self] in
       guard let self, let record = self.record(for: dataTask), !record.finished else {
         completionHandler(.cancel)
+        return
+      }
+      if dataTask === record.prefetchTask {
+        // A prefetch failure must not tear down the live loading request.
+        guard let http = response as? HTTPURLResponse else {
+          completionHandler(.cancel)
+          record.prefetchUsable = false
+          record.prefetchBuffer = []
+          return
+        }
+        record.prefetchUsable = http.statusCode == 206
+        completionHandler(.allow)
         return
       }
       guard let http = response as? HTTPURLResponse else {
@@ -387,6 +516,12 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     queue.async { [weak self] in
       guard let self, let record = self.record(for: dataTask), !record.finished else { return }
+      if dataTask === record.prefetchTask {
+        // Buffer the prefetch window; it is replayed to the reader when the
+        // main window completes and the prefetch is adopted as the next one.
+        record.prefetchBuffer.append(contentsOf: data)
+        return
+      }
       guard let dataRequest = record.loadingRequest.dataRequest else { return }
       var payload = Array(data)
       if record.statusCode == 200 && record.skippedBytes < record.requestSkipTo {
@@ -401,6 +536,7 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
         record.skippedBytes += need
       }
       record.mediaReceived += Int64(payload.count)
+      record.receivedThisFetch += payload.count
       var sent = 0
       while sent < payload.count {
         var remaining = Int64.max
@@ -412,6 +548,7 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
         dataRequest.respond(with: Data(payload[sent..<sent + chunkLength]))
         sent += chunkLength
       }
+      maybeBeginPrefetch(record)
       if let windowEnd = record.windowEndExclusive,
         dataRequest.currentOffset >= windowEnd {
         // The reader has everything this loading request asked for; stop the
@@ -424,6 +561,18 @@ extension IOSMediaResourceLoader: URLSessionDataDelegate {
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     queue.async { [weak self] in
       guard let self, let record = self.record(for: task) else { return }
+      if task === record.prefetchTask {
+        // A failed prefetch is dropped: chaining falls back to a fresh
+        // beginFetch. A clean completion keeps the buffer and usability flag
+        // intact because the prefetch may legitimately finish before the
+        // main window; adoption happens in advanceAfterCompletedFetch.
+        record.prefetchTask = nil
+        if let error {
+          record.prefetchUsable = false
+          record.prefetchBuffer = []
+        }
+        return
+      }
       if let error {
         finishAndRemove(record, error: Self.enrichedError(error))
         return

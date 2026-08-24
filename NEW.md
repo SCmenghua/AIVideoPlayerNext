@@ -478,6 +478,20 @@ CI：GitHub Actions macOS 构建未签名 IPA 成功，Release `ios-unsigned-v0.
 
 自动化基线：`flutter analyze` 无问题；测试套件通过（含 customSchemeProxyUri 新测试与 aivpmedia scheme 断言更新）。真机验收判据不变：(2) 开启开关播放网络视频，日志应不再出现 "Operation Stopped"，而是"识别解码器打开完成"且字幕边播边出；前 12 条上游请求事件现在应为信息级可见；若仍失败，新错误消息应含 domain/code 定位根因，随后自动回退完整缓存。
 
+#### Phase 9.9 第三轮执行记录（2026-08-24）：字幕优先卡死修复与流式提速
+
+真机日志（构建 20260824-065346-36）确认两项遗留问题：
+
+**1. 字幕/翻译优先模式无字幕时永久暂停（长期遗留 bug）。** `evaluatePlaybackContent` 只要"当前位置之后没有任何字幕段"就暂停，而片头静音、片尾音乐、识别尚未覆盖的区间永远不产生字幕段，导致启动后立即冻结且无法恢复。修复为**限期等待**：内容缺失先暂停（保留"演员开口即有字幕"的核心体验），但超过 8 秒（识别游标仍在推进时延长至 16 秒）自动放行继续播放，字幕到达后门控自然收紧。用户在等待期间手动按播放立即放行（`_contentGateSuppressed` 压制门控直至内容追上）；seek 与换片重置等待时钟；等待面板显示已等待秒数。策略层新增 `recognitionProgressing`（识别 processedThrough 2 秒内前进视为存活）、`waited`、`suppressWait` 参数，纯函数可测。
+
+**2. iOS 流式识别网速慢（TTFB 2.5–4 s 每请求）。** 日志显示每个上游 Range 请求首字节耗时 2.4–4 秒，根因有二：
+- **Dart 端每请求新建 HttpClient**：`_ActiveProxyRequest` 自带 `HttpClient()`，每次解码器 Range 都付全额 TCP+TLS 握手。改为 worker 级共享 keep-alive 客户端（`maxConnectionsPerHost=4`、空闲 30s 回收），会话取消时统一关闭；被抢占的旧请求通过 `HttpClientRequest.abort()` 立即断开在途 socket，不阻塞新位置。
+- **Swift 端窗口串行链接**：上一个 2MB 窗口收完才发下一个，每个窗口都重新付 TTFB。新增**半窗预取**：当前窗口交付过半字节时提前发起下一窗口，其 TTFB 与当前传输重叠；主窗口完成后"采纳"预取——已到字节缓冲回放给 reader、在途任务转正为主任务，预取先行完成也不卡链（采纳后同步驱动 advanceAfterCompletedFetch）。采纳要求预取响应为 206（保证缓冲起点正确），不可用则丢弃缓冲回退全新 beginFetch 并取消重复任务；supersedeStaleRecords/didCancel/invalidate 全部覆盖预取任务取消。
+
+自动化基线：`flutter analyze` 无问题；`flutter test` 199 项全部通过（上轮 +6：限期等待策略 6 项；等待面板文案改为前缀匹配）。Swift 变更待 macOS CI / Xcode 编译验证。
+
+真机验收补充判据：(3) 字幕优先模式下播放片头静音或长音乐段，最多暂停约 8 秒后应自动继续；(4) 开启流式开关后诊断日志中同一会话第 2 个及以后的"上游 Range 首字节耗时"应显著低于首个（连接复用生效），相邻窗口"上游 Range 请求已开始"时间应部分重叠于前一窗口传输期内（预取生效）。
+
 ### Phase 10：视觉系统与移动端适配
 
 目标：完成功能稳定后的高品质 UI。
