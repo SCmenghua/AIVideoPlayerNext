@@ -16,6 +16,18 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+      - name: Prepare pinned whisper.cpp source
+        env:
+          WHISPER_CPP_COMMIT: a8d002cfd879315632a579e73f0148d06959de36
+        run: |
+          whisper_dir="$RUNNER_TEMP/whisper.cpp"
+          git init "$whisper_dir"
+          git -C "$whisper_dir" remote add origin https://github.com/ggerganov/whisper.cpp.git
+          git -C "$whisper_dir" fetch --depth 1 origin "$WHISPER_CPP_COMMIT"
+          git -C "$whisper_dir" checkout --detach FETCH_HEAD
+          git -C "$whisper_dir" submodule update --init --recursive --depth 1
+          echo "AI_VIDEO_WHISPER_CPP_SOURCE_DIR=$whisper_dir" >> "$GITHUB_ENV"
+          echo "Using whisper.cpp commit: $(git -C "$whisper_dir" rev-parse HEAD)"
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
@@ -35,6 +47,10 @@ jobs:
           echo "APP_VERSION=$app_version" >> "$GITHUB_ENV"
           echo "APP_BUILD_TIME=$app_build_time" >> "$GITHUB_ENV"
           echo "APP_BUILD_ID=$app_build_id" >> "$GITHUB_ENV"
+      - name: Cache iOS Flutter engine
+        run: flutter precache --ios
+      - name: Install iOS native dependencies
+        run: pod install --project-directory=ios
       - name: Build iOS application
         run: |
           flutter build ios --release --no-codesign \
