@@ -385,9 +385,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// Whether recognition is visibly advancing: its processed cursor moved
   /// within the last two seconds. A stalled pipeline gets the short grace
   /// period; an active one may use the extended one.
-  /// Whether recognition is visibly advancing: its processed cursor moved
-  /// within the last two seconds. A stalled pipeline gets the short grace
-  /// period; an active one may use the extended one.
   bool _recognitionProgressing() {
     final processedAt = _recognitionProcessedAt;
     if (processedAt == null) return false;
