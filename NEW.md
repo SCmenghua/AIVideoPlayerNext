@@ -492,6 +492,8 @@ CI：GitHub Actions macOS 构建未签名 IPA 成功，Release `ios-unsigned-v0.
 
 真机验收补充判据：(3) 字幕优先模式下播放片头静音或长音乐段，最多暂停约 8 秒后应自动继续；(4) 开启流式开关后诊断日志中同一会话第 2 个及以后的"上游 Range 首字节耗时"应显著低于首个（连接复用生效），相邻窗口"上游 Range 请求已开始"时间应部分重叠于前一窗口传输期内（预取生效）。
 
+CI 附注（2026-08-25）：本地路径测试在 macOS runner 失败为历史问题（`Uri.file` 对反斜杠字面量在 POSIX 上不产生 file scheme），已改为按宿主构造路径；iOS smoke 自 2026-08-19 起持续红灯的根因是工作流缺少 whisper.cpp 准备步骤——Runner 目标的 "Build speech_core" Xcode 脚本阶段要求 `AI_VIDEO_WHISPER_CPP_SOURCE_DIR`，缺失时 xcodebuild 在该阶段失败，Flutter 误报为 "Development Team" 签名横幅。已在 ios.yml 补齐固定源准备、引擎 precache 与显式 pod install（与 IPA 工作流一致）。验收产物：GitHub Release `windows-v0.9.9-2`（含两项修复，fe16c29）与 `ios-unsigned-v0.9.9-37`（fe16c29）。
+
 ### Phase 10：视觉系统与移动端适配
 
 目标：完成功能稳定后的高品质 UI。
