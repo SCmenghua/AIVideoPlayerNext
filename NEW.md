@@ -494,6 +494,29 @@ CI：GitHub Actions macOS 构建未签名 IPA 成功，Release `ios-unsigned-v0.
 
 CI 附注（2026-08-25）：本地路径测试在 macOS runner 失败为历史问题（`Uri.file` 对反斜杠字面量在 POSIX 上不产生 file scheme），已改为按宿主构造路径；iOS smoke 自 2026-08-19 起持续红灯的根因是工作流缺少 whisper.cpp 准备步骤——Runner 目标的 "Build speech_core" Xcode 脚本阶段要求 `AI_VIDEO_WHISPER_CPP_SOURCE_DIR`，缺失时 xcodebuild 在该阶段失败，Flutter 误报为 "Development Team" 签名横幅。已在 ios.yml 补齐固定源准备、引擎 precache 与显式 pod install（与 IPA 工作流一致）。验收产物：GitHub Release `windows-v0.9.9-2`（含两项修复，fe16c29）与 `ios-unsigned-v0.9.9-37`（fe16c29）。
 
+#### Phase 9.9 第四轮执行记录（2026-08-29）：共享媒体源单飞重构（全网只拉一份）
+
+真机日志（构建 20260829-042311-39，85po 视频 13MB）证实第三轮方案的三个放大性问题：① `IOSMediaResourceLoader` 的 2MB 滑动窗口在限速源站（实测约 95 KB/s 且并行无增益）上产生 5 条互相重叠约 97% 的上游连接，实际传输量达文件体积 4 倍；② 解码器一次读超时（NSURLError -1001）使整个识别会话报废且进度永久冻结在约 2 秒处；③ 播放（mpv 直连）与识别各拉一份，被限速的管道上互为竞争。对照 Windows 日志确认瓶颈不在源站而在 iOS 取数架构（Windows 单条 `bytes=0-` 顺序流即能跑满约 107 KB/s）。
+
+**重构目标形态：播放与识别共用同一条顺序下载流。** 已交付（提交 `bb7b4dd` 重构 + `00fe4bc` 修复，测试 202 项）：
+
+1. **单飞填充引擎（`RecognitionMediaCacheWorker`）**：任意时刻最多一条上游 GET（`bytes=N-` 开区间顺序流），字节边下边写入分段缓存；所有回环客户端（mpv、AVAsset 解码器、探测）从缓存直接取数，等待数据到达而非各自连源站。落后于下载前沿的需求触发"跳转抢占"——中止当前上游、目标区域插队、剩余区域排队后台补齐；上游停滞/断流自动断点续传（≤5 次）；源站不支持 Range 时自动退回透明顺序转发路径。
+2. **共享媒体源 Broker（`SharedNetworkMediaBroker`）**：以原始 URI 为键维护唯一的回环会话；mpv 经 `resolvePlaybackUri` 打开 `http://127.0.0.1:<port>/media.mp4`，识别经 `borrowFor` 加入同一会话——Referer/Cookie 由代理注入上游，每个字节只从源站请求一次。代理启动失败时 mpv 自动回退直连原地址，播放不因代理而不可用。
+3. **识别管线平台统一**：删除 iOS 实验分支与 `iosRecognitionStreamingProxy` 设置项，iOS/Windows/macOS 走完全相同的流式代理路径；识别解码器打开失败保留一次"完整下载成本地文件"兜底重试。删除 `IOSMediaResourceLoader.swift` 与 `aivpmedia://` 自定义协议（pbxproj 同步清理）；`IOSAudioDecoderBridge` 直接以 AVURLAsset 打开回环 http 地址，残留 aivpmedia 输入显式报错。
+4. **翻译调度对齐桌面**：默认每批字幕数 1→8（既有安装的持久化设置不受影响，需手动调整）。
+
+**第四轮真机回归发现的三个缺陷与修复（`00fe4bc`）**：
+
+1. **缓存文件被反复截断（根本缺陷，旧版即潜伏）**：Dart 的 `FileMode.writeOnly` 打开文件即截断为空，而 `_writeCached` 每写一个分块都重新 open——先前字节被毁而游标仍记录已缓存，缓存读与写在截断瞬间竞态，探测请求以"承诺 2 字节实际 0 字节"收场。AVAsset 首个 `bytes=0-1` 探测收到坏响应后不重试，直接 `-11829 Cannot Open`。修复：会话级持久文件句柄，仅在会话开始截断一次（顺带消除每分块一次的 open/close 开销）。
+2. **Broker 并发竞态**：交接瞬间 mpv 的 resolve 与识别的 borrow 同毫秒到达，双方都见"无会话"各建一个代理（日志中 55402/55403 双会话即此）。修复：会话创建严格串行化。
+3. **有界探测饿死**：`bytes=0-1` 此前需等上游响应头取得总大小才提交响应；现改为立即从缓存应答（总大小未知时 Content-Range 用 `bytes S-E/*`），首字节延迟降为纯 TTFB。
+
+新增回归测试：缓存字节在后续写入后保持原样、并发 resolve+borrow 落到同一会话、有界探测不依赖总大小完成。诊断日志关键词更新：`共享缓存源已启动`（应仅出现一个端口）、`识别已接入共享缓存源`（端口与前者一致）、`网络媒体已切换共享缓存源`；整段会话 `upstreamStarted`（cacheFiller 角色）应仅一两条。
+
+CI：GitHub Release `ios-unsigned-v0.9.9-39`（bb7b4dd，含上述缺陷待回归）与 `ios-unsigned-v0.9.9-40`（00fe4bc，修复版）。
+
+状态：**未结项，待真机回归。** 验收判据：(1) 播放网络视频时诊断日志仅一个共享缓存源端口，识别与播放均指向它，无 `-11829`；(2) 同一会话 cacheFiller 角色的上游请求仅一两条（无窗口扇出）；(3) 字幕以网络速度产出并领先播放位置（带宽盈余转化为识别领先）；(4) 回放已缓冲区间走缓存命中，不产生上游请求。
+
 ### Phase 10：视觉系统与移动端适配
 
 目标：完成功能稳定后的高品质 UI。
