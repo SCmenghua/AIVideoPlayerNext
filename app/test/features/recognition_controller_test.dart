@@ -477,6 +477,41 @@ void main() {
     await player.dispose();
   });
 
+  test('concurrent resolve and borrow join the same broker session', () async {
+    var factoryCalls = 0;
+    _RecordingProxyWorker? worker;
+    final broker = SharedNetworkMediaBroker(
+      workerFactory: ({required source, required sessionId}) {
+        ++factoryCalls;
+        return worker ??= _RecordingProxyWorker(
+          source: source,
+          sessionId: sessionId,
+        );
+      },
+    );
+    final source = RecognitionMediaSource(
+      uri: Uri.parse('https://example.test/media.mp4'),
+      title: 'media.mp4',
+      kind: MediaSourceKind.browserHandoff,
+    );
+
+    // The handoff instant: the player resolves while the recognition
+    // controller borrows. Both must land on one session.
+    final results = await Future.wait([
+      broker.resolvePlaybackUri(source),
+      broker.borrowFor(source),
+      broker.resolvePlaybackUri(source),
+    ]);
+
+    expect(factoryCalls, 1);
+    expect(results[0], worker!.snapshot.proxyUri);
+    expect(identical(results[1], worker), isTrue);
+    expect(results[2], worker!.snapshot.proxyUri);
+    expect(worker!.proxyCalls, 1);
+
+    await broker.dispose();
+  });
+
   test('recognition falls back to the full cache when the proxy fails',
       () async {
     final player = MockPlayerService();

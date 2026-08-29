@@ -238,6 +238,11 @@ class RecognitionMediaCacheWorker {
   int? _tailCacheEndExclusive;
   Uri? _proxyUri;
   HttpServer? _proxyServer;
+
+  /// Session-lifetime cache file handles; opened once in [startProxy] and
+  /// closed on cancel. Reopening per write would truncate the cache file.
+  RandomAccessFile? _cacheOutput;
+  RandomAccessFile? _tailOutput;
   int? _contentLength;
   String? _message;
   bool _usedSequentialDownload = false;
@@ -362,6 +367,11 @@ class RecognitionMediaCacheWorker {
       await File(_path!).writeAsBytes(const []);
       _tailPath = '${directory.path}${Platform.pathSeparator}media.tail.cache';
       await File(_tailPath!).writeAsBytes(const []);
+      // Session-lifetime handles: FileMode.write truncates exactly once here;
+      // every later write must go through these handles without reopening
+      // (reopening with a truncating mode destroys earlier chunks).
+      _cacheOutput = await File(_path!).open(mode: FileMode.write);
+      _tailOutput = await File(_tailPath!).open(mode: FileMode.write);
       _proxyServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       _proxyServer!.listen((request) {
         unawaited(_serveProxyRequest(request));
@@ -443,6 +453,12 @@ class RecognitionMediaCacheWorker {
     // session that owns it.
     _sharedUpstreamClient?.close(force: true);
     _sharedUpstreamClient = null;
+    // Let queued cache writes drain before releasing the handles they use.
+    await _cacheWrites;
+    await _cacheOutput?.close();
+    _cacheOutput = null;
+    await _tailOutput?.close();
+    _tailOutput = null;
     _state = RecognitionMediaCacheState.cancelled;
     _emit();
   }
@@ -863,33 +879,39 @@ class RecognitionMediaCacheWorker {
         reason: 'client_demand',
       );
 
-      // The response contract (status line, Content-Length) depends on the
-      // total size, which arrives with the first upstream response. A client
-      // cannot be answered accurately before then.
-      final deadline =
-          DateTime.now().add(policy.clientWaitTimeout * 2);
-      while (_contentLength == null) {
-        if (_cancelled) throw StateError('识别媒体代理已取消。');
-        if (_rangeUnsupportedFallback) {
-          // Let the transparent sequential path answer this request itself.
-          _removeActive(waiter);
-          _emitCompletedEvent(waiter, cancelled: true);
-          return true;
+      // Bounded ranges (the typical first probe, bytes=0-1) commit their
+      // response headers immediately: clients such as AVFoundation give up
+      // when the connection stays silent until the first upstream response
+      // arrives, and do not retry. The total size is reported as '*' until
+      // the filler learns it. Open-ended ranges still wait, because their
+      // Content-Length depends on the total size.
+      final bool bounded = requestedEndInclusive != null;
+      if (!bounded) {
+        final deadline =
+            DateTime.now().add(policy.clientWaitTimeout * 2);
+        while (_contentLength == null) {
+          if (_cancelled) throw StateError('识别媒体代理已取消。');
+          if (_rangeUnsupportedFallback) {
+            // Let the transparent sequential path answer this request itself.
+            _removeActive(waiter);
+            _emitCompletedEvent(waiter, cancelled: true);
+            return true;
+          }
+          final now = DateTime.now();
+          if (now.isAfter(deadline)) {
+            throw TimeoutException('识别媒体总大小未知。');
+          }
+          await _waitForProgress(deadline.difference(now));
         }
-        final now = DateTime.now();
-        if (now.isAfter(deadline)) {
-          throw TimeoutException('识别媒体总大小未知。');
-        }
-        await _waitForProgress(deadline.difference(now));
       }
 
-      final contentLength = _contentLength!;
-      final mediaEndExclusive = requestedEndInclusive == null
-          ? contentLength
-          : requestedEndInclusive + 1 > contentLength
+      final contentLength = _contentLength;
+      final mediaEndExclusive = bounded
+          ? (contentLength != null && requestedEndInclusive + 1 > contentLength
               ? contentLength
-              : requestedEndInclusive + 1;
-      if (start >= mediaEndExclusive) {
+              : requestedEndInclusive + 1)
+          : contentLength!;
+      if (contentLength != null && start >= mediaEndExclusive) {
         request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
         request.response.headers.set(
           HttpHeaders.contentRangeHeader,
@@ -914,7 +936,7 @@ class RecognitionMediaCacheWorker {
         ..set(HttpHeaders.acceptRangesHeader, 'bytes')
         ..set(
           HttpHeaders.contentRangeHeader,
-          'bytes $start-${mediaEndExclusive - 1}/$contentLength',
+          'bytes $start-${mediaEndExclusive - 1}/${contentLength ?? '*'}',
         )
         ..set(
             HttpHeaders.contentLengthHeader,
@@ -945,7 +967,13 @@ class RecognitionMediaCacheWorker {
         if (position >= mediaEndExclusive) break;
         await _waitForProgress(policy.clientWaitTimeout);
       }
-      await request.response.close();
+      try {
+        await request.response.close();
+      } on Object {
+        // The client disconnected mid-response (probes routinely do); the
+        // socket state must not surface as a filler failure.
+        waiter.cancel('client_disconnected');
+      }
       _emitCompletedEvent(waiter);
       return false;
     } on Object catch (error) {
@@ -1781,21 +1809,19 @@ class RecognitionMediaCacheWorker {
   }
 
   Future<void> _writeCached(int offset, List<int> bytes) {
-    final path = _path;
-    if (path == null || bytes.isEmpty) return Future<void>.value();
+    // A single session-lifetime handle is mandatory here: reopening with
+    // FileMode.writeOnly per write would truncate the file every time and
+    // destroy earlier chunks while the cursor still reports them cached.
+    final output = _cacheOutput;
+    if (output == null || bytes.isEmpty) return Future<void>.value();
     final write = _cacheWrites.then((_) async {
-      final output = await File(path).open(mode: FileMode.writeOnly);
-      try {
-        await output.setPosition(offset);
-        await output.writeFrom(bytes);
-        _cursor.recordDownloadedSegment(
-          start: offset,
-          endExclusive: offset + bytes.length,
-        );
-        _emit();
-      } finally {
-        await output.close();
-      }
+      await output.setPosition(offset);
+      await output.writeFrom(bytes);
+      _cursor.recordDownloadedSegment(
+        start: offset,
+        endExclusive: offset + bytes.length,
+      );
+      _emit();
     });
     _cacheWrites = write.catchError((Object error, StackTrace _) {
       _message = error.toString();
@@ -1809,18 +1835,15 @@ class RecognitionMediaCacheWorker {
     List<int> bytes,
     int tailCacheStart,
   ) {
-    final path = _tailPath;
-    if (path == null || bytes.isEmpty) return Future<void>.value();
+    // Same persistent-handle rule as [_writeCached]: reopening per write
+    // would truncate away previously warmed tail bytes.
+    final output = _tailOutput;
+    if (output == null || bytes.isEmpty) return Future<void>.value();
     final write = _cacheWrites.then((_) async {
-      final output = await File(path).open(mode: FileMode.writeOnly);
-      try {
-        // This file stores only warmed tail bytes in a compact local layout;
-        // it never seeks to the potentially multi-gigabyte media offset.
-        await output.setPosition(mediaOffset - tailCacheStart);
-        await output.writeFrom(bytes);
-      } finally {
-        await output.close();
-      }
+      // This file stores only warmed tail bytes in a compact local layout;
+      // it never seeks to the potentially multi-gigabyte media offset.
+      await output.setPosition(mediaOffset - tailCacheStart);
+      await output.writeFrom(bytes);
     });
     _cacheWrites = write.catchError((Object error, StackTrace _) {
       _message = error.toString();

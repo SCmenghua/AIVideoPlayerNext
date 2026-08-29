@@ -643,6 +643,96 @@ void main() {
     await directory.delete(recursive: true);
   });
 
+  test('cached bytes survive later writes to the same cache file', () async {
+    // Regression: per-write opens with a truncating FileMode wiped earlier
+    // chunks while the cursor still reported them cached.
+    final directory =
+        await Directory.systemTemp.createTemp('filler-no-truncate-');
+    const media = 'abcdefghij';
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    upstream.listen((request) async {
+      request.response
+        ..statusCode = HttpStatus.partialContent
+        ..headers.set(HttpHeaders.contentRangeHeader,
+            'bytes 0-${media.length - 1}/${media.length}')
+        ..headers.contentLength = media.length;
+      request.response.add('abcde'.codeUnits);
+      await request.response.flush();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      request.response.add('fghij'.codeUnits);
+      await request.response.close();
+    });
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('http://127.0.0.1:${upstream.port}/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-no-truncate',
+      cacheDirectory: directory,
+    );
+    final proxy = await worker.startProxy();
+    await _settleFill(worker);
+
+    expect(await _readProxyRange(proxy.proxyUri!, 'bytes=0-4'), 'abcde');
+    expect(await _readProxyRange(proxy.proxyUri!, 'bytes=5-9'), 'fghij');
+    expect(await _readProxyRange(proxy.proxyUri!, 'bytes=0-'), media);
+
+    await worker.dispose();
+    await upstream.close(force: true);
+    await directory.delete(recursive: true);
+  });
+
+  test('bounded range probe completes without waiting for the size probe',
+      () async {
+    final directory =
+        await Directory.systemTemp.createTemp('filler-probe-commit-');
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final headersReleased = Completer<void>();
+    upstream.listen((request) async {
+      await headersReleased.future;
+      request.response
+        ..statusCode = HttpStatus.partialContent
+        ..headers.set(HttpHeaders.contentRangeHeader, 'bytes 0-7/8')
+        ..headers.contentLength = 8
+        ..add('abcdefgh'.codeUnits);
+      await request.response.close();
+    });
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('http://127.0.0.1:${upstream.port}/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-probe-commit',
+      policy: const RecognitionMediaCachePolicy(
+        clientWaitTimeout: Duration(seconds: 5),
+      ),
+      cacheDirectory: directory,
+    );
+    final proxy = await worker.startProxy();
+
+    // A bounded probe must not depend on the total size: it is answered as
+    // soon as its bytes reach the cache, with '*' while the size is unknown.
+    final client = HttpClient();
+    final request = await client.getUrl(proxy.proxyUri!);
+    request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1');
+    final probe = request.close();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    headersReleased.complete();
+    final response = await probe;
+    expect(response.statusCode, HttpStatus.partialContent);
+    expect(response.headers.value(HttpHeaders.contentRangeHeader),
+        'bytes 0-1/*');
+    final body = await response.fold<List<int>>(<int>[], (b, c) => b..addAll(c));
+    expect(body, 'ab'.codeUnits);
+    client.close(force: true);
+
+    await worker.dispose();
+    await upstream.close(force: true);
+    await directory.delete(recursive: true);
+  });
+
   test('priority intent waits for decoder seek before cancelling old range',
       () async {
     final directory =

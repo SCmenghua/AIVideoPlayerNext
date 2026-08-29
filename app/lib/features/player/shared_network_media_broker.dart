@@ -37,6 +37,12 @@ class SharedNetworkMediaBroker {
   int _sessionCounter = 0;
   bool _disposed = false;
 
+  /// Session operations run strictly one at a time: the player's
+  /// [resolvePlaybackUri] and the recognition controller's borrow arrive in
+  /// the same instant during a handoff, and without serialization both would
+  /// observe "no session yet" and each start its own proxy.
+  Future<void> _sessionChain = Future<void>.value();
+
   /// Network sources only. Returns the loopback playback URI after ensuring
   /// (or reusing) the matching session; null when playback should fall back
   /// to the original URL directly.
@@ -55,6 +61,17 @@ class SharedNetworkMediaBroker {
       _ensureSession(source);
 
   Future<RecognitionMediaCacheWorker?> _ensureSession(
+    RecognitionMediaSource source,
+  ) {
+    final result = _sessionChain.then((_) => _ensureSessionInner(source));
+    _sessionChain = result.then<void>(
+      (_) {},
+      onError: (Object _) {},
+    );
+    return result;
+  }
+
+  Future<RecognitionMediaCacheWorker?> _ensureSessionInner(
     RecognitionMediaSource source,
   ) async {
     if (_disposed || !source.isNetwork) return null;
