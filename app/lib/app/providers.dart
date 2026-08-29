@@ -16,6 +16,7 @@ import '../features/browser/windows_browser_service.dart';
 import '../features/player/media_kit_player_service.dart';
 import '../features/player/media_picker.dart';
 import '../features/player/mock_services.dart';
+import '../features/player/shared_network_media_broker.dart';
 import '../features/settings/app_settings.dart';
 import '../features/translation/deepl_translation_service.dart';
 import '../features/translation/local_model_translation_service.dart';
@@ -81,8 +82,19 @@ final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
   return logs;
 });
 
+final sharedNetworkMediaBrokerProvider = Provider<SharedNetworkMediaBroker>((ref) {
+  final broker = SharedNetworkMediaBroker(
+    logs: ref.read(diagnosticsLogProvider),
+  );
+  ref.onDispose(broker.dispose);
+  return broker;
+});
+
 final playerServiceProvider = Provider<PlayerService>((ref) {
-  final service = MediaKitPlayerService(logs: ref.read(diagnosticsLogProvider));
+  final service = MediaKitPlayerService(
+    logs: ref.read(diagnosticsLogProvider),
+    sharedMedia: ref.watch(sharedNetworkMediaBrokerProvider),
+  );
   ref.onDispose(service.dispose);
   return service;
 });
@@ -185,10 +197,7 @@ final recognitionControllerProvider = Provider<RecognitionController>((ref) {
     recognizer: ref.read(windowRecognitionServiceProvider),
     logs: ref.read(diagnosticsLogProvider),
     prefetchMode: settings.prefetchMode,
-    iosStreamingProxyEnabled: () => ref
-        .read(appSettingsProvider)
-        .snapshot
-        .iosRecognitionStreamingProxy,
+    sharedMediaBroker: ref.read(sharedNetworkMediaBrokerProvider),
   );
   ref.onDispose(controller.dispose);
   return controller;

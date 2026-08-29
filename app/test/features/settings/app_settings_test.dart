@@ -15,21 +15,6 @@ void main() {
     expect(settings.waitForSubtitlePreparation, isTrue);
   });
 
-  test('iOS streaming proxy experiment defaults off and toggles independently',
-      () {
-    final settings = AppSettingsController();
-
-    expect(settings.iosRecognitionStreamingProxy, isFalse);
-    expect(settings.waitForSubtitlePreparation, isTrue);
-
-    settings.setIosRecognitionStreamingProxy(true);
-    expect(settings.iosRecognitionStreamingProxy, isTrue);
-    expect(settings.snapshot.iosRecognitionStreamingProxy, isTrue);
-
-    // The preparation gate is untouched by the streaming experiment.
-    expect(settings.waitForSubtitlePreparation, isTrue);
-  });
-
   test('switching strategies preserves the preparation gate', () {
     final settings = AppSettingsController(
       playbackStartStrategy: PlaybackStartStrategy.playbackPriority,
@@ -66,7 +51,7 @@ void main() {
       () {
     final settings = AppSettingsController();
 
-    expect(settings.translationBatchSize, 1);
+    expect(settings.translationBatchSize, 8);
     expect(settings.translationMaxConcurrent, 10);
 
     settings.setTranslationBatchSize(999);

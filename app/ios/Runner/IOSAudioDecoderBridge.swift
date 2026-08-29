@@ -23,10 +23,6 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private var inflightSends = 0
   private var securityScopedURL: URL?
   private var securityScopeActive = false
-  /// Owns the custom-scheme resource loader for one streaming session. The
-  /// bridge holds it strongly because AVAssetResourceLoader does not retain
-  /// its delegate.
-  private var mediaLoader: IOSMediaResourceLoader?
 
   func register(with registrar: FlutterApplicationRegistrar) {
     let methods = FlutterMethodChannel(
@@ -123,34 +119,19 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
         releaseSecurityScopedAccess()
       }
     }
-    // The experimental streaming path arrives as a custom scheme so this
-    // bridge, not AVFoundation's HTTP stack, owns the loopback fetch. The
-    // loader must be attached before tracks load; it is kept alive by the
-    // bridge until stop() invalidates it.
-    var loader: IOSMediaResourceLoader?
-    if url.scheme == "aivpmedia" {
-      var components = URLComponents()
-      components.scheme = "http"
-      components.host = url.host
-      components.port = url.port
-      components.path = url.path
-      guard let target = components.url else {
-        throw BridgeError.message("回环代理地址无效")
-      }
-      loader = IOSMediaResourceLoader(customURL: target, headers: headers)
-      assetURL = url
-    }
-    defer {
-      if let loader, mediaLoader !== loader {
-        loader.invalidate()
-      }
+    // Network media arrives as a plain http(s) loopback URL served by the
+    // Dart cache proxy, which injects the browser authorization headers
+    // upstream. The retired aivpmedia:// scheme is rejected explicitly so a
+    // stale Dart build fails loudly instead of silently re-entering the old
+    // Swift fetch engine.
+    guard url.scheme != "aivpmedia" else {
+      throw BridgeError.message("aivpmedia 协议已废弃，请更新识别管线。")
     }
     var options: [String: Any] = [:]
-    if !headers.isEmpty && !url.isFileURL && url.scheme != "aivpmedia" {
+    if !headers.isEmpty && !url.isFileURL {
       options["AVURLAssetHTTPHeaderFieldsKey"] = headers
     }
     let asset = AVURLAsset(url: assetURL, options: options.isEmpty ? nil : options)
-    loader?.attach(to: asset)
     let tracks: [AVAssetTrack]
     do {
       tracks = try await loadTracks(asset)
@@ -183,7 +164,6 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
     reader.add(output)
     self.reader = reader
     self.output = output
-    self.mediaLoader = loader
     self.sessionID = sessionID
     self.sourceURL = url
     self.sourceHeaders = headers
@@ -313,10 +293,6 @@ final class IOSAudioDecoderBridge: NSObject, FlutterStreamHandler {
   private func stop() {
     lock.lock(); accepting = false; generation += 1; lock.unlock()
     worker?.cancel(); worker = nil
-    // Invalidate the streaming loader before cancelling the reader so no
-    // resource-loader callback can still be feeding a dying asset. seek()
-    // reaches this through open()'s leading stop().
-    mediaLoader?.invalidate(); mediaLoader = nil
     reader?.cancelReading(); reader = nil; output = nil
     sessionID = ""
     sourceURL = nil

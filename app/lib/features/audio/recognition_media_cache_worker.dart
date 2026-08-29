@@ -18,12 +18,20 @@ class RecognitionMediaCachePolicy {
     this.maxBytes = 256 * 1024 * 1024,
     this.maxSegments = 128,
     // These optimizations need per-site capability evidence. Media Foundation
-    // has already been validated against a transparent streaming proxy, so it
-    // remains the production default while segmented reads stay experimental.
+    // has already been validated against a transparent streaming proxy, so
+    // segmented reads stay available but off by default.
     this.enableSegmentedProxyStreaming = false,
     this.enableContainerWarmup = false,
     this.warmupHeadBytes = 512 * 1024,
     this.warmupTailBytes = 2 * 1024 * 1024,
+    // The single-flight filler keeps at most one upstream GET per session.
+    // Every loopback client (mpv, the recognition decoder) is served from the
+    // growing byte cache while that one connection streams, so a throttled
+    // origin is never asked for the same bytes twice. This is now the
+    // production default; the transparent passthrough remains as fallback.
+    this.useSingleFlightFiller = true,
+    this.upstreamStallTimeout = const Duration(seconds: 30),
+    this.clientWaitTimeout = const Duration(seconds: 60),
   });
 
   final int chunkBytes;
@@ -33,6 +41,16 @@ class RecognitionMediaCachePolicy {
   final bool enableContainerWarmup;
   final int warmupHeadBytes;
   final int warmupTailBytes;
+
+  /// At most one upstream GET at any time; loopback clients wait on cache.
+  final bool useSingleFlightFiller;
+
+  /// Abort an upstream filler whose bytes stop arriving for this long.
+  final Duration upstreamStallTimeout;
+
+  /// Close a loopback client response when its bytes stay unavailable this
+  /// long even though fill work was scheduled.
+  final Duration clientWaitTimeout;
 }
 
 class RecognitionMediaCacheSnapshot {
@@ -241,6 +259,17 @@ class RecognitionMediaCacheWorker {
   final Map<int, _ActiveProxyRequest> _warmupRequests = {};
   Future<void> _cacheWrites = Future<void>.value();
 
+  // --- Single-flight filler engine state -----------------------------------
+  /// Pending and executing upstream legs, kept as an execution deque: jump
+  /// inserts go to the front, sequential remainders are appended at the back.
+  final List<_ActiveProxyRequest> _fillLegs = [];
+  bool _fillPumpRunning = false;
+  bool _rangeUnsupportedFallback = false;
+  String? _upstreamContentType;
+  final StreamController<void> _progressSignals =
+      StreamController<void>.broadcast();
+
+
   Stream<RecognitionMediaCacheSnapshot> get snapshots => _snapshots.stream;
   Stream<RecognitionMediaCacheRequestEvent> get requestEvents =>
       _requestEvents.stream;
@@ -404,9 +433,11 @@ class RecognitionMediaCacheWorker {
     for (final request in _activeProxyRequests.values.toList()) {
       request.cancel('worker_cancelled');
     }
+    _fillLegs.clear();
     for (final request in _warmupRequests.values.toList()) {
       request.cancel('worker_cancelled');
     }
+    _notifyProgress();
     await _transport.close();
     // The shared pool outlives individual requests; it is torn down with the
     // session that owns it.
@@ -422,6 +453,7 @@ class RecognitionMediaCacheWorker {
     _disposed = true;
     await _snapshots.close();
     await _requestEvents.close();
+    await _progressSignals.close();
   }
 
   /// Renames the completed download from its `.partial` working name to
@@ -506,16 +538,6 @@ class RecognitionMediaCacheWorker {
     return knownMediaExtensions.contains(extension) ? extension : null;
   }
 
-  /// Maps a loopback proxy URI to the custom scheme consumed by the iOS
-  /// AVAssetResourceLoader decoder. Host, port, path and query are preserved
-  /// verbatim so the native loader restores an http request that still hits
-  /// this same HttpServer; only the scheme changes. Windows keeps plain http.
-  static Uri customSchemeProxyUri(
-    Uri proxyUri, {
-    String scheme = 'aivpmedia',
-  }) =>
-      proxyUri.replace(scheme: scheme);
-
   Future<void> _download(RandomAccessFile output) async {
     var offset = 0;
     while (!_cancelled) {
@@ -571,6 +593,12 @@ class RecognitionMediaCacheWorker {
   }
 
   Future<void> _serveProxyRequest(HttpRequest request) async {
+    if (_engineActive && source.isNetwork && !_rangeUnsupportedFallback) {
+      final retried = await _serveProxyRequestSingleFlight(request);
+      if (!retried) return;
+      // The upstream turned out not to honor Range; fall through and answer
+      // this same request through the transparent sequential path below.
+    }
     _ActiveProxyRequest? active;
     try {
       if (_cancelled || request.method != 'GET' && request.method != 'HEAD') {
@@ -761,6 +789,580 @@ class RecognitionMediaCacheWorker {
         // The shared upstream pool is worker-owned; nothing to close per request.
       }
     }
+  }
+
+  // --- Single-flight filler engine ------------------------------------------
+  //
+  // One upstream GET at a time streams into the shared byte cache while every
+  // loopback client (mpv playback, recognition decoder, probes) is served from
+  // that growing cache. A far-forward client demand becomes a "jump": the
+  // running leg is aborted, its remainder is queued behind, and the demanded
+  // region runs immediately so playback never waits on background fill work.
+
+  _ActiveProxyRequest? _executingLeg;
+  int _executingPosition = 0;
+
+  bool get _engineActive =>
+      policy.useSingleFlightFiller &&
+      !_rangeUnsupportedFallback &&
+      !policy.enableSegmentedProxyStreaming &&
+      !policy.enableContainerWarmup;
+
+  /// Returns false when the engine answered the request completely, true when
+  /// the transparent passthrough below must answer it instead.
+  Future<bool> _serveProxyRequestSingleFlight(HttpRequest request) async {
+    _ActiveProxyRequest? waiter;
+    try {
+      if (_cancelled) {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        await request.response.close();
+        return false;
+      }
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      final parsed = _parseRange(rangeHeader);
+      final start = parsed?.start ?? 0;
+      final requestedEndInclusive = parsed?.endInclusive;
+      waiter = _ActiveProxyRequest(
+        id: ++_nextRequestId,
+        range: rangeHeader ?? 'bytes=0-',
+        priorityEpoch: _priorityEpoch,
+        requestRole: 'loopbackClient',
+      );
+      _activeProxyRequests[waiter.id] = waiter;
+      _emitRequestEvent(
+        RecognitionMediaCacheRequestEvent(
+          kind: RecognitionMediaCacheRequestEventKind.upstreamStarted,
+          at: waiter.startedAt,
+          requestId: waiter.id,
+          range: waiter.range,
+          priorityEpoch: waiter.priorityEpoch,
+          requestRole: waiter.requestRole,
+        ),
+      );
+
+      final cached = _cachedRange(rangeHeader);
+      if (cached != null) {
+        _emitRequestEvent(
+          RecognitionMediaCacheRequestEvent(
+            kind: RecognitionMediaCacheRequestEventKind.cacheHit,
+            at: DateTime.now(),
+            requestId: waiter.id,
+            range: rangeHeader,
+            priorityEpoch: waiter.priorityEpoch,
+            requestRole: waiter.requestRole,
+          ),
+        );
+        await _serveCachedRange(request, cached);
+        _emitCompletedEvent(waiter);
+        return false;
+      }
+
+      _scheduleFillRegion(
+        start: start,
+        endInclusive: requestedEndInclusive,
+        reason: 'client_demand',
+      );
+
+      // The response contract (status line, Content-Length) depends on the
+      // total size, which arrives with the first upstream response. A client
+      // cannot be answered accurately before then.
+      final deadline =
+          DateTime.now().add(policy.clientWaitTimeout * 2);
+      while (_contentLength == null) {
+        if (_cancelled) throw StateError('识别媒体代理已取消。');
+        if (_rangeUnsupportedFallback) {
+          // Let the transparent sequential path answer this request itself.
+          _removeActive(waiter);
+          _emitCompletedEvent(waiter, cancelled: true);
+          return true;
+        }
+        final now = DateTime.now();
+        if (now.isAfter(deadline)) {
+          throw TimeoutException('识别媒体总大小未知。');
+        }
+        await _waitForProgress(deadline.difference(now));
+      }
+
+      final contentLength = _contentLength!;
+      final mediaEndExclusive = requestedEndInclusive == null
+          ? contentLength
+          : requestedEndInclusive + 1 > contentLength
+              ? contentLength
+              : requestedEndInclusive + 1;
+      if (start >= mediaEndExclusive) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes */$contentLength',
+        );
+        await request.response.close();
+        _emitCompletedEvent(waiter);
+        return false;
+      }
+
+      request.response.statusCode = HttpStatus.partialContent;
+      final contentTypeValue = _upstreamContentType;
+      if (contentTypeValue != null && contentTypeValue.isNotEmpty) {
+        try {
+          request.response.headers.contentType = ContentType.parse(
+              contentTypeValue.split(',').first.trim());
+        } on Object {
+          // Unparseable upstream content types fall back to the default.
+        }
+      }
+      request.response.headers
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(
+          HttpHeaders.contentRangeHeader,
+          'bytes $start-${mediaEndExclusive - 1}/$contentLength',
+        )
+        ..set(
+            HttpHeaders.contentLengthHeader,
+            request.method == 'HEAD'
+                ? 0
+                : mediaEndExclusive - start);
+      if (request.method == 'HEAD') {
+        await request.response.close();
+        _emitCompletedEvent(waiter);
+        return false;
+      }
+
+      var position = start;
+      const maxSliceBytes = 64 * 1024;
+      while (position < mediaEndExclusive) {
+        if (_cancelled) throw StateError('识别媒体代理已取消。');
+        final available = _cachedSliceLength(position, mediaEndExclusive);
+        if (available > 0) {
+          final slice = available > maxSliceBytes ? maxSliceBytes : available;
+          final file = File(_path!);
+          await request.response.addStream(
+            file.openRead(position, position + slice),
+          );
+          position += slice;
+          waiter.bytesTransferred += slice;
+          continue;
+        }
+        if (position >= mediaEndExclusive) break;
+        await _waitForProgress(policy.clientWaitTimeout);
+      }
+      await request.response.close();
+      _emitCompletedEvent(waiter);
+      return false;
+    } on Object catch (error) {
+      if (waiter != null) {
+        _emitCompletedEvent(waiter, cancelled: waiter.cancelled,
+            failureMessage: error.toString());
+      }
+      try {
+        request.response.statusCode =
+            error is TimeoutException ? HttpStatus.gatewayTimeout : 502;
+        request.response.headers.contentType = ContentType.text;
+        request.response.write('recognition media filler failed: $error');
+        await request.response.close();
+      } on Object {
+        // A streamed response may have committed headers before failing; the
+        // client observes the interrupted body.
+      }
+      if (!_cancelled) {
+        _message = error.toString();
+        _emit();
+      }
+      return false;
+    } finally {
+      if (waiter != null) _removeActive(waiter);
+    }
+  }
+
+  void _removeActive(_ActiveProxyRequest active) {
+    _activeProxyRequests.remove(active.id);
+  }
+
+  void _emitCompletedEvent(
+    _ActiveProxyRequest active, {
+    bool cancelled = false,
+    String? failureMessage,
+  }) {
+    _emitRequestEvent(
+      RecognitionMediaCacheRequestEvent(
+        kind: cancelled
+            ? RecognitionMediaCacheRequestEventKind.upstreamCancelled
+            : failureMessage == null
+                ? RecognitionMediaCacheRequestEventKind.upstreamCompleted
+                : RecognitionMediaCacheRequestEventKind.upstreamFailed,
+        at: DateTime.now(),
+        requestId: active.id,
+        range: active.range,
+        priorityEpoch: active.priorityEpoch,
+        requestRole: active.requestRole,
+        bytesTransferred: active.bytesTransferred,
+        elapsed: active.elapsed,
+        timeToFirstByte: active.timeToFirstByte,
+        averageBytesPerSecond: active.averageBytesPerSecond,
+        responseStatusCode:
+            failureMessage == null ? HttpStatus.partialContent : null,
+        responseContentRange: active.range == null ? null : 'engine',
+        message: cancelled
+            ? (active.cancelReason ?? 'cancelled')
+            : failureMessage,
+      ),
+    );
+  }
+
+  Future<void> _waitForProgress(Duration timeout) async {
+    await _progressSignals.stream.first.timeout(timeout, onTimeout: () {
+      throw TimeoutException('识别媒体缓存等待数据超时。');
+    });
+  }
+
+  int _cachedSliceLength(int start, int endExclusive) {
+    final path = _path;
+    if (path == null) return 0;
+    for (final segment in _cursor.segments) {
+      if (segment.start <= start && start < segment.endExclusive) {
+        final boundedEnd = segment.endExclusive < endExclusive
+            ? segment.endExclusive
+            : endExclusive;
+        return boundedEnd - start;
+      }
+    }
+    return 0;
+  }
+
+  /// Registers the byte region a loopback client asked for in the fill plan.
+  ///
+  /// Regions fully covered by the cursor are ignored. A demand starting well
+  /// behind the running fill position performs a player-first jump: the
+  /// running leg is aborted, its remainder rejoins the queue behind, and the
+  /// demand runs next.
+  void _scheduleFillRegion({
+    required int start,
+    required int? endInclusive,
+    required String reason,
+  }) {
+    if (_cancelled || _rangeUnsupportedFallback || _disposed) return;
+    final wantedEndExclusive = _boundedDemandEnd(start, endInclusive);
+    final gaps = _uncoveredGaps(start: start, endExclusive: wantedEndExclusive);
+    if (gaps.isEmpty) return;
+
+    // Player-style jump: the demanded region starts behind the running leg's
+    // effective frontier (its live position, or its very first byte while
+    // still waiting for response headers), so honoring it later would stall
+    // playback behind background work.
+    var skipFirstGap = false;
+    final executing = _executingLeg;
+    if (executing != null) {
+      final effectiveFrontier =
+          _executingPosition > executing.start ? _executingPosition : executing.start;
+      if (start >= effectiveFrontier) return;
+      executing.cancel('single_flight_jump_priority');
+      final remainderEnd = _boundedDemandEnd(effectiveFrontier, null);
+      if (effectiveFrontier < remainderEnd &&
+          !_isCoveredByOtherLeg(effectiveFrontier)) {
+        final rest =
+            _cloneLegShell(executing, effectiveFrontier, remainderEnd);
+        _activeProxyRequests[rest.id] = rest;
+        _fillLegs.add(rest);
+      }
+      // The freshly demanded region runs before everything queued.
+      final demandShell =
+          _newFillLegShell(gaps.first.start, gaps.first.end, _priorityEpoch);
+      _activeProxyRequests[demandShell.id] = demandShell;
+      _fillLegs.insert(0, demandShell);
+      skipFirstGap = true;
+    }
+    for (final gap in gaps.skip(skipFirstGap ? 1 : 0)) {
+      if (_isCoveredByOtherLeg(gap.start)) continue;
+      _insertFillLeg(start: gap.start, endExclusive: gap.end);
+    }
+    unawaited(_runFillPump());
+  }
+
+  int _boundedDemandEnd(int start, int? endInclusive) {
+    if (endInclusive != null) {
+      var bound = endInclusive + 1;
+      final limit = _contentLength;
+      if (limit != null && bound > limit) bound = limit;
+      return bound;
+    }
+    final limit = _contentLength;
+    if (limit != null) return limit;
+    final through = _cursor.downloadedThrough;
+    final projected = start > through ? start : through;
+    return projected + policy.chunkBytes;
+  }
+
+  List<({int start, int end})> _uncoveredGaps({
+    required int start,
+    required int endExclusive,
+  }) {
+    final gaps = <({int start, int end})>[];
+    var cursor = start;
+    final orderedSegments = _cursor.segments.toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    for (final segment in orderedSegments) {
+      if (segment.endExclusive <= cursor) continue;
+      if (segment.start > cursor) {
+        final gapEnd =
+            segment.start < endExclusive ? segment.start : endExclusive;
+        if (gapEnd > cursor) {
+          gaps.add((start: cursor, end: gapEnd));
+        }
+      }
+      if (segment.endExclusive > cursor) cursor = segment.endExclusive;
+      if (cursor >= endExclusive) break;
+    }
+    if (cursor < endExclusive) {
+      gaps.add((start: cursor, end: endExclusive));
+    }
+    return gaps;
+  }
+
+  _ActiveProxyRequest _newFillLegShell(int start, int endExclusive, int epoch) {
+    return _ActiveProxyRequest(
+      id: ++_nextRequestId,
+      range: 'bytes=$start-${endExclusive - 1}',
+      priorityEpoch: epoch,
+      requestRole: 'cacheFiller',
+    );
+  }
+
+  _ActiveProxyRequest _cloneLegShell(
+    _ActiveProxyRequest original,
+    int start,
+    int endExclusive,
+  ) =>
+      _newFillLegShell(start, endExclusive, original.priorityEpoch);
+
+  void _insertFillLeg({
+    required int start,
+    required int endExclusive,
+  }) {
+    final shell = _newFillLegShell(start, endExclusive, _priorityEpoch);
+    _activeProxyRequests[shell.id] = shell;
+    _fillLegs.add(shell);
+  }
+
+  Future<void> _runFillPump() async {
+    if (_fillPumpRunning || _disposed) return;
+    _fillPumpRunning = true;
+    try {
+      while (!_cancelled &&
+          !_rangeUnsupportedFallback &&
+          _fillLegs.isNotEmpty) {
+        final leg = _fillLegs.removeAt(0);
+        try {
+          await _executeFillLeg(leg);
+        } on Object catch (error) {
+          // One failing region must not kill scheduling for everyone else;
+          // waiting clients discover the stalled region via their timeouts.
+          _message = error.toString();
+          _emit();
+          _notifyProgress();
+        }
+      }
+      _maybeMarkComplete();
+    } finally {
+      _fillPumpRunning = false;
+    }
+  }
+
+  Future<void> _executeFillLeg(_ActiveProxyRequest leg) async {
+    const maxTotalAttempts = 256;
+    var errorAttempts = 0;
+    var totalAttempts = 0;
+    _executingLeg = leg;
+    try {
+      while (!_cancelled &&
+          !leg.cancelled &&
+          !_rangeUnsupportedFallback &&
+          !_isCoveredByOtherLeg(leg.start)) {
+        final spanEnd = _currentLegBound(leg);
+        if (_cursor.containsRange(start: leg.start, endExclusive: spanEnd)) {
+          return;
+        }
+        totalAttempts++;
+        var position = _nextUncoveredFrom(leg.start, spanEnd);
+        if (position >= spanEnd) return;
+        final rangeHeader = 'bytes=$position-';
+        leg.range = rangeHeader;
+        leg.startedAt = DateTime.now();
+        leg.bytesTransferred = 0;
+        leg.hasFirstByte = false;
+        _emitRequestEvent(
+          RecognitionMediaCacheRequestEvent(
+            kind: RecognitionMediaCacheRequestEventKind.upstreamStarted,
+            at: leg.startedAt,
+            requestId: leg.id,
+            range: rangeHeader,
+            priorityEpoch: leg.priorityEpoch,
+            requestRole: leg.requestRole,
+          ),
+        );
+        final RecognitionMediaHttpResponse response;
+        try {
+          response = await _openUpstream('GET', rangeHeader, leg);
+          if (response.statusCode == HttpStatus.ok && position > 0) {
+            // This origin ignores Range requests entirely; stop planning legs
+            // and let the transparent sequential path own the session.
+            _rangeUnsupportedFallback = true;
+            _clearPendingLegs('upstream_range_unsupported');
+            _notifyProgress();
+            return;
+          }
+          if (response.statusCode != HttpStatus.ok &&
+              response.statusCode != HttpStatus.partialContent) {
+            throw HttpException(
+              '识别媒体填充返回 HTTP ${response.statusCode}。',
+              uri: source.uri,
+            );
+          }
+        } on Object {
+          errorAttempts++;
+          leg.upstreamRequest?.abort();
+          _notifyProgress();
+          if (!_isRetryable(errorAttempts)) {
+            rethrow;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          continue;
+        }
+        _contentLength ??= _contentLengthFrom(response.headers, position);
+        final contentType = response.headers['content-type'];
+        if (contentType != null && _upstreamContentType == null) {
+          _upstreamContentType = contentType;
+        }
+        _emitRequestEvent(
+          RecognitionMediaCacheRequestEvent(
+            kind: RecognitionMediaCacheRequestEventKind.upstreamResponse,
+            at: DateTime.now(),
+            requestId: leg.id,
+            range: rangeHeader,
+            upstreamRange: rangeHeader,
+            priorityEpoch: leg.priorityEpoch,
+            requestRole: leg.requestRole,
+            responseStatusCode: response.statusCode,
+            responseContentRange: response.headers['content-range'],
+          ),
+        );
+        var interrupted = false;
+        try {
+          await for (final chunk in response.body) {
+            if (_cancelled || leg.cancelled || _rangeUnsupportedFallback) {
+              break;
+            }
+            if (chunk.isEmpty) continue;
+            if (position + chunk.length > policy.maxBytes) {
+              throw const FileSystemException('识别媒体缓存超过大小上限。');
+            }
+            await _writeCached(position, chunk);
+            _executingPosition = position;
+            position += chunk.length;
+            _notifyProgress();
+          }
+        } on Object {
+          if (_cancelled || leg.cancelled) {
+            interrupted = true;
+          } else {
+            // Premature upstream disconnect (proxy hops, edge resets). Give
+            // up on the remaining span for now; the next client demand in
+            // this region replans it from the current frontier, which keeps
+            // failure recovery bounded and identical to the transparent
+            // proxy's behavior.
+            errorAttempts++;
+            if (!_isRetryable(errorAttempts)) rethrow;
+            interrupted = true;
+            leg.upstreamRequest?.abort();
+            await Future<void>.delayed(const Duration(milliseconds: 200));
+          }
+        }
+        final externallyCancelled =
+            leg.cancelled && !_internalCancelReasons.contains(leg.cancelReason);
+        if (_cancelled ||
+            externallyCancelled ||
+            _rangeUnsupportedFallback) {
+          // Yield the queue: remaining bytes of this region go back behind
+          // whatever the interrupting demand scheduled ahead of us.
+          final rest = _nextUncoveredFrom(position, spanEnd);
+          if (rest < spanEnd && !_isCoveredByOtherLeg(rest)) {
+            final remainder = _cloneLegShell(leg, rest, spanEnd);
+            _activeProxyRequests[remainder.id] = remainder;
+            _fillLegs.add(remainder);
+          }
+          _notifyProgress();
+          return;
+        }
+        if (_contentLength != null &&
+            _cursor.downloadedThrough >= _contentLength!) {
+          _clearPendingLegs('media_complete');
+          _maybeMarkComplete();
+          return;
+        }
+        if (!interrupted && position >= spanEnd) {
+          // Natural end-of-region without reaching EOF; nothing left planned
+          // for this leg — waiting clients will re-plan on their next demand.
+          _notifyProgress();
+          return;
+        }
+        if (!_isRetryable(errorAttempts) || totalAttempts > maxTotalAttempts) {
+          throw HttpException(
+            '识别媒体填充连续失败：bytes=${leg.start}',
+            uri: source.uri,
+          );
+        }
+        if (interrupted) {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+        _notifyProgress();
+      }
+    } finally {
+      if (identical(_executingLeg, leg)) _executingLeg = null;
+      _activeProxyRequests.remove(leg.id);
+    }
+  }
+
+  static bool _isRetryable(int errorAttempts) =>
+      errorAttempts <= 4;
+
+  /// Cancel reasons set by this engine itself, as opposed to reasons injected
+  /// by jumps, priority activation, or session teardown.
+  static const _internalCancelReasons = {'media_complete'};
+
+  bool _isCoveredByOtherLeg(int position) =>
+      _fillLegs.any((leg) =>
+          leg.start <= position && _currentLegBound(leg) > position);
+
+  /// Live upper planning bound for a filler leg; grows once the media size or
+  /// the download frontier is known.
+  int _currentLegBound(_ActiveProxyRequest leg) =>
+      _boundedDemandEnd(leg.start, null);
+
+  int _nextUncoveredFrom(int position, int endExclusive) {
+    final gaps = _uncoveredGaps(start: position, endExclusive: endExclusive);
+    return gaps.isEmpty ? endExclusive : gaps.first.start;
+  }
+
+  void _clearPendingLegs(String reason) {
+    for (final leg in _fillLegs) {
+      leg.cancel(reason);
+      _activeProxyRequests.remove(leg.id);
+    }
+    _fillLegs.clear();
+  }
+
+  void _maybeMarkComplete() {
+    if (_cancelled ||
+        _state == RecognitionMediaCacheState.complete ||
+        _path == null ||
+        _contentLength == null ||
+        _cursor.downloadedThrough < _contentLength!) {
+      return;
+    }
+    _state = RecognitionMediaCacheState.complete;
+    _emit();
+  }
+
+  void _notifyProgress() {
+    if (!_progressSignals.isClosed) _progressSignals.add(null);
   }
 
   Future<RecognitionMediaHttpResponse> _openUpstream(
@@ -1269,13 +1871,36 @@ class _ActiveProxyRequest {
     required this.range,
     required this.priorityEpoch,
     required this.requestRole,
-  }) : startedAt = DateTime.now();
+    int? regionStart,
+  })  : startedAt = DateTime.now(),
+        regionStart = regionStart ?? _startFromRange(range);
 
   final int id;
-  final String? range;
+
+  /// The last upstream span attempted; filler legs rewrite this per attempt.
+  String? range;
   final int priorityEpoch;
   final String requestRole;
-  final DateTime startedAt;
+
+  /// First byte of the filler region, when this shell is a filler leg.
+  final int? regionStart;
+
+  /// Filler shells carry their region start; legacy request shells derive it
+  /// from the client Range header on demand.
+  int get start =>
+      regionStart ??
+      (int.tryParse(
+            RegExp(r'^bytes=(\d+)').firstMatch(range ?? '')?.group(1) ?? '',
+          ) ??
+          -1);
+
+  /// Reset per filler attempt; the shell spans every retry of one region.
+  DateTime startedAt;
+
+  static int? _startFromRange(String? range) => int.tryParse(
+        RegExp(r'^bytes=(\d+)').firstMatch(range ?? '')?.group(1) ?? '',
+      );
+
   HttpClientRequest? upstreamRequest;
   HttpClientResponse? upstreamResponse;
   bool cancelled = false;

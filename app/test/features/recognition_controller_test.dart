@@ -13,6 +13,7 @@ import 'package:ai_video_player_next/features/audio/fake_window_recognition_serv
 import 'package:ai_video_player_next/features/audio/recognition_controller.dart';
 import 'package:ai_video_player_next/features/audio/recognition_media_cache_worker.dart';
 import 'package:ai_video_player_next/features/player/mock_services.dart';
+import 'package:ai_video_player_next/features/player/shared_network_media_broker.dart';
 
 MediaSource _source(String title) => MediaSource.localFile(
       path: 'C:\\test\\$title.mp4',
@@ -375,58 +376,18 @@ void main() {
     await player.dispose();
   });
 
-  test('iOS network recognition fully caches media before opening decoder',
+  test('network recognition streams through the loopback proxy by default',
       () async {
     final player = MockPlayerService();
     final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
-    _IosCacheRecordingWorker? worker;
+    _RecordingProxyWorker? worker;
     final controller = RecognitionController(
       player: player,
       decoder: decoder,
       recognizer: FakeWindowRecognitionService(),
       planner: _planner(),
-      isIosPlatform: () => true,
       mediaCacheWorkerFactory: ({required source, required sessionId}) {
-        return worker = _IosCacheRecordingWorker(
-          source: source,
-          sessionId: sessionId,
-        );
-      },
-    );
-
-    await player.open(
-      MediaSource(
-        uri: Uri.parse('https://example.test/media.mp4'),
-        title: 'media.mp4',
-        kind: MediaSourceKind.browserHandoff,
-      ),
-    );
-    await player.play();
-    await _settle();
-
-    expect(worker, isNotNull);
-    expect(worker!.prepareCalls, 1);
-    expect(worker!.proxyCalls, 0);
-    expect(decoder.openRequest?.source.uri, Uri.file(r'C:\cache\media.mp4'));
-
-    await controller.dispose();
-    await player.dispose();
-  });
-
-  test('iOS streaming experiment opens the decoder through the loopback proxy',
-      () async {
-    final player = MockPlayerService();
-    final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
-    _IosStreamingRecordingWorker? worker;
-    final controller = RecognitionController(
-      player: player,
-      decoder: decoder,
-      recognizer: FakeWindowRecognitionService(),
-      planner: _planner(),
-      isIosPlatform: () => true,
-      iosStreamingProxyEnabled: () => true,
-      mediaCacheWorkerFactory: ({required source, required sessionId}) {
-        return worker = _IosStreamingRecordingWorker(
+        return worker = _RecordingProxyWorker(
           source: source,
           sessionId: sessionId,
         );
@@ -449,27 +410,85 @@ void main() {
     expect(worker!.proxyPathCarriesExtensionObserved, isTrue);
     expect(
       decoder.openRequest?.source.uri,
-      Uri.parse('aivpmedia://127.0.0.1:9/media.mp4'),
+      Uri.parse('http://127.0.0.1:9/media.mp4'),
     );
 
     await controller.dispose();
     await player.dispose();
   });
 
-  test('iOS streaming experiment falls back to the full cache on proxy failure',
+  test('recognition joins the shared broker session instead of a new proxy',
       () async {
     final player = MockPlayerService();
     final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
-    final workers = <_IosStreamingRecordingWorker>[];
+    final sharedWorker = _RecordingProxyWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'shared-session',
+    );
+    final broker = SharedNetworkMediaBroker(
+      workerFactory: ({required source, required sessionId}) => sharedWorker,
+    );
+    var factoryCalls = 0;
     final controller = RecognitionController(
       player: player,
       decoder: decoder,
       recognizer: FakeWindowRecognitionService(),
       planner: _planner(),
-      isIosPlatform: () => true,
-      iosStreamingProxyEnabled: () => true,
+      sharedMediaBroker: broker,
       mediaCacheWorkerFactory: ({required source, required sessionId}) {
-        final worker = _IosStreamingRecordingWorker(
+        ++factoryCalls;
+        throw StateError('borrowed sessions must not create workers');
+      },
+    );
+
+    // The broker already backs the media the player just opened.
+    expect(await broker.resolvePlaybackUri(RecognitionMediaSource(
+      uri: Uri.parse('https://example.test/media.mp4'),
+      title: 'media.mp4',
+      kind: MediaSourceKind.browserHandoff,
+    )), sharedWorker.snapshot.proxyUri);
+
+    await player.open(
+      MediaSource(
+        uri: Uri.parse('https://example.test/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+    );
+    await player.play();
+    await _settle();
+
+    expect(factoryCalls, 0);
+    expect(sharedWorker.proxyCalls, 1);
+    expect(sharedWorker.prepareCalls, 0);
+    expect(
+      decoder.openRequest?.source.uri,
+      sharedWorker.snapshot.proxyUri,
+    );
+    // Disposing the controller must not tear down the broker-owned worker.
+    await controller.dispose();
+    expect(sharedWorker.disposed, isFalse);
+    await broker.dispose();
+    expect(sharedWorker.disposed, isTrue);
+    await player.dispose();
+  });
+
+  test('recognition falls back to the full cache when the proxy fails',
+      () async {
+    final player = MockPlayerService();
+    final decoder = _RecordingAudioDecoder(chunks: [_chunk(0, last: true)]);
+    final workers = <_RecordingProxyWorker>[];
+    final controller = RecognitionController(
+      player: player,
+      decoder: decoder,
+      recognizer: FakeWindowRecognitionService(),
+      planner: _planner(),
+      mediaCacheWorkerFactory: ({required source, required sessionId}) {
+        final worker = _RecordingProxyWorker(
           source: source,
           sessionId: sessionId,
           startProxyFails: true,
@@ -500,21 +519,18 @@ void main() {
     await player.dispose();
   });
 
-  test(
-      'iOS streaming experiment retries the full cache after a proxy decoder open failure',
+  test('recognition retries the full cache after a proxy decoder open failure',
       () async {
     final player = MockPlayerService();
     final decoder = _FailingProxyOpenDecoder(chunks: [_chunk(0, last: true)]);
-    final workers = <_IosStreamingRecordingWorker>[];
+    final workers = <_RecordingProxyWorker>[];
     final controller = RecognitionController(
       player: player,
       decoder: decoder,
       recognizer: FakeWindowRecognitionService(),
       planner: _planner(),
-      isIosPlatform: () => true,
-      iosStreamingProxyEnabled: () => true,
       mediaCacheWorkerFactory: ({required source, required sessionId}) {
-        final worker = _IosStreamingRecordingWorker(
+        final worker = _RecordingProxyWorker(
           source: source,
           sessionId: sessionId,
         );
@@ -537,7 +553,7 @@ void main() {
     expect(workers.first.proxyCalls, 1);
     expect(workers.last.prepareCalls, 1);
     expect(decoder.openRequests, hasLength(2));
-    expect(decoder.openRequests.first.source.uri.scheme, 'aivpmedia');
+    expect(decoder.openRequests.first.source.uri.scheme, 'http');
     expect(
       decoder.openRequests.last.source.uri,
       Uri.file(r'C:\cache\media.mp4'),
@@ -777,40 +793,8 @@ class _RecordingMediaCacheWorker extends RecognitionMediaCacheWorker {
   }
 }
 
-class _IosCacheRecordingWorker extends RecognitionMediaCacheWorker {
-  _IosCacheRecordingWorker({
-    required super.source,
-    required super.sessionId,
-  });
-
-  int prepareCalls = 0;
-  int proxyCalls = 0;
-
-  @override
-  Future<RecognitionMediaCacheSnapshot> prepare() async {
-    ++prepareCalls;
-    return RecognitionMediaCacheSnapshot(
-      sessionId: sessionId,
-      mode: RecognitionMediaReadMode.localFile,
-      state: RecognitionMediaCacheState.complete,
-      cursor: RecognitionMediaCursor(
-        sessionId: sessionId,
-        mode: RecognitionMediaReadMode.localFile,
-      ),
-      path: r'C:\cache\media.mp4',
-      contentLength: 1234,
-    );
-  }
-
-  @override
-  Future<RecognitionMediaCacheSnapshot> startProxy() async {
-    ++proxyCalls;
-    throw StateError('iOS must not start the recognition proxy');
-  }
-}
-
-class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
-  _IosStreamingRecordingWorker({
+class _RecordingProxyWorker extends RecognitionMediaCacheWorker {
+  _RecordingProxyWorker({
     required super.source,
     required super.sessionId,
     this.startProxyFails = false,
@@ -820,11 +804,18 @@ class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
   int prepareCalls = 0;
   int proxyCalls = 0;
   bool proxyPathCarriesExtensionObserved = false;
+  bool disposed = false;
+
+  RecognitionMediaCacheSnapshot? _latestSnapshot;
+
+  @override
+  RecognitionMediaCacheSnapshot get snapshot =>
+      _latestSnapshot ?? super.snapshot;
 
   @override
   Future<RecognitionMediaCacheSnapshot> prepare() async {
     ++prepareCalls;
-    return RecognitionMediaCacheSnapshot(
+    return _latestSnapshot = RecognitionMediaCacheSnapshot(
       sessionId: sessionId,
       mode: RecognitionMediaReadMode.localFile,
       state: RecognitionMediaCacheState.complete,
@@ -842,7 +833,7 @@ class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
     ++proxyCalls;
     proxyPathCarriesExtensionObserved = proxyPathCarriesExtension;
     if (startProxyFails) {
-      return RecognitionMediaCacheSnapshot(
+      return _latestSnapshot = RecognitionMediaCacheSnapshot(
         sessionId: sessionId,
         mode: RecognitionMediaReadMode.progressiveSegmentCache,
         state: RecognitionMediaCacheState.failed,
@@ -853,7 +844,7 @@ class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
         message: 'proxy unavailable',
       );
     }
-    return RecognitionMediaCacheSnapshot(
+    return _latestSnapshot = RecognitionMediaCacheSnapshot(
       sessionId: sessionId,
       mode: RecognitionMediaReadMode.progressiveSegmentCache,
       state: RecognitionMediaCacheState.downloading,
@@ -863,6 +854,12 @@ class _IosStreamingRecordingWorker extends RecognitionMediaCacheWorker {
       ),
       proxyUri: Uri.parse('http://127.0.0.1:9/media.mp4'),
     );
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
+    await super.dispose();
   }
 }
 
@@ -878,9 +875,9 @@ class _RecordingAudioDecoder extends FakeAudioDecoder {
   }
 }
 
-/// Simulates AVFoundation rejecting the loopback proxy source while
+/// Simulates the platform decoder rejecting the loopback proxy source while
 /// accepting the same media from the fully cached local file. The proxy URI
-/// reaches the decoder through the aivpmedia custom scheme.
+/// reaches the decoder as a plain http loopback URL.
 class _FailingProxyOpenDecoder extends FakeAudioDecoder {
   _FailingProxyOpenDecoder({required super.chunks});
 
@@ -890,7 +887,10 @@ class _FailingProxyOpenDecoder extends FakeAudioDecoder {
   @override
   Future<void> open(AudioDecoderRequest request) async {
     openRequests.add(request);
-    if (!_rejectedProxyOnce && request.source.uri.scheme == 'aivpmedia') {
+    final uri = request.source.uri;
+    if (!_rejectedProxyOnce &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host == '127.0.0.1') {
       _rejectedProxyOnce = true;
       throw StateError('Cannot Open');
     }

@@ -4,12 +4,18 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../core/diagnostics/diagnostic_log_service.dart';
+import '../../domain/audio/recognition_media_source.dart';
 import '../../domain/player/player_service.dart';
+import 'shared_network_media_broker.dart';
 
 class MediaKitPlayerService implements PlayerService {
-  MediaKitPlayerService({Player? player, DiagnosticLogService? logs})
-      : _player = player ?? Player(),
-        _logs = logs {
+  MediaKitPlayerService({
+    Player? player,
+    DiagnosticLogService? logs,
+    SharedNetworkMediaBroker? sharedMedia,
+  })  : _player = player ?? Player(),
+        _logs = logs,
+        _sharedMedia = sharedMedia {
     videoController = VideoController(_player);
     _subscriptions.add(_player.stream.position.listen((value) {
       _emit(_snapshot.copyWith(position: value));
@@ -48,6 +54,12 @@ class MediaKitPlayerService implements PlayerService {
 
   final Player _player;
   final DiagnosticLogService? _logs;
+
+  /// When set, network media plays through the shared loopback cache proxy so
+  /// playback and recognition download the bytes once, together. Playback
+  /// snapshots keep carrying the ORIGINAL source; only libmpv sees the
+  /// loopback URL.
+  final SharedNetworkMediaBroker? _sharedMedia;
   final StreamController<PlaybackSnapshot> _controller =
       StreamController<PlaybackSnapshot>.broadcast();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
@@ -84,12 +96,36 @@ class MediaKitPlayerService implements PlayerService {
       bufferedDuration: Duration.zero,
     ));
 
+    var playbackUri = source.uri.toString();
+    var requestHeaders = source.requestHeaders;
+    final sharedMedia = _sharedMedia;
+    if (sharedMedia != null && _isNetworkUri(source.uri)) {
+      try {
+        final resolved = await sharedMedia.resolvePlaybackUri(
+          RecognitionMediaSource.fromPlayerSource(source),
+        );
+        if (resolved != null) {
+          playbackUri = resolved.toString();
+          // The proxy injects authorization headers upstream.
+          requestHeaders = const {};
+          _logs?.debug('播放器', '网络媒体已切换共享缓存源', {
+            '标题': source.title,
+            '代理地址': resolved,
+          });
+        }
+      } catch (error) {
+        _logs?.warning('播放器', '共享缓存源解析失败，改用直连地址', {
+          '标题': source.title,
+          '错误类型': error.runtimeType,
+        });
+      }
+    }
+
     try {
       await _player.open(
         Media(
-          source.uri.toString(),
-          httpHeaders:
-              source.requestHeaders.isEmpty ? null : source.requestHeaders,
+          playbackUri,
+          httpHeaders: requestHeaders.isEmpty ? null : requestHeaders,
         ),
         play: false,
       );
@@ -190,6 +226,8 @@ class MediaKitPlayerService implements PlayerService {
     await _player.setVolume(bounded);
     _logs?.debug('播放器', '用户调整音量', {'音量': bounded});
   }
+
+  bool _isNetworkUri(Uri uri) => uri.scheme == 'http' || uri.scheme == 'https';
 
   void _handlePlayerError(String error) {
     if (_snapshot.source == null) return;

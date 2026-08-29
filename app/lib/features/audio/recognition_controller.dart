@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import '../../core/diagnostics/diagnostic_log_service.dart';
 import '../../domain/audio/audio_models.dart';
@@ -8,6 +7,7 @@ import '../../domain/audio/recognition_queue.dart';
 import '../../domain/audio/recognition_media_source.dart';
 import '../../domain/player/player_service.dart';
 import '../../domain/speech/speech_models.dart';
+import '../player/shared_network_media_broker.dart';
 import 'recognition_media_cache_worker.dart';
 
 enum RecognitionPrefetchMode {
@@ -30,8 +30,7 @@ class RecognitionController {
       required RecognitionMediaSource source,
       required String sessionId,
     })? mediaCacheWorkerFactory,
-    bool Function()? isIosPlatform,
-    bool Function()? iosStreamingProxyEnabled,
+    SharedNetworkMediaBroker? sharedMediaBroker,
     RecognitionPrefetchMode prefetchMode = RecognitionPrefetchMode.fullMedia,
     this.lowWatermark = const Duration(seconds: 20),
     this.highWatermark = const Duration(seconds: 45),
@@ -46,9 +45,7 @@ class RecognitionController {
         _logs = logs,
         _mediaCacheWorkerFactory =
             mediaCacheWorkerFactory ?? _defaultMediaCacheWorker,
-        _isIosPlatform = isIosPlatform ?? _defaultIsIosPlatform,
-        _iosStreamingProxyEnabled =
-            iosStreamingProxyEnabled ?? _defaultIosStreamingProxyEnabled,
+        _sharedMediaBroker = sharedMediaBroker,
         _prefetchMode = prefetchMode,
         seekPriorityLead = priorityLead ?? highWatermark {
     if (lowWatermark.isNegative || highWatermark <= lowWatermark) {
@@ -83,11 +80,10 @@ class RecognitionController {
     required RecognitionMediaSource source,
     required String sessionId,
   }) _mediaCacheWorkerFactory;
-  final bool Function() _isIosPlatform;
 
-  /// Experimental: when true, iOS network recognition first streams through
-  /// the loopback proxy and falls back to the full cache on any failure.
-  final bool Function() _iosStreamingProxyEnabled;
+  /// Shared playback+recognition download session; null in tests that supply
+  /// their own [mediaCacheWorkerFactory].
+  final SharedNetworkMediaBroker? _sharedMediaBroker;
   RecognitionPrefetchMode _prefetchMode;
   final Duration lowWatermark;
   final Duration highWatermark;
@@ -126,9 +122,9 @@ class RecognitionController {
   bool _hasLoggedAudioChunk = false;
   bool _hasLoggedRecognition = false;
 
-  /// True while the current iOS session reads through the experimental
-  /// streaming proxy; a decoder-open failure then retries via the full cache.
-  bool _iosProxySourceActive = false;
+  /// True while the current session reads through the loopback proxy; a
+  /// decoder-open failure then retries via the full cache.
+  bool _proxySourceActive = false;
   DateTime? _decoderOpenRequestedAt;
   DateTime? _prioritySeekRequestedAt;
   Duration? _prioritySeekStart;
@@ -192,10 +188,6 @@ class RecognitionController {
     required String sessionId,
   }) =>
       RecognitionMediaCacheWorker(source: source, sessionId: sessionId);
-
-  static bool _defaultIsIosPlatform() => Platform.isIOS;
-
-  static bool _defaultIosStreamingProxyEnabled() => false;
 
   Future<void> seek(Duration position) async {
     if (_disposed || _sessionId == null) return;
@@ -528,7 +520,7 @@ class RecognitionController {
     _lastLoggedDecoderChunks = -1;
     _hasLoggedAudioChunk = false;
     _hasLoggedRecognition = false;
-    _iosProxySourceActive = false;
+    _proxySourceActive = false;
     _decoderOpenRequestedAt = DateTime.now();
     _setDiagnostic(RecognitionDiagnostics(
       sessionId: sessionId,
@@ -577,18 +569,18 @@ class RecognitionController {
       openError = error;
     }
     if (generation != _generation || _disposed) return;
-    if (openError != null && _iosProxySourceActive) {
-      // The experimental iOS streaming proxy could not be opened by
-      // AVFoundation; one retry through the full cache keeps the session
-      // alive instead of dropping recognition for the whole media.
-      _iosProxySourceActive = false;
-      _logs?.warning('识别音频', 'iOS 流式识别解码打开失败，回退完整缓存', {
+    if (openError != null && _proxySourceActive) {
+      // The loopback proxy could not be opened by the platform decoder; one
+      // retry through the full cache keeps the session alive instead of
+      // dropping recognition for the whole media.
+      _proxySourceActive = false;
+      _logs?.warning('识别音频', '流式识别解码打开失败，回退完整缓存', {
         '会话 ID': sessionId,
         '错误类型': openError.runtimeType,
         '错误信息': openError.toString(),
       });
       try {
-        final fallbackSource = await _prepareIosFullCacheSource(
+        final fallbackSource = await _prepareFullCacheSource(
           source: source,
           sessionId: sessionId,
           generation: generation,
@@ -656,31 +648,53 @@ class RecognitionController {
     required String sessionId,
     required int generation,
   }) async {
-    await _releaseMediaCacheWorker();
     final recognitionSource = RecognitionMediaSource.fromPlayerSource(source);
-    if (!recognitionSource.isNetwork) return source;
-
-    if (_isIosPlatform()) {
-      if (_iosStreamingProxyEnabled()) {
-        final proxySource = await _tryIosStreamingProxySource(
-          source: source,
-          recognitionSource: recognitionSource,
-          sessionId: sessionId,
-          generation: generation,
-        );
-        if (proxySource != null) return proxySource;
-      }
-      return _prepareIosFullCacheSource(
-        source: source,
-        sessionId: sessionId,
-        generation: generation,
-      );
+    if (!recognitionSource.isNetwork) {
+      await _releaseMediaCacheWorker();
+      return source;
     }
 
+    // Join the shared playback session when one exists for this media: the
+    // decoder rides the download mpv already started instead of opening a
+    // competing connection to the (often throttled) origin.
+    final broker = _sharedMediaBroker;
+    if (broker != null) {
+      final borrower = await broker.borrowFor(recognitionSource);
+      if (generation != _generation || _disposed) return source;
+      if (borrower != null) {
+        final snapshot = borrower.snapshot;
+        final proxyUri = snapshot.proxyUri;
+        if (proxyUri != null &&
+            snapshot.state != RecognitionMediaCacheState.failed) {
+          _ownsMediaCacheWorker = false;
+          _mediaCacheWorker = borrower;
+          _proxySourceActive = true;
+          _lastMediaCacheLogAt = null;
+          _mediaCacheRequestInfoBudget = _mediaCacheRequestInfoBudgetReset;
+          _mediaCacheSubscription = borrower.snapshots.listen(
+            _onMediaCacheSnapshot,
+          );
+          _mediaCacheRequestSubscription = borrower.requestEvents.listen(
+            _onMediaCacheRequestEvent,
+          );
+          _logs?.info('识别媒体缓存', '识别已接入共享缓存源', {
+            '会话 ID': sessionId,
+            '原始地址': source.uri,
+            '代理地址': proxyUri,
+          });
+          return _decoderSourceFromProxy(source, proxyUri);
+        }
+      }
+    }
+
+    // Standalone session (tests, or the broker declined): stream through an
+    // owned proxy exactly as before.
+    await _releaseMediaCacheWorker();
     final worker = _attachMediaCacheWorker(
       recognitionSource: recognitionSource,
       sessionId: sessionId,
     );
+    worker.proxyPathCarriesExtension = true;
     final snapshot = await worker.startProxy();
     if (generation != _generation ||
         _disposed ||
@@ -688,16 +702,33 @@ class RecognitionController {
       return source;
     }
     final proxyUri = snapshot.proxyUri;
-    if (proxyUri == null) {
-      throw StateError(snapshot.message ?? '识别媒体代理未能启动。');
+    if (snapshot.state == RecognitionMediaCacheState.failed ||
+        proxyUri == null) {
+      _logs?.warning('识别媒体缓存', '流式识别代理启动失败，回退完整缓存', {
+        '会话 ID': sessionId,
+        '原始地址': source.uri,
+        '说明': snapshot.message,
+      });
+      return _prepareFullCacheSource(
+        source: source,
+        sessionId: sessionId,
+        generation: generation,
+      );
     }
-    _logs?.info('识别媒体缓存', '识别网络媒体代理已启动', {
+    _proxySourceActive = true;
+    _logs?.info('识别媒体缓存', '流式识别代理已启动', {
       '会话 ID': sessionId,
       '原始地址': source.uri,
       '代理地址': proxyUri,
       '缓存上限字节': worker.policy.maxBytes,
-      '分段上限': worker.policy.maxSegments,
     });
+    return _decoderSourceFromProxy(source, proxyUri);
+  }
+
+  /// The decoder consumes the loopback proxy URL as-is on every platform:
+  /// the proxy injects the browser authorization headers upstream, so no
+  /// custom scheme or header pass-through is needed.
+  MediaSource _decoderSourceFromProxy(MediaSource source, Uri proxyUri) {
     return MediaSource(
       uri: proxyUri,
       title: source.title,
@@ -715,6 +746,7 @@ class RecognitionController {
       source: recognitionSource,
       sessionId: sessionId,
     );
+    _ownsMediaCacheWorker = true;
     _mediaCacheWorker = worker;
     _lastMediaCacheLogAt = null;
     _mediaCacheRequestInfoBudget = _mediaCacheRequestInfoBudgetReset;
@@ -725,56 +757,9 @@ class RecognitionController {
     return worker;
   }
 
-  /// Experimental iOS streaming path. Returns null when the proxy fails to
-  /// start so the caller falls back to the full cache; returns [source] only
-  /// for a session that was already superseded.
-  Future<MediaSource?> _tryIosStreamingProxySource({
-    required MediaSource source,
-    required RecognitionMediaSource recognitionSource,
-    required String sessionId,
-    required int generation,
-  }) async {
-    final worker = _attachMediaCacheWorker(
-      recognitionSource: recognitionSource,
-      sessionId: sessionId,
-    );
-    worker.proxyPathCarriesExtension = true;
-    final snapshot = await worker.startProxy();
-    if (generation != _generation ||
-        _disposed ||
-        !identical(worker, _mediaCacheWorker)) {
-      return source;
-    }
-    final proxyUri = snapshot.proxyUri;
-    if (snapshot.state == RecognitionMediaCacheState.failed ||
-        proxyUri == null) {
-      _logs?.warning('识别媒体缓存', 'iOS 流式识别代理启动失败，回退完整缓存', {
-        '会话 ID': sessionId,
-        '原始地址': source.uri,
-        '说明': snapshot.message,
-      });
-      await _releaseMediaCacheWorker();
-      return null;
-    }
-    _iosProxySourceActive = true;
-    final decoderUri = RecognitionMediaCacheWorker.customSchemeProxyUri(proxyUri);
-    _logs?.info('识别媒体缓存', 'iOS 流式识别代理已启动（实验）', {
-      '会话 ID': sessionId,
-      '原始地址': source.uri,
-      '代理地址': proxyUri,
-      '解码地址': decoderUri,
-      '缓存上限字节': worker.policy.maxBytes,
-    });
-    return MediaSource(
-      uri: decoderUri,
-      title: source.title,
-      kind: source.kind,
-      originPage: source.originPage,
-      browserSessionId: source.browserSessionId,
-    );
-  }
-
-  Future<MediaSource> _prepareIosFullCacheSource({
+  /// Last-resort recognition source: download the whole media through a
+  /// private cache worker and hand the decoder a completed local file.
+  Future<MediaSource> _prepareFullCacheSource({
     required MediaSource source,
     required String sessionId,
     required int generation,
@@ -784,7 +769,7 @@ class RecognitionController {
       recognitionSource: RecognitionMediaSource.fromPlayerSource(source),
       sessionId: sessionId,
     );
-    _logs?.info('识别媒体缓存', 'iOS 网络媒体开始完整缓存', {
+    _logs?.info('识别媒体缓存', '网络媒体开始完整缓存', {
       '会话 ID': sessionId,
       '原始地址': source.uri,
       '缓存上限字节': worker.policy.maxBytes,
@@ -797,10 +782,10 @@ class RecognitionController {
     }
     if (snapshot.state != RecognitionMediaCacheState.complete ||
         snapshot.path == null) {
-      throw StateError(snapshot.message ?? 'iOS 识别媒体缓存未完成。');
+      throw StateError(snapshot.message ?? '识别媒体缓存未完成。');
     }
     final localUri = Uri.file(snapshot.path!);
-    _logs?.info('识别媒体缓存', 'iOS 识别媒体缓存完成', {
+    _logs?.info('识别媒体缓存', '识别媒体缓存完成', {
       '会话 ID': sessionId,
       '本地地址': localUri,
       '媒体总字节': snapshot.contentLength,
@@ -825,8 +810,16 @@ class RecognitionController {
     final worker = _mediaCacheWorker;
     _mediaCacheWorker = null;
     _lastMediaCacheLogAt = null;
-    await worker?.dispose();
+    _proxySourceActive = false;
+    // A borrowed shared-session worker is owned by the broker, not by us.
+    if (_ownsMediaCacheWorker) {
+      await worker?.dispose();
+    }
   }
+
+  /// Set when the current worker came from our own factory; cleared when it
+  /// was borrowed from the shared media broker.
+  bool _ownsMediaCacheWorker = true;
 
   void _onMediaCacheRequestEvent(RecognitionMediaCacheRequestEvent event) {
     final details = <String, Object?>{

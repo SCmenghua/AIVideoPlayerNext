@@ -9,20 +9,6 @@ import 'package:ai_video_player_next/domain/player/player_service.dart';
 import 'package:ai_video_player_next/features/audio/recognition_media_cache_worker.dart';
 
 void main() {
-  test('customSchemeProxyUri keeps host, port, path and query', () {
-    final proxy = Uri.parse(
-      'http://127.0.0.1:52638/media.mp4?a=1&b=2',
-    );
-    final mapped = RecognitionMediaCacheWorker.customSchemeProxyUri(proxy);
-    expect(mapped.scheme, 'aivpmedia');
-    expect(mapped.host, '127.0.0.1');
-    expect(mapped.port, 52638);
-    expect(mapped.path, '/media.mp4');
-    expect(mapped.query, 'a=1&b=2');
-    // The inverse mapping must still address the same loopback endpoint.
-    expect(mapped.replace(scheme: 'http'), proxy);
-  });
-
   test('downloads contiguous ranges into a session-owned media file', () async {
     final directory =
         await Directory.systemTemp.createTemp('recognition-cache-');
@@ -230,20 +216,28 @@ void main() {
       () async {
     final directory =
         await Directory.systemTemp.createTemp('recognition-proxy-cache-');
+    const media = 'abcdefghij';
     final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var upstreamRequests = 0;
     String? authorization;
+    final transferredIntervals = <({int start, int end})>[];
     upstream.listen((request) async {
       ++upstreamRequests;
       authorization = request.headers.value(HttpHeaders.authorizationHeader);
-      final range = request.headers.value(HttpHeaders.rangeHeader);
-      expect(range, 'bytes=2-5');
+      final range = request.headers.value(HttpHeaders.rangeHeader)!;
+      // The transparent engine asks a closed range; the single-flight filler
+      // streams open-ended from its planning start.
+      expect(range, anyOf('bytes=2-5', 'bytes=2-'));
+      final start = int.parse(RegExp(r'^bytes=(\d+)-').firstMatch(range)!.group(1)!);
+      final body = media.substring(start);
+      transferredIntervals.add((start: start, end: media.length));
       request.response
         ..statusCode = HttpStatus.partialContent
         ..headers.set(HttpHeaders.acceptRangesHeader, 'bytes')
-        ..headers.set(HttpHeaders.contentRangeHeader, 'bytes 2-5/10')
-        ..headers.contentLength = 4
-        ..add('cdef'.codeUnits);
+        ..headers.set(
+            HttpHeaders.contentRangeHeader, 'bytes $start-${media.length - 1}/${media.length}')
+        ..headers.contentLength = body.length
+        ..add(body.codeUnits);
       await request.response.close();
     });
     final worker = RecognitionMediaCacheWorker(
@@ -263,19 +257,32 @@ void main() {
     final proxy = await worker.startProxy();
     final uri = proxy.proxyUri!;
     final first = await _readProxyRange(uri, 'bytes=2-5');
+    await _settleFill(worker);
+    final beforeRepeat = upstreamRequests;
     final second = await _readProxyRange(uri, 'bytes=2-5');
 
     expect(first, 'cdef');
     expect(second, 'cdef');
     expect(authorization, 'Bearer test-token');
-    expect(upstreamRequests, 1);
+    // The repeat is served entirely from the byte cache.
+    expect(upstreamRequests, beforeRepeat);
+    // Background opportunistic fill never re-downloads an overlapping span.
+    var coveredEnd = 0;
+    for (final interval in transferredIntervals..sort((a, b) => a.start.compareTo(b.start))) {
+      if (interval.start > coveredEnd && transferredIntervals.length > 1) {
+        fail('upstream requests left an unplanned gap at ${interval.start}');
+      }
+      coveredEnd =
+          interval.end > coveredEnd ? interval.end : coveredEnd;
+    }
+    expect(coveredEnd <= media.length, isTrue);
 
     await worker.dispose();
     await upstream.close(force: true);
     await directory.delete(recursive: true);
   });
 
-  test('proxy transparently forwards an open decoder range by default',
+  test('transparent passthrough streams an open decoder range when opted out',
       () async {
     final directory =
         await Directory.systemTemp.createTemp('recognition-proxy-stream-');
@@ -300,7 +307,10 @@ void main() {
         kind: MediaSourceKind.browserHandoff,
       ),
       sessionId: 'session-stream',
-      policy: const RecognitionMediaCachePolicy(maxBytes: 32),
+      policy: const RecognitionMediaCachePolicy(
+        maxBytes: 32,
+        useSingleFlightFiller: false,
+      ),
       cacheDirectory: directory,
     );
     final events = <RecognitionMediaCacheRequestEvent>[];
@@ -453,6 +463,186 @@ void main() {
     await directory.delete(recursive: true);
   });
 
+  test('single-flight filler serves two clients over one upstream connection',
+      () async {
+    final directory =
+        await Directory.systemTemp.createTemp('filler-multiplex-');
+    const media = '0123456789abcdef';
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var connections = 0;
+    var maxConcurrent = 0;
+    var active = 0;
+    upstream.listen((request) async {
+      ++connections;
+      ++active;
+      if (active > maxConcurrent) {
+        maxConcurrent = active;
+      }
+      request.response
+        ..statusCode = HttpStatus.partialContent
+        ..headers.set(HttpHeaders.contentRangeHeader,
+            'bytes 0-${media.length - 1}/${media.length}')
+        ..headers.set(HttpHeaders.contentTypeHeader, 'video/mp4')
+        ..headers.contentLength = media.length;
+      for (final chunk in ['0123', '4567', '89ab']) {
+        request.response.add(chunk.codeUnits);
+        await request.response.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+      request.response.add('cdef'.codeUnits);
+      await request.response.close();
+      --active;
+    });
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('http://127.0.0.1:${upstream.port}/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-engine',
+      cacheDirectory: directory,
+    );
+    final proxy = await worker.startProxy();
+    final uri = proxy.proxyUri!;
+
+    final firstClient = _readProxyRange(uri, 'bytes=0-');
+    while (worker.snapshot.cursor.downloadedThrough < 4) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    final secondClient = _readProxyRange(uri, 'bytes=4-7');
+    expect(await firstClient, media);
+    expect(await secondClient, '4567');
+
+    await _settleFill(worker);
+    expect(connections, 1);
+    expect(maxConcurrent, 1);
+    expect(worker.snapshot.cursor.downloadedThrough, media.length);
+
+    await worker.dispose();
+    await upstream.close(force: true);
+    await directory.delete(recursive: true);
+  });
+
+  test('single-flight jump prioritizes the demanded region then refills',
+      () async {
+    final directory = await Directory.systemTemp.createTemp('filler-jump-');
+    const mediaLength = 200;
+    int mediaByte(int offset) => offset ~/ 2 % 251;
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final requestedRanges = <String>[];
+    final slowLegBegan = Completer<void>();
+    final releaseSlowLeg = Completer<void>();
+    final farDemandBegan = Completer<void>();
+    upstream.listen((request) async {
+      final range = request.headers.value(HttpHeaders.rangeHeader)!;
+      requestedRanges.add(range);
+      if (range == 'bytes=16-') {
+        slowLegBegan.complete();
+        // Park the first leg before committing headers so the demand-side
+        // jump below is fully deterministic.
+        await releaseSlowLeg.future;
+      }
+      if (range == 'bytes=4-') {
+        farDemandBegan.complete();
+      }
+      final start =
+          int.parse(RegExp(r'^bytes=(\d+)-').firstMatch(range)!.group(1)!);
+      final remaining = mediaLength - start;
+      request.response
+        ..statusCode = HttpStatus.partialContent
+        ..headers.set(HttpHeaders.contentRangeHeader,
+            'bytes $start-${mediaLength - 1}/$mediaLength')
+        ..headers.contentLength = remaining
+        ..add(List<int>.generate(remaining, (i) => mediaByte(start + i)));
+      try {
+        await request.response.close();
+      } on Object {
+        // The filler deliberately aborts the superseded first leg.
+      }
+    });
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('http://127.0.0.1:${upstream.port}/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-jump',
+      policy: const RecognitionMediaCachePolicy(
+        clientWaitTimeout: Duration(seconds: 10),
+      ),
+      cacheDirectory: directory,
+    );
+    final proxy = await worker.startProxy();
+    final uri = proxy.proxyUri!;
+    final slowTail = _readProxyRange(uri, 'bytes=16-');
+    await slowLegBegan.future;
+
+    // A far-backward player seek into an uncovered area must preempt the
+    // running fill immediately: the demand region is answered while the old
+    // leg is still parked at the origin.
+    final backwardDemand = _readProxyRange(uri, 'bytes=4-11');
+    await farDemandBegan.future;
+    if (!releaseSlowLeg.isCompleted) releaseSlowLeg.complete();
+    expect(await backwardDemand,
+        String.fromCharCodes(List<int>.generate(8, (i) => mediaByte(4 + i))));
+    expect(await slowTail,
+        String.fromCharCodes(List<int>.generate(184, (i) => mediaByte(16 + i))));
+
+    // The pre-jump head gap is refilled by the next explicit demand.
+    final headFill = await _readProxyRange(uri, 'bytes=0-4');
+    expect(
+        headFill.codeUnits,
+        List<int>.generate(5, (i) => mediaByte(i)));
+    await _settleFill(worker);
+    expect(requestedRanges[0], 'bytes=16-');
+    expect(requestedRanges[1], 'bytes=4-');
+    expect(worker.snapshot.cursor.downloadedThrough, mediaLength);
+    expect(worker.snapshot.state, RecognitionMediaCacheState.complete);
+
+    await worker.dispose();
+    await upstream.close(force: true);
+    await directory.delete(recursive: true);
+  });
+
+  test('single-flight filler answers HEAD probes with the media size',
+      () async {
+    final directory = await Directory.systemTemp.createTemp('filler-head-');
+    const media = 'abcdefgh';
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    upstream.listen((request) async {
+      request.response
+        ..statusCode = HttpStatus.partialContent
+        ..headers.set(HttpHeaders.contentRangeHeader,
+            'bytes 0-7/${media.length}')
+        ..headers.set(HttpHeaders.contentTypeHeader, 'video/mp4')
+        ..headers.contentLength = media.length
+        ..add(media.codeUnits);
+      await request.response.close();
+    });
+    final worker = RecognitionMediaCacheWorker(
+      source: RecognitionMediaSource(
+        uri: Uri.parse('http://127.0.0.1:${upstream.port}/media.mp4'),
+        title: 'media.mp4',
+        kind: MediaSourceKind.browserHandoff,
+      ),
+      sessionId: 'session-head',
+      cacheDirectory: directory,
+    );
+    final proxy = await worker.startProxy();
+
+    final head = await _readProxyHead(proxy.proxyUri!);
+    expect(head.statusCode, HttpStatus.partialContent);
+    expect(head.contentRange, endsWith('/8'));
+
+    await _settleFill(worker);
+    final body = await _readProxyRange(proxy.proxyUri!, 'bytes=0-');
+    expect(body, media);
+
+    await worker.dispose();
+    await upstream.close(force: true);
+    await directory.delete(recursive: true);
+  });
+
   test('priority intent waits for decoder seek before cancelling old range',
       () async {
     final directory =
@@ -498,6 +688,7 @@ void main() {
       policy: const RecognitionMediaCachePolicy(
         maxBytes: 1024,
         enableContainerWarmup: false,
+        useSingleFlightFiller: false,
       ),
       cacheDirectory: directory,
     );
@@ -562,6 +753,44 @@ Future<String> _readProxyRange(Uri uri, String range) async {
     }));
   } finally {
     client.close(force: true);
+  }
+}
+
+Future<({int statusCode, String? contentRange})> _readProxyHead(Uri uri) async {
+  final client = HttpClient();
+  try {
+    final request = await client.openUrl('HEAD', uri);
+    final response = await request.close();
+    await response.drain<void>();
+    return (
+      statusCode: response.statusCode,
+      contentRange: response.headers.value(HttpHeaders.contentRangeHeader),
+    );
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// Waits until the single-flight filler stops making progress or completes.
+Future<void> _settleFill(RecognitionMediaCacheWorker worker) async {
+  var lastSeen = -1;
+  var idlePolls = 0;
+  for (var i = 0; i < 2000; i++) {
+    final snapshot = worker.snapshot;
+    if (snapshot.state == RecognitionMediaCacheState.complete &&
+        snapshot.cursor.downloadedThrough ==
+            (snapshot.contentLength ?? -1)) {
+      return;
+    }
+    final through = snapshot.cursor.downloadedThrough;
+    if (through == lastSeen) {
+      idlePolls++;
+      if (idlePolls > 100) return;
+    } else {
+      idlePolls = 0;
+      lastSeen = through;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 }
 

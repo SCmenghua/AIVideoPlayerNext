@@ -30,3 +30,9 @@ test_assets/media/
 *.safetensors.index.json
 *.mp4
 *.wav
+
+# Local runtime data and release output
+.dart-appdata/
+.dart-localappdata/
+.tool-appdata/
+release/
