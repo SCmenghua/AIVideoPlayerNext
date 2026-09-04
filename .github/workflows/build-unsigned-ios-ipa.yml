@@ -129,9 +129,10 @@ jobs:
 
           ipa_size="$(stat -f '%z' "build/$artifact_name")"
           echo "Unsigned IPA size: $ipa_size bytes"
-          # Lower bound catches a build that lost its frameworks; upper bound
-          # catches a weight finding its way back into the bundle.
-          test "$ipa_size" -gt 20000000
+          # A weightless build measures about 15.6 MB. The lower bound catches
+          # a build that lost its frameworks; the upper bound catches a weight
+          # finding its way back into the bundle.
+          test "$ipa_size" -gt 10000000
           test "$ipa_size" -lt 300000000
           ! unzip -Z1 "build/$artifact_name" | grep -E 'Payload/Runner\.app/ggml-.*\.bin'
           echo "IPA carries no Whisper weight"
