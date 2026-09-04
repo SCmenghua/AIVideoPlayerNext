@@ -19,9 +19,74 @@ enum PlaybackStartStrategy {
   playbackPriority,
 }
 
+/// A selectable speech/translation language shown in the settings workspace.
+class LanguageOption {
+  const LanguageOption(this.code, this.label);
+
+  final String code;
+  final String label;
+}
+
+/// Whisper source-language options. `auto` lets Whisper detect the language;
+/// pinning a language removes detection mistakes for known-content playback.
+const recognitionLanguageOptions = <LanguageOption>[
+  LanguageOption('auto', '自动检测'),
+  LanguageOption('ja', '日语'),
+  LanguageOption('en', '英语'),
+  LanguageOption('zh', '中文'),
+  LanguageOption('ko', '韩语'),
+  LanguageOption('ru', '俄语'),
+  LanguageOption('fr', '法语'),
+  LanguageOption('de', '德语'),
+  LanguageOption('es', '西班牙语'),
+];
+
+const translationTargetLanguageOptions = <LanguageOption>[
+  LanguageOption('zh-CN', '简体中文'),
+  LanguageOption('zh-TW', '繁体中文'),
+  LanguageOption('en', 'English'),
+  LanguageOption('ja', '日本語'),
+  LanguageOption('ko', '한국어'),
+];
+
+/// A locally installable Whisper GGML model selectable in settings.
+class WhisperModelOption {
+  const WhisperModelOption(this.fileName, this.label);
+
+  final String fileName;
+  final String label;
+}
+
+const whisperModelOptions = <WhisperModelOption>[
+  WhisperModelOption(
+    'ggml-kotoba-whisper-v2.0.bin',
+    'kotoba-whisper v2.0 日语特化（约1.5GB，推荐）',
+  ),
+  WhisperModelOption(
+    'ggml-kotoba-whisper-v2.0-q5_0.bin',
+    'kotoba-whisper v2.0 量化（约600MB）',
+  ),
+  WhisperModelOption(
+    'ggml-large-v3-turbo-q5_0.bin',
+    'large-v3-turbo 量化（约574MB）',
+  ),
+  WhisperModelOption(
+    'ggml-large-v3-q5_0.bin',
+    'large-v3 量化 q5_0（约1.1GB）',
+  ),
+  WhisperModelOption(
+    'ggml-large-v3.bin',
+    'large-v3 全精度 fp16（约3.1GB）',
+  ),
+];
+
+const defaultWhisperModel = 'ggml-kotoba-whisper-v2.0.bin';
+
 class AppSettings {
   const AppSettings({
     required this.prefetchMode,
+    required this.recognitionLanguage,
+    required this.whisperModel,
     required this.translationMode,
     required this.localTranslationModel,
     required this.deeplApiKey,
@@ -32,12 +97,21 @@ class AppSettings {
     required this.translationBatchSize,
     required this.translationMaxConcurrent,
     required this.translationContextEnabled,
+    required this.translationGlossary,
+    required this.translationTargetLanguage,
     required this.subtitleDisplayMode,
     required this.playbackStartStrategy,
     required this.waitForSubtitlePreparation,
   });
 
   final RecognitionPrefetchMode prefetchMode;
+
+  /// Whisper source language hint, e.g. `ja` or `auto` for detection.
+  final String recognitionLanguage;
+
+  /// GGML model file name selected in settings, resolved against the
+  /// program-directory `models` folder at startup.
+  final String whisperModel;
   final TranslationMode translationMode;
   final LocalTranslationModel localTranslationModel;
   final String? deeplApiKey;
@@ -48,6 +122,13 @@ class AppSettings {
   final int translationBatchSize;
   final int translationMaxConcurrent;
   final bool translationContextEnabled;
+
+  /// Translation target shown in subtitles, e.g. `zh-CN`.
+  final String translationTargetLanguage;
+
+  /// Raw user-defined glossary text (`原文=译文` per line). Parsed only by
+  /// providers that can honor it; see [parseTranslationGlossary].
+  final String translationGlossary;
   final SubtitleDisplayMode subtitleDisplayMode;
   final PlaybackStartStrategy playbackStartStrategy;
   final bool waitForSubtitlePreparation;
@@ -59,7 +140,8 @@ class AppSettings {
       deeplEndpoint == other.deeplEndpoint &&
       genericEndpoint == other.genericEndpoint &&
       genericApiKey == other.genericApiKey &&
-      genericModel == other.genericModel;
+      genericModel == other.genericModel &&
+      translationGlossary == other.translationGlossary;
 
   bool sameTranslationScheduling(AppSettings other) =>
       translationBatchSize == other.translationBatchSize &&
@@ -70,6 +152,8 @@ class AppSettings {
 class AppSettingsController extends ChangeNotifier {
   AppSettingsController({
     RecognitionPrefetchMode prefetchMode = RecognitionPrefetchMode.fullMedia,
+    String recognitionLanguage = 'ja',
+    String whisperModel = defaultWhisperModel,
     TranslationMode translationMode = TranslationMode.deepl,
     LocalTranslationModel localTranslationModel =
         LocalTranslationModel.gemma4E2BItQatMobileTransformers,
@@ -81,11 +165,15 @@ class AppSettingsController extends ChangeNotifier {
     int translationBatchSize = 8,
     int translationMaxConcurrent = 10,
     bool translationContextEnabled = true,
+    String translationGlossary = '',
+    String translationTargetLanguage = 'zh-CN',
     SubtitleDisplayMode subtitleDisplayMode = SubtitleDisplayMode.bilingual,
     PlaybackStartStrategy playbackStartStrategy =
         PlaybackStartStrategy.translationPriority,
     bool waitForSubtitlePreparation = true,
   })  : _prefetchMode = prefetchMode,
+        _recognitionLanguage = recognitionLanguage,
+        _whisperModel = whisperModel,
         _translationMode = translationMode,
         _localTranslationModel = localTranslationModel,
         _deeplApiKey = _clean(deeplApiKey),
@@ -100,6 +188,8 @@ class AppSettingsController extends ChangeNotifier {
         _translationMaxConcurrent =
             _boundedConcurrency(translationMaxConcurrent),
         _translationContextEnabled = translationContextEnabled,
+        _translationGlossary = translationGlossary,
+        _translationTargetLanguage = translationTargetLanguage,
         _subtitleDisplayMode = subtitleDisplayMode,
         _playbackStartStrategy = playbackStartStrategy,
         _waitForSubtitlePreparation = waitForSubtitlePreparation {
@@ -127,6 +217,8 @@ class AppSettingsController extends ChangeNotifier {
       Uri.parse('https://api-free.deepl.com/v2/translate');
 
   RecognitionPrefetchMode _prefetchMode;
+  String _recognitionLanguage;
+  String _whisperModel;
   TranslationMode _translationMode;
   LocalTranslationModel _localTranslationModel;
   String? _deeplApiKey;
@@ -137,6 +229,8 @@ class AppSettingsController extends ChangeNotifier {
   int _translationBatchSize;
   int _translationMaxConcurrent;
   bool _translationContextEnabled;
+  String _translationGlossary;
+  String _translationTargetLanguage;
   SubtitleDisplayMode _subtitleDisplayMode;
   PlaybackStartStrategy _playbackStartStrategy;
   bool _waitForSubtitlePreparation;
@@ -145,6 +239,8 @@ class AppSettingsController extends ChangeNotifier {
   int _saveGeneration = 0;
 
   RecognitionPrefetchMode get prefetchMode => _prefetchMode;
+  String get recognitionLanguage => _recognitionLanguage;
+  String get whisperModel => _whisperModel;
   TranslationMode get translationMode => _translationMode;
   LocalTranslationModel get localTranslationModel => _localTranslationModel;
   String? get deeplApiKey => _deeplApiKey;
@@ -155,12 +251,16 @@ class AppSettingsController extends ChangeNotifier {
   int get translationBatchSize => _translationBatchSize;
   int get translationMaxConcurrent => _translationMaxConcurrent;
   bool get translationContextEnabled => _translationContextEnabled;
+  String get translationGlossary => _translationGlossary;
+  String get translationTargetLanguage => _translationTargetLanguage;
   SubtitleDisplayMode get subtitleDisplayMode => _subtitleDisplayMode;
   PlaybackStartStrategy get playbackStartStrategy => _playbackStartStrategy;
   bool get waitForSubtitlePreparation => _waitForSubtitlePreparation;
 
   AppSettings get snapshot => AppSettings(
         prefetchMode: _prefetchMode,
+        recognitionLanguage: _recognitionLanguage,
+        whisperModel: _whisperModel,
         translationMode: _translationMode,
         localTranslationModel: _localTranslationModel,
         deeplApiKey: _deeplApiKey,
@@ -171,6 +271,8 @@ class AppSettingsController extends ChangeNotifier {
         translationBatchSize: _translationBatchSize,
         translationMaxConcurrent: _translationMaxConcurrent,
         translationContextEnabled: _translationContextEnabled,
+        translationGlossary: _translationGlossary,
+        translationTargetLanguage: _translationTargetLanguage,
         subtitleDisplayMode: _subtitleDisplayMode,
         playbackStartStrategy: _playbackStartStrategy,
         waitForSubtitlePreparation: _waitForSubtitlePreparation,
@@ -189,6 +291,26 @@ class AppSettingsController extends ChangeNotifier {
             _enumValue(values['prefetchMode'], RecognitionPrefetchMode.values);
         if (value != null && value != _prefetchMode) {
           _prefetchMode = value;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('recognitionLanguage') &&
+          values.containsKey('recognitionLanguage')) {
+        final raw = values['recognitionLanguage'];
+        if (raw is String &&
+            recognitionLanguageOptions.any((o) => o.code == raw) &&
+            raw != _recognitionLanguage) {
+          _recognitionLanguage = raw;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('whisperModel') &&
+          values.containsKey('whisperModel')) {
+        final raw = values['whisperModel'];
+        if (raw is String &&
+            whisperModelOptions.any((option) => option.fileName == raw) &&
+            raw != _whisperModel) {
+          _whisperModel = raw;
           changed = true;
         }
       }
@@ -277,6 +399,24 @@ class AppSettingsController extends ChangeNotifier {
           changed = true;
         }
       }
+      if (!_changedBeforeLoad.contains('translationGlossary') &&
+          values.containsKey('translationGlossary')) {
+        final raw = values['translationGlossary'];
+        if (raw is String && raw != _translationGlossary) {
+          _translationGlossary = raw;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('translationTargetLanguage') &&
+          values.containsKey('translationTargetLanguage')) {
+        final raw = values['translationTargetLanguage'];
+        if (raw is String &&
+            translationTargetLanguageOptions.any((o) => o.code == raw) &&
+            raw != _translationTargetLanguage) {
+          _translationTargetLanguage = raw;
+          changed = true;
+        }
+      }
       if (!_changedBeforeLoad.contains('subtitleDisplayMode')) {
         final value = _enumValue(
             values['subtitleDisplayMode'], SubtitleDisplayMode.values);
@@ -348,6 +488,24 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setRecognitionLanguage(String value) {
+    if (!recognitionLanguageOptions.any((option) => option.code == value)) {
+      return;
+    }
+    if (_recognitionLanguage == value) return;
+    _recognitionLanguage = value;
+    _markChanged('recognitionLanguage');
+    notifyListeners();
+  }
+
+  void setWhisperModel(String value) {
+    if (!whisperModelOptions.any((option) => option.fileName == value)) return;
+    if (_whisperModel == value) return;
+    _whisperModel = value;
+    _markChanged('whisperModel');
+    notifyListeners();
+  }
+
   void setTranslationMode(TranslationMode value) {
     if (_translationMode == value) return;
     _translationMode = value;
@@ -412,6 +570,24 @@ class AppSettingsController extends ChangeNotifier {
     if (_translationContextEnabled == value) return;
     _translationContextEnabled = value;
     _markChanged('translationContextEnabled');
+    notifyListeners();
+  }
+
+  void setTranslationGlossary(String value) {
+    if (_translationGlossary == value) return;
+    _translationGlossary = value;
+    _markChanged('translationGlossary');
+    notifyListeners();
+  }
+
+  void setTranslationTargetLanguage(String value) {
+    if (!translationTargetLanguageOptions
+        .any((option) => option.code == value)) {
+      return;
+    }
+    if (_translationTargetLanguage == value) return;
+    _translationTargetLanguage = value;
+    _markChanged('translationTargetLanguage');
     notifyListeners();
   }
 
@@ -487,6 +663,8 @@ class AppSettingsStore {
     final temporary = File('${file.path}.tmp');
     await temporary.writeAsString(jsonEncode({
       'prefetchMode': settings.prefetchMode.name,
+      'recognitionLanguage': settings.recognitionLanguage,
+      'whisperModel': settings.whisperModel,
       'translationMode': settings.translationMode.name,
       'localTranslationModel': settings.localTranslationModel.name,
       'deeplApiKey': settings.deeplApiKey,
@@ -496,6 +674,8 @@ class AppSettingsStore {
       'genericModel': settings.genericModel,
       'translationBatchSize': settings.translationBatchSize,
       'translationContextEnabled': settings.translationContextEnabled,
+      'translationGlossary': settings.translationGlossary,
+      'translationTargetLanguage': settings.translationTargetLanguage,
       'translationMaxConcurrent': settings.translationMaxConcurrent,
       'subtitleDisplayMode': settings.subtitleDisplayMode.name,
       'playbackStartStrategy': settings.playbackStartStrategy.name,

@@ -10,6 +10,8 @@ import '../domain/player/player_service.dart';
 import '../domain/audio/audio_models.dart';
 import '../domain/speech/speech_models.dart';
 import '../domain/speech/speech_core_status.dart';
+import '../domain/speech/whisper_model_catalog.dart';
+import '../domain/translation/translation_glossary.dart';
 import '../domain/translation/translation_service.dart';
 import '../features/browser/mobile_browser_service.dart';
 import '../features/browser/windows_browser_service.dart';
@@ -18,6 +20,7 @@ import '../features/player/media_picker.dart';
 import '../features/player/mock_services.dart';
 import '../features/player/shared_network_media_broker.dart';
 import '../features/settings/app_settings.dart';
+import '../features/speech/whisper_model_store.dart';
 import '../features/translation/deepl_translation_service.dart';
 import '../features/translation/local_model_translation_service.dart';
 import '../features/translation/system_translation_service.dart';
@@ -44,16 +47,56 @@ String? _windowsArtifact(String fileName, String environmentVariable) {
   return null;
 }
 
-String? _whisperModelPath() {
+/// Resolves the Whisper model file for the settings-selected model name.
+/// An `AI_VIDEO_WHISPER_MODEL` environment override wins; a missing selected
+/// file falls back to the first installed known model.
+/// Sandbox store the installable weights live in. iOS ships without a model,
+/// so this is the only place one can come from there; on Windows the weights
+/// published beside the executable still take precedence.
+final whisperModelStoreProvider = Provider<WhisperModelStore>(
+  (ref) => WhisperModelStore(),
+);
+
+/// Path of the weight recognition should load, or null when none is usable.
+///
+/// Windows keeps its published `models/` directory. iOS has only what the user
+/// installed, and falls back to any other installed weight when the selected
+/// one is missing - a stored setting naming a model that was never downloaded
+/// should not leave recognition dead when another one is right there.
+Future<String?> resolveWhisperModelPathAsync(
+  String selectedModel,
+  WhisperModelStore store,
+) async {
+  final windowsPath = resolveWhisperModelPath(selectedModel);
+  if (windowsPath != null || Platform.isWindows) return windowsPath;
+  final selected = whisperModelByFileName(selectedModel);
+  if (selected != null) {
+    final installed = await store.installedPath(selected);
+    if (installed != null) return installed;
+  }
+  for (final candidate in whisperModelCatalog) {
+    final installed = await store.installedPath(candidate);
+    if (installed != null) return installed;
+  }
+  return null;
+}
+
+String? resolveWhisperModelPath(String selectedModel) {
   final configured = Platform.environment['AI_VIDEO_WHISPER_MODEL'];
   if (configured != null && File(configured).existsSync()) return configured;
   if (!Platform.isWindows) return null;
   final executableDirectory = File(Platform.resolvedExecutable).parent.path;
-  final candidate = File(
-    '$executableDirectory\\models\\'
-    'ggml-large-v3-turbo-q5_0.bin',
-  );
-  return candidate.existsSync() ? candidate.path : null;
+  String modelFile(String fileName) =>
+      '$executableDirectory\\models\\$fileName';
+  final selected = File(modelFile(selectedModel));
+  if (selected.existsSync()) return selected.path;
+  // Selected model missing from the program directory: fall back to the
+  // first installed known model instead of leaving recognition unavailable.
+  for (final option in whisperModelOptions) {
+    final fallback = File(modelFile(option.fileName));
+    if (fallback.existsSync()) return fallback.path;
+  }
+  return null;
 }
 
 WhisperRequestedBackend _whisperRequestedBackend() {
@@ -140,18 +183,21 @@ final audioDecoderProvider = Provider<AudioDecoder>((ref) {
 final windowRecognitionServiceProvider =
     Provider<WindowRecognitionService>((ref) {
   final requestedBackend = _whisperRequestedBackend();
+  final recognitionLanguage =
+      ref.read(appSettingsProvider).snapshot.recognitionLanguage;
   if (Platform.isIOS) {
     final service = IosWhisperWindowRecognitionService(
       logs: ref.read(diagnosticsLogProvider),
       threads: 4,
-      language: 'ja',
+      language: recognitionLanguage,
       requestedBackend: requestedBackend,
     );
     ref.read(diagnosticsLogProvider).info('识别音频', 'iOS Whisper 模块初始化', {
       '请求后端': requestedBackend.name,
-      '模型位置': 'Application Support/models/ggml-large-v3-turbo-q5_0.bin',
+      '模型位置': 'Application Support/models（由用户在设置中下载）',
     });
-    unawaited(service.prepare());
+    _scheduleWhisperModelBootstrap(service, ref.read(appSettingsProvider),
+        ref.read(whisperModelStoreProvider));
     ref.onDispose(service.dispose);
     return service;
   }
@@ -159,7 +205,8 @@ final windowRecognitionServiceProvider =
     'speech_core.dll',
     'AI_VIDEO_SPEECH_CORE_LIBRARY',
   );
-  final model = _whisperModelPath();
+  final model = resolveWhisperModelPath(
+      ref.read(appSettingsProvider).snapshot.whisperModel);
   final logs = ref.read(diagnosticsLogProvider);
   final WindowRecognitionService service =
       nativeLibrary != null && model != null && File(model).existsSync()
@@ -167,7 +214,7 @@ final windowRecognitionServiceProvider =
               libraryPath: nativeLibrary,
               modelPath: model,
               logs: logs,
-              language: 'ja',
+              language: recognitionLanguage,
               threads: 16,
               requestedBackend: requestedBackend,
             )
@@ -182,12 +229,35 @@ final windowRecognitionServiceProvider =
     '模型位置': model,
     '请求后端': requestedBackend.name,
   });
-  if (service is WhisperWindowRecognitionService) {
-    unawaited(service.prepare());
-  }
+  _scheduleWhisperModelBootstrap(service, ref.read(appSettingsProvider),
+      ref.read(whisperModelStoreProvider));
   ref.onDispose(service.dispose);
   return service;
 });
+
+/// Settings load asynchronously, so the service must be constructed before
+/// the persisted model selection is known. This waits for the settings to
+/// settle, applies the selected model (no-op when unchanged), and only then
+/// loads it — preventing the startup race where the default model wins.
+void _scheduleWhisperModelBootstrap(
+  WindowRecognitionService service,
+  AppSettingsController settings,
+  WhisperModelStore store,
+) {
+  unawaited(() async {
+    await settings.ready;
+    final path =
+        await resolveWhisperModelPathAsync(settings.snapshot.whisperModel, store);
+    if (service is WindowRecognitionModelController && path != null) {
+      (service as WindowRecognitionModelController).setModel(path);
+    }
+    if (service is WhisperWindowRecognitionService) {
+      await service.prepare();
+    } else if (service is IosWhisperWindowRecognitionService) {
+      await service.prepare();
+    }
+  }());
+}
 
 final recognitionControllerProvider = Provider<RecognitionController>((ref) {
   final settings = ref.read(appSettingsProvider).snapshot;
@@ -218,6 +288,7 @@ TranslationService createTranslationService(AppSettings settings) =>
           endpoint: settings.genericEndpoint,
           apiKey: settings.genericApiKey,
           model: settings.genericModel,
+          glossary: parseTranslationGlossary(settings.translationGlossary),
         ),
       TranslationMode.systemTranslation => SystemTranslationService(),
       TranslationMode.localModel => LocalModelTranslationService(

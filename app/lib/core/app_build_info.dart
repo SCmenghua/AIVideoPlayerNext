@@ -3,7 +3,7 @@ class AppBuildInfo {
 
   static const version = String.fromEnvironment(
     'APP_VERSION',
-    defaultValue: '0.9.9',
+    defaultValue: '0.10.0',
   );
   static const buildTime = String.fromEnvironment(
     'APP_BUILD_TIME',

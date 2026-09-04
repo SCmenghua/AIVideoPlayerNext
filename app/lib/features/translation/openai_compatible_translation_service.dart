@@ -20,6 +20,7 @@ class OpenAiCompatibleTranslationService
     required Uri? endpoint,
     required this.apiKey,
     required this.model,
+    this.glossary = const {},
     HttpClient Function()? clientFactory,
   })  : endpoint = endpoint == null
             ? null
@@ -45,6 +46,10 @@ class OpenAiCompatibleTranslationService
   final Uri? endpoint;
   final String? apiKey;
   final String model;
+
+  /// User-defined term mappings applied consistently to every request, e.g.
+  /// character names or honorifics that must translate the same way.
+  final Map<String, String> glossary;
   final HttpClient Function() _clientFactory;
   final Set<HttpClientRequest> _activeRequests = <HttpClientRequest>{};
   HttpClient? _sharedClient;
@@ -54,6 +59,7 @@ class OpenAiCompatibleTranslationService
         'Provider': 'openai-compatible',
         'Endpoint': endpoint?.toString() ?? '未配置',
         'Model': model,
+        '术语表条数': glossary.length,
       };
 
   @override
@@ -107,15 +113,7 @@ class OpenAiCompatibleTranslationService
         'model': model,
         'temperature': 0,
         'messages': [
-          const {
-            'role': 'system',
-            'content': 'You translate subtitle text. Return only the '
-                'translated text. Preserve meaning, names, punctuation and '
-                'line breaks. Do not add explanations, quotes or markdown. '
-                'When previous lines are given as context, use them only to '
-                'resolve meaning and keep terminology consistent; never '
-                'translate, repeat or summarize the context lines.',
-          },
+          {'role': 'system', 'content': _systemPrompt()},
           {
             'role': 'user',
             'content': _userPrompt(request),
@@ -189,6 +187,25 @@ class OpenAiCompatibleTranslationService
     final seconds = raw == null ? null : int.tryParse(raw.trim());
     if (seconds == null || seconds <= 0) return null;
     return Duration(seconds: seconds.clamp(1, 60));
+  }
+
+  /// System prompt. The glossary is applied for every request of the session
+  /// so names, honorifics and recurring terms stay consistent.
+  String _systemPrompt() {
+    const base = 'You translate subtitle text. Return only the '
+        'translated text. Preserve meaning, names, punctuation and '
+        'line breaks. Do not add explanations, quotes or markdown. '
+        'When previous lines are given as context, use them only to '
+        'resolve meaning and keep terminology consistent; never '
+        'translate, repeat or summarize the context lines.';
+    if (glossary.isEmpty) return base;
+    final terms = StringBuffer()
+      ..writeln()
+      ..writeln('Glossary (translate these exactly as given, consistently):');
+    for (final entry in glossary.entries) {
+      terms.writeln('- ${entry.key} = ${entry.value}');
+    }
+    return base + terms.toString();
   }
 
   /// Builds the user message. Without context this is the plain single-line

@@ -16,6 +16,41 @@ void main() {
     sourceWindows: ['window-1'],
   );
 
+  test('holds a finished line briefly so a late segment is still seen', () {
+    // Recognition of the first window races the playhead, so its result can
+    // arrive after its own span has gone by. Without the hold the lookup is
+    // `start <= position < end` and the line is never shown at all.
+    final document =
+        TranscriptDocument.empty(sessionId: 'session-1').upsertSegment(segment);
+
+    expect(subtitleAt(document, const Duration(milliseconds: 3200))?.sourceText,
+        'The source subtitle.');
+    expect(subtitleAt(document, const Duration(milliseconds: 5400))?.sourceText,
+        'The source subtitle.');
+    expect(subtitleAt(document, const Duration(milliseconds: 5600)), isNull);
+  });
+
+  test('a started line replaces the held one instead of extending it', () {
+    final document = TranscriptDocument.empty(sessionId: 'session-1')
+        .upsertSegment(segment)
+        .upsertSegment(const TranscriptSegment(
+          id: 'segment-2',
+          startMs: 3200,
+          endMs: 5000,
+          text: 'The next line.',
+          language: 'en',
+          status: TranscriptSegmentStatus.timelineFinal,
+          sourceWindows: ['window-2'],
+        ));
+
+    expect(subtitleAt(document, const Duration(milliseconds: 3100))?.sourceText,
+        'The source subtitle.');
+    expect(subtitleAt(document, const Duration(milliseconds: 3300))?.sourceText,
+        'The next line.');
+    expect(subtitleAt(document, const Duration(milliseconds: 5200))?.sourceText,
+        'The next line.');
+  });
+
   test('selects translated text for the active media segment', () {
     final document = TranscriptDocument.empty(sessionId: 'session-1')
         .upsertSegment(segment)
@@ -46,6 +81,24 @@ void main() {
 
     expect(subtitle?.translationText, isNull);
     expect(subtitle?.sourceText, 'The source subtitle.');
+  });
+
+  test('ignores a translation written for different source text', () {
+    // A re-assembled segment can reuse its stable ID with new text; the old
+    // translation of the previous text must not be shown for it.
+    final document = TranscriptDocument.empty(sessionId: 'session-1')
+        .upsertSegment(segment)
+        .upsertTranslation(const TranscriptTranslation(
+          segmentId: 'segment-1',
+          targetLanguage: 'zh-CN',
+          text: '旧短句的翻译。',
+          status: TranscriptTranslationStatus.translated,
+          sourceText: 'The old short line.',
+        ));
+
+    final subtitle = subtitleAt(document, const Duration(seconds: 2));
+
+    expect(subtitle?.translationText, isNull);
   });
 
   testWidgets('renders translation and source text as an overlay',

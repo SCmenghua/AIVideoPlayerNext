@@ -101,6 +101,7 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
           request.sessionId,
           samples,
           request.language,
+          request.initialPrompt,
           threads,
           requestedBackend.index,
         ],
@@ -162,6 +163,10 @@ class WhisperCppSpeechRecognitionService implements SpeechRecognitionService {
           kind: RecognitionKind.finalResult,
           source: RecognitionSource.whisperCpp,
           confidence: (segment['confidence'] as num?)?.toDouble(),
+          avgLogprob: (segment['avgLogprob'] as num?)?.toDouble(),
+          noSpeechProbability:
+              (segment['noSpeechProbability'] as num?)?.toDouble(),
+          repetition: (segment['repetition'] as num?)?.toDouble(),
           sourceWindowId: request.sourceWindowId,
           sourceSegmentIndex: segment['index'] as int,
         ));
@@ -301,6 +306,7 @@ class WhisperCppPersistentRecognitionWorker {
       'sessionId': request.sessionId,
       'fromMs': request.from.inMilliseconds,
       'language': request.language,
+      'initialPrompt': request.initialPrompt,
       'samples': samples,
     });
     final iterator = _iterator!;
@@ -359,6 +365,10 @@ class WhisperCppPersistentRecognitionWorker {
         kind: RecognitionKind.finalResult,
         source: RecognitionSource.whisperCpp,
         confidence: (segment['confidence'] as num?)?.toDouble(),
+        avgLogprob: (segment['avgLogprob'] as num?)?.toDouble(),
+        noSpeechProbability:
+            (segment['noSpeechProbability'] as num?)?.toDouble(),
+        repetition: (segment['repetition'] as num?)?.toDouble(),
         sourceWindowId: request.sourceWindowId,
         sourceSegmentIndex: segment['index'] as int,
       );
@@ -430,8 +440,22 @@ final class _NativeSpeechSegment extends Struct {
   external Pointer<Utf8> text;
   external Pointer<Utf8> language;
 
+  /// Geometric mean of the per-token probabilities.
   @Float()
   external double confidence;
+
+  /// Mean per-token log probability, on Whisper's own scale where roughly
+  /// -1.0 is the point its decoder stops trusting a candidate.
+  @Float()
+  external double avgLogprob;
+
+  /// Whisper's probability that the window carries no speech.
+  @Float()
+  external double noSpeechProbability;
+
+  /// Repeated 4-gram share, which rises towards 1 in a decoder loop.
+  @Float()
+  external double repetition;
 
   @Uint8()
   external int isFinal;
@@ -508,6 +532,7 @@ typedef _SessionRecognizeNative = Int32 Function(
   IntPtr sampleCount,
   Uint32 sampleRate,
   Pointer<Utf8> language,
+  Pointer<Utf8> initialPrompt,
   Int32 threads,
   Pointer<NativeFunction<_SegmentCallbackNative>> callback,
   Pointer<Void> userData,
@@ -519,6 +544,7 @@ typedef _SessionRecognizeDart = int Function(
   int sampleCount,
   int sampleRate,
   Pointer<Utf8> language,
+  Pointer<Utf8> initialPrompt,
   int threads,
   Pointer<NativeFunction<_SegmentCallbackNative>> callback,
   Pointer<Void> userData,
@@ -687,6 +713,12 @@ WhisperFallbackReason _fallbackReason(int value) =>
         ? WhisperFallbackReason.values[value]
         : WhisperFallbackReason.unknown;
 
+/// Native `initial_prompt` argument. Whisper treats NULL as "no context", so
+/// an absent or empty prompt has to reach it as a null pointer rather than an
+/// empty string, which the decoder would still tokenize.
+Pointer<Utf8> _promptPointer(String? prompt) =>
+    prompt == null || prompt.isEmpty ? nullptr : prompt.toNativeUtf8();
+
 Future<void> _speechWorker(List<Object?> args) async {
   final mainPort = args[0] as SendPort;
   final libraryPath = args[1] as String;
@@ -694,8 +726,9 @@ Future<void> _speechWorker(List<Object?> args) async {
   final sessionId = args[3] as String;
   final samples = (args[4] as List<dynamic>).cast<num>();
   final language = args[5] as String;
-  final threads = args[6] as int;
-  final requestedBackend = args[7] as int;
+  final initialPrompt = args[6] as String?;
+  final threads = args[7] as int;
+  final requestedBackend = args[8] as int;
   final bindings = _SpeechCoreBindings.open(libraryPath);
   Pointer<Void> model = nullptr;
   Pointer<Void> session = nullptr;
@@ -765,6 +798,7 @@ Future<void> _speechWorker(List<Object?> args) async {
 
     final samplePointer = calloc<Float>(samples.length);
     final languagePointer = language.toNativeUtf8();
+    final promptPointer = _promptPointer(initialPrompt);
     final diagnostics = calloc<_NativeSpeechDiagnostics>();
     final nativeCallback = NativeCallable<_SegmentCallbackNative>.isolateLocal(
       (Pointer<_NativeSpeechSegment> segmentPointer, Pointer<Void> _) {
@@ -776,6 +810,9 @@ Future<void> _speechWorker(List<Object?> args) async {
           'text': segment.text.toDartString().trim(),
           'language': segment.language.toDartString(),
           'confidence': segment.confidence == 0 ? null : segment.confidence,
+          'avgLogprob': segment.avgLogprob,
+          'noSpeechProbability': segment.noSpeechProbability,
+          'repetition': segment.repetition,
         });
       },
     );
@@ -789,6 +826,7 @@ Future<void> _speechWorker(List<Object?> args) async {
         samples.length,
         16000,
         languagePointer,
+        promptPointer,
         threads,
         nativeCallback.nativeFunction,
         nullptr,
@@ -804,6 +842,7 @@ Future<void> _speechWorker(List<Object?> args) async {
     } finally {
       nativeCallback.close();
       calloc.free(diagnostics);
+      if (promptPointer != nullptr) calloc.free(promptPointer);
       calloc.free(languagePointer);
       calloc.free(samplePointer);
     }
@@ -886,6 +925,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
       final samplePointer = calloc<Float>(samples.length);
       final languagePointer =
           (command['language'] as String? ?? 'auto').toNativeUtf8();
+      final promptPointer = _promptPointer(command['initialPrompt'] as String?);
       final diagnostics = calloc<_NativeSpeechDiagnostics>();
       final segments = <Map<String, dynamic>>[];
       final nativeCallback =
@@ -899,6 +939,9 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
             'text': segment.text.toDartString().trim(),
             'language': segment.language.toDartString(),
             'confidence': segment.confidence == 0 ? null : segment.confidence,
+            'avgLogprob': segment.avgLogprob,
+            'noSpeechProbability': segment.noSpeechProbability,
+            'repetition': segment.repetition,
           });
         },
       );
@@ -918,6 +961,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
           samples.length,
           16000,
           languagePointer,
+          promptPointer,
           threads,
           nativeCallback.nativeFunction,
           nullptr,
@@ -926,6 +970,7 @@ Future<void> _persistentSpeechWorker(List<Object?> args) async {
       } finally {
         nativeCallback.close();
         calloc.free(diagnostics);
+        if (promptPointer != nullptr) calloc.free(promptPointer);
         calloc.free(languagePointer);
         calloc.free(samplePointer);
       }

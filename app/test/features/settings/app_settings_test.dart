@@ -106,4 +106,60 @@ void main() {
     expect(settings.snapshot.sameTranslationConfiguration(before), isTrue);
     expect(settings.snapshot.sameTranslationScheduling(before), isFalse);
   });
+
+  test('editing the glossary changes the translation configuration', () {
+    final settings = AppSettingsController();
+    final before = settings.snapshot;
+
+    expect(settings.translationGlossary, '');
+
+    settings.setTranslationGlossary('ハルヒ=春日\n団長=团长');
+
+    expect(settings.translationGlossary, 'ハルヒ=春日\n団長=团长');
+    expect(settings.snapshot.sameTranslationConfiguration(before), isFalse);
+    expect(settings.snapshot.sameTranslationScheduling(before), isTrue);
+  });
+
+  test('recognition and translation languages default to ja and zh-CN', () {
+    final settings = AppSettingsController();
+
+    expect(settings.recognitionLanguage, 'ja');
+    expect(settings.translationTargetLanguage, 'zh-CN');
+  });
+
+  test('recognition and translation languages follow the setters', () {
+    final settings = AppSettingsController();
+
+    settings.setRecognitionLanguage('auto');
+    settings.setTranslationTargetLanguage('zh-TW');
+
+    expect(settings.recognitionLanguage, 'auto');
+    expect(settings.translationTargetLanguage, 'zh-TW');
+    expect(settings.snapshot.recognitionLanguage, 'auto');
+    expect(settings.snapshot.translationTargetLanguage, 'zh-TW');
+  });
+
+  test('language setters reject codes outside the option lists', () {
+    final settings = AppSettingsController();
+
+    settings.setRecognitionLanguage('xx');
+    settings.setTranslationTargetLanguage('xx');
+
+    expect(settings.recognitionLanguage, 'ja');
+    expect(settings.translationTargetLanguage, 'zh-CN');
+  });
+
+  test('whisper model defaults to kotoba and follows validated setters', () {
+    final settings = AppSettingsController();
+
+    expect(settings.whisperModel, 'ggml-kotoba-whisper-v2.0.bin');
+
+    settings.setWhisperModel('ggml-large-v3-turbo-q5_0.bin');
+    expect(settings.whisperModel, 'ggml-large-v3-turbo-q5_0.bin');
+    expect(settings.snapshot.whisperModel, 'ggml-large-v3-turbo-q5_0.bin');
+
+    settings.setWhisperModel('totally-fake.bin');
+    expect(settings.whisperModel, 'ggml-large-v3-turbo-q5_0.bin',
+        reason: 'unknown model file names must not persist');
+  });
 }

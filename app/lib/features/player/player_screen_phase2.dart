@@ -55,6 +55,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Timer? _startupTimer;
   bool _policyPaused = false;
 
+  /// Current subtitle translation target from settings. Read through the
+  /// controller so gating and overlays follow language changes immediately.
+  String get _targetLanguage =>
+      _settings.snapshot.translationTargetLanguage;
+
   @override
   void initState() {
     super.initState();
@@ -68,10 +73,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       }
     });
     final recognition = ref.read(recognitionControllerProvider);
+    final settingsSnapshot = ref.read(appSettingsProvider).snapshot;
     _translationQueue = TranscriptTranslationQueue(
       results: _recognitionResults,
       service: ref.read(translationServiceProvider),
-      targetLanguage: 'zh-CN',
+      targetLanguage: settingsSnapshot.translationTargetLanguage,
       batchSize: ref.read(appSettingsProvider).translationBatchSize,
       maxConcurrent:
           _translationConcurrency(ref.read(appSettingsProvider).snapshot),
@@ -122,10 +128,39 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             .setPrefetchMode(next.prefetchMode),
       );
     }
-    if (!next.sameTranslationConfiguration(_lastSettings)) {
+    if (next.recognitionLanguage != _lastSettings.recognitionLanguage) {
+      final recognizer = ref.read(windowRecognitionServiceProvider);
+      if (recognizer is WindowRecognitionLanguageController) {
+        (recognizer as WindowRecognitionLanguageController)
+            .setLanguage(next.recognitionLanguage);
+        ref
+            .read(diagnosticsLogProvider)
+            .info('识别', '识别原语言已更新', {'语言': next.recognitionLanguage});
+      }
+    }
+    if (next.whisperModel != _lastSettings.whisperModel) {
+      final recognizer = ref.read(windowRecognitionServiceProvider);
+      final path = resolveWhisperModelPath(next.whisperModel);
+      final logs = ref.read(diagnosticsLogProvider);
+      if (path == null) {
+        logs.warning('识别', '所选 Whisper 模型文件不存在，保留当前模型', {
+          '模型': next.whisperModel,
+        });
+      } else if (recognizer is WindowRecognitionModelController) {
+        (recognizer as WindowRecognitionModelController).setModel(path);
+        logs.info('识别', 'Whisper 模型切换已开始', {'模型': next.whisperModel});
+      } else {
+        logs.warning('识别', '当前识别器不支持切换模型，重启应用后生效', {
+          '模型': next.whisperModel,
+        });
+      }
+    }
+    if (!next.sameTranslationConfiguration(_lastSettings) ||
+        next.translationTargetLanguage !=
+            _lastSettings.translationTargetLanguage) {
       _translationQueue.updateConfiguration(
         service: createTranslationService(next),
-        targetLanguage: 'zh-CN',
+        targetLanguage: next.translationTargetLanguage,
       );
     }
     if (!next.sameTranslationScheduling(_lastSettings)) {
@@ -477,7 +512,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       TranscriptDocument document, TranscriptSegment segment) {
     for (final translation in document.translations) {
       if (translation.segmentId != segment.id ||
-          translation.targetLanguage != 'zh-CN') {
+          translation.targetLanguage != _targetLanguage) {
         continue;
       }
       if (translation.status == TranscriptTranslationStatus.translated &&
@@ -493,7 +528,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       (document ?? _recognitionResults.document)
           ?.translations
           .where((translation) =>
-              translation.targetLanguage == 'zh-CN' &&
+              translation.targetLanguage == _targetLanguage &&
               translation.status == TranscriptTranslationStatus.translated &&
               translation.text.trim().isNotEmpty)
           .length ??
@@ -503,7 +538,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       (document ?? _recognitionResults.document)
           ?.translations
           .where((translation) =>
-              translation.targetLanguage == 'zh-CN' &&
+              translation.targetLanguage == _targetLanguage &&
               translation.status == TranscriptTranslationStatus.failed)
           .length ??
       0;
@@ -945,6 +980,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                 _snapshot.position.inMilliseconds.toDouble())
                             .round(),
                       ),
+                      targetLanguage: _targetLanguage,
                       displayMode: _settings.subtitleDisplayMode,
                     ),
                   ),
@@ -1312,14 +1348,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   String _translationStartupDetail() {
     final translations = _recognitionResults.document?.translations
             .where((translation) =>
-                translation.targetLanguage == 'zh-CN' &&
+                translation.targetLanguage == _targetLanguage &&
                 translation.status == TranscriptTranslationStatus.translated &&
                 translation.text.trim().isNotEmpty)
             .length ??
         0;
     final failures = _recognitionResults.document?.translations
             .where((translation) =>
-                translation.targetLanguage == 'zh-CN' &&
+                translation.targetLanguage == _targetLanguage &&
                 translation.status == TranscriptTranslationStatus.failed)
             .length ??
         0;
@@ -1439,11 +1475,13 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
   PlaybackSnapshot _snapshot = const PlaybackSnapshot.idle();
   double? _scrubPositionMs;
   late SubtitleDisplayMode _displayMode;
+  late String _targetLanguage;
 
   @override
   void initState() {
     super.initState();
     _displayMode = widget.settings.subtitleDisplayMode;
+    _targetLanguage = widget.settings.translationTargetLanguage;
     widget.settings.addListener(_onSettingsChanged);
     _snapshot = widget.player.snapshot;
     _subscription = widget.player.snapshots.listen((snapshot) {
@@ -1479,7 +1517,10 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
 
   void _onSettingsChanged() {
     if (mounted) {
-      setState(() => _displayMode = widget.settings.subtitleDisplayMode);
+      setState(() {
+        _displayMode = widget.settings.subtitleDisplayMode;
+        _targetLanguage = widget.settings.translationTargetLanguage;
+      });
     }
   }
 
@@ -1521,6 +1562,7 @@ class _FullscreenPlayerScreenState extends State<_FullscreenPlayerScreen> {
                             _snapshot.position.inMilliseconds.toDouble())
                         .round(),
                   ),
+                  targetLanguage: _targetLanguage,
                   displayMode: _displayMode,
                 ),
               ),

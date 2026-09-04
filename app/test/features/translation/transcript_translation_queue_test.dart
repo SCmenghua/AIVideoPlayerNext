@@ -261,7 +261,7 @@ void main() {
       store.addRecognition(_event(
         sessionId: 'session-1',
         segmentId: 'seg-$index',
-        text: 'line $index',
+        text: 'line $index.',
         startSeconds: index * 2,
       ));
     }
@@ -292,7 +292,7 @@ void main() {
       store.addRecognition(_event(
         sessionId: 'session-single',
         segmentId: 'single-$index',
-        text: 'line $index',
+        text: 'line $index.',
         startSeconds: index * 2,
       ));
     }
@@ -641,7 +641,7 @@ void main() {
     store.addRecognition(_event(
       sessionId: 'session-1',
       segmentId: 'seg-1',
-      text: 'hello',
+      text: 'hello.',
       startSeconds: 0,
     ));
     await _settle();
@@ -650,12 +650,12 @@ void main() {
     store.addRecognition(_event(
       sessionId: 'session-1',
       segmentId: 'seg-2',
-      text: 'world',
+      text: 'world.',
       startSeconds: 2,
     ));
     await _settle();
 
-    service.pending.first.complete(const TranslationResult(
+    service.pending.removeAt(0).complete(const TranslationResult(
       segmentId: 'seg-000001',
       text: '你好',
       provider: 'test',
@@ -664,9 +664,9 @@ void main() {
 
     expect(service.requests, hasLength(2));
     final second = service.requests.last;
-    expect(second.text, 'world');
+    expect(second.text, 'world.');
     expect(second.context, hasLength(1));
-    expect(second.context.single.text, 'hello');
+    expect(second.context.single.text, 'hello.');
     expect(second.context.single.translation, '你好',
         reason: '已完成的译文应作为术语一致性参考附带。');
   });
@@ -689,12 +689,12 @@ void main() {
     store.addRecognition(_event(
       sessionId: 'session-1',
       segmentId: 'seg-1',
-      text: 'hello',
+      text: 'hello.',
     ));
     store.addRecognition(_event(
       sessionId: 'session-1',
       segmentId: 'seg-2',
-      text: 'world',
+      text: 'world.',
       startSeconds: 2,
     ));
     await _settle();
@@ -871,7 +871,7 @@ void main() {
       store.addRecognition(_event(
         sessionId: 'session-batch',
         segmentId: 'batch-$index',
-        text: 'line $index',
+        text: 'line $index.',
         startSeconds: index * 2,
       ));
     }
@@ -909,12 +909,12 @@ void main() {
     store.addRecognition(_event(
       sessionId: 'batch-fallback',
       segmentId: 'first',
-      text: 'first',
+      text: 'first.',
     ));
     store.addRecognition(_event(
       sessionId: 'batch-fallback',
       segmentId: 'second',
-      text: 'second',
+      text: 'second.',
       startSeconds: 2,
     ));
     await _settle();
@@ -955,4 +955,160 @@ void main() {
       containsAll(<String>['one', 'two']),
     );
   });
+
+  test('normalizes Chinese subtitle typography in returned translations',
+      () async {
+    final store = RecognitionResultStore();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: _FixedTextService('いいですね 、そう ですね?'),
+      targetLanguage: 'zh-CN',
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'いいですね、そうですね?',
+    ));
+    await _settle();
+
+    final result = store.translationResults.single.translation;
+    expect(result.status, TranscriptTranslationStatus.translated);
+    expect(result.text, 'いいですね，そうですね？');
+  });
+
+  test('re-translates a fragment after it grows into a merged sentence',
+      () async {
+    final store = RecognitionResultStore();
+    final service = _ControlledTranslationService();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      maxConcurrent: 1,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'w0-s0',
+      text: '今日は',
+      language: 'ja',
+    ));
+    await _settle();
+    expect(service.requests.single.text, '今日は');
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'w1-s0',
+      text: 'いい天気です',
+      language: 'ja',
+      startSeconds: 2,
+    ));
+    await _settle();
+    expect(store.document!.segments, hasLength(1));
+    expect(store.document!.segments.single.text, '今日はいい天気です');
+
+    // The stale fragment request completes; its result must not attach to
+    // the merged sentence, and the merged sentence must be translated too.
+    service.pending.removeAt(0).complete(const TranslationResult(
+      segmentId: 'seg-000001',
+      text: '今天',
+      provider: 'test',
+    ));
+    await _settle();
+    expect(store.translationResults.single.translation.status,
+        TranscriptTranslationStatus.translating);
+    expect(service.requests, hasLength(2));
+    expect(service.requests.last.text, '今日はいい天気です');
+
+    service.pending.removeAt(0).complete(const TranslationResult(
+      segmentId: 'seg-000001',
+      text: '今天天气很好',
+      provider: 'test',
+    ));
+    await _settle();
+    expect(store.translationResults, hasLength(1));
+    final result = store.translationResults.single.translation;
+    expect(result.status, TranscriptTranslationStatus.translated);
+    expect(result.text, '今天天气很好');
+    expect(result.segmentId, 'seg-000001');
+  });
+
+  test('reports the oldest waiting age while the queue is backlogged',
+      () async {
+    final store = RecognitionResultStore();
+    final service = _ControlledTranslationService();
+    final queue = TranscriptTranslationQueue(
+      results: store,
+      service: service,
+      targetLanguage: 'zh-CN',
+      maxConcurrent: 1,
+    );
+    addTearDown(() {
+      queue.dispose();
+      store.dispose();
+    });
+
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-1',
+      text: 'first',
+    ));
+    store.addRecognition(_event(
+      sessionId: 'session-1',
+      segmentId: 'seg-2',
+      text: 'second',
+      startSeconds: 10,
+    ));
+    await _settle();
+
+    expect(queue.metrics.activeRequests, 1);
+    expect(queue.metrics.waitingSegments, 1);
+    expect(queue.metrics.oldestWaitingAge, isNotNull);
+
+    service.pending.removeAt(0).complete(const TranslationResult(
+      segmentId: 'seg-000001',
+      text: 'translated',
+      provider: 'test',
+    ));
+    await _settle();
+    service.pending.removeAt(0).complete(const TranslationResult(
+      segmentId: 'seg-000002',
+      text: 'translated',
+      provider: 'test',
+    ));
+    await _settle();
+    expect(queue.metrics.waitingSegments, 0);
+    expect(queue.metrics.oldestWaitingAge, isNull);
+  });
+}
+
+class _FixedTextService
+    implements TranslationService, TranslationServiceStatusProvider {
+  _FixedTextService(this.text);
+
+  final String text;
+  final List<TranslationRequest> requests = [];
+
+  @override
+  TranslationServiceStatus get status =>
+      const TranslationServiceStatus.available(provider: 'fixed-text');
+
+  @override
+  Future<TranslationResult> translate(TranslationRequest request) async {
+    requests.add(request);
+    return TranslationResult(
+      segmentId: request.segmentId,
+      text: text,
+      provider: 'fixed-text',
+    );
+  }
 }

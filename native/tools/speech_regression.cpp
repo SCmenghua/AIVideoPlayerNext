@@ -103,6 +103,9 @@ void on_segment(const speech_core_segment* segment, void* user_data) {
                    << ",\"text\":\"" << json_escape(segment->text)
                    << "\",\"language\":\"" << json_escape(segment->language)
                    << "\",\"confidence\":" << segment->confidence
+                   << ",\"avgLogprob\":" << segment->avg_logprob
+                   << ",\"noSpeechProb\":" << segment->no_speech_prob
+                   << ",\"repetition\":" << segment->repetition
                    << ",\"kind\":\"final\",\"source\":\"whisperCpp\"}\n";
   ++context->count;
 }
@@ -113,6 +116,7 @@ int main(int argc, char** argv) {
   std::string model_path;
   std::string audio_path;
   std::string language = "auto";
+  std::string initial_prompt;
   std::string manifest_path;
   std::string output_path;
   speech_core_requested_backend requested_backend =
@@ -129,6 +133,7 @@ int main(int argc, char** argv) {
       }
     }
     else if (argument == "--language" && i + 1 < argc) language = argv[++i];
+    else if (argument == "--prompt" && i + 1 < argc) initial_prompt = argv[++i];
     else if (argument == "--manifest" && i + 1 < argc) manifest_path = argv[++i];
     else if (argument == "--output" && i + 1 < argc) output_path = argv[++i];
     else if (argument == "--threads" && i + 1 < argc) {
@@ -191,7 +196,8 @@ int main(int argc, char** argv) {
   OutputContext context{output, "regression"};
   status = speech_core_session_recognize(
       session, pcm.samples, pcm.sample_count, pcm.sample_rate,
-      language.c_str(), threads, on_segment, &context, &diagnostics);
+      language.c_str(), initial_prompt.empty() ? nullptr : initial_prompt.c_str(),
+      threads, on_segment, &context, &diagnostics);
   if (status == SPEECH_CORE_OK) {
     *output << "{\"type\":\"backend\",\"sessionId\":\"regression\","
             << "\"requestedBackend\":\""

@@ -204,6 +204,7 @@ class RecognitionWindow {
     required this.sampleRate,
     required List<double> samples,
     required this.sourceChunkCount,
+    this.contextLead = Duration.zero,
   }) : samples = UnmodifiableListView(List<double>.from(samples));
 
   final String windowId;
@@ -212,6 +213,12 @@ class RecognitionWindow {
   final int sampleRate;
   final List<double> samples;
   final int sourceChunkCount;
+
+  /// Audio at the head of the window that the previous window already covered.
+  /// It is there to give the decoder the run-up to a line cut by the boundary,
+  /// not to be transcribed again, so anything reported inside it belongs to the
+  /// previous window.
+  final Duration contextLead;
 
   Duration get duration => Duration(
         microseconds:
@@ -477,6 +484,19 @@ abstract interface class WindowRecognitionService {
   Future<WindowRecognitionResult> recognize(RecognitionWindow window);
   Future<void> stop();
   Future<void> dispose();
+}
+
+/// Recognizers whose Whisper language hint can follow the user's settings
+/// without rebuilding the model or the worker.
+abstract interface class WindowRecognitionLanguageController {
+  void setLanguage(String language);
+}
+
+/// Recognizers whose Whisper model file can be swapped at runtime. The swap
+/// reloads the model; in-flight windows on the previous model may fail and
+/// are handled by the normal per-window retry policy.
+abstract interface class WindowRecognitionModelController {
+  void setModel(String modelPath);
 }
 
 abstract interface class WindowRecognitionStatusProvider {

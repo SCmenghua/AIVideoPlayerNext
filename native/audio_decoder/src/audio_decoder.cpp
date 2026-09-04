@@ -56,7 +56,15 @@ std::wstring utf8_to_wide(const char* value) {
   return result;
 }
 
-bool set_float_output(IMFSourceReader* reader) {
+/// Requests float PCM from the reader. When [sample_rate] and [channels] are
+/// non-zero the rate conversion and downmix are asked of Media Foundation
+/// instead of being done later in Dart: its resampler is a filtered one, so
+/// the 24 kHz of an ordinary 48 kHz track is removed rather than folded back
+/// over the speech band, and its downmix follows the channel mask instead of
+/// averaging the surround channels into the dialogue.
+bool set_float_output(IMFSourceReader* reader,
+                      UINT32 sample_rate,
+                      UINT32 channels) {
   if (reader == nullptr) return false;
   ComPtr<IMFMediaType> type;
   if (FAILED(MFCreateMediaType(&type))) return false;
@@ -64,10 +72,27 @@ bool set_float_output(IMFSourceReader* reader) {
       FAILED(type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float))) {
     return false;
   }
+  if (sample_rate != 0 && channels != 0) {
+    const UINT32 block_align = channels * sizeof(float);
+    if (FAILED(type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32)) ||
+        FAILED(type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)) ||
+        FAILED(type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels)) ||
+        FAILED(type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align)) ||
+        FAILED(type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                               sample_rate * block_align)) ||
+        FAILED(type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE))) {
+      return false;
+    }
+  }
   return SUCCEEDED(reader->SetCurrentMediaType(
       static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr,
       type.Get()));
 }
+
+/// Recognition input format. Whisper wants exactly this, and asking the
+/// decoder for it keeps every later stage a straight copy.
+constexpr UINT32 kRecognitionSampleRate = 16000;
+constexpr UINT32 kRecognitionChannels = 1;
 
 struct OpenResult {
   ai_audio_decoder_status status = AI_AUDIO_DECODER_OPEN_FAILED;
@@ -89,8 +114,13 @@ OpenResult open_reader(const std::wstring& wide_path,
     result.status = AI_AUDIO_DECODER_OPEN_FAILED;
     return result;
   }
-  if (!set_float_output(result.reader.Get()) ||
-      FAILED(result.reader->GetCurrentMediaType(
+  // Not every decoder accepts a converted output type; when one refuses, fall
+  // back to its native rate and channel count and let Dart standardize.
+  if (!set_float_output(result.reader.Get(), kRecognitionSampleRate,
+                        kRecognitionChannels)) {
+    (void)set_float_output(result.reader.Get(), 0, 0);
+  }
+  if (FAILED(result.reader->GetCurrentMediaType(
           static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &type))) {
     result.reader.Reset();
     result.status = AI_AUDIO_DECODER_NO_AUDIO;

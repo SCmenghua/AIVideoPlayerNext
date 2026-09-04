@@ -36,3 +36,9 @@ test_assets/media/
 .dart-localappdata/
 .tool-appdata/
 release/
+
+# Phase 10 local model comparison transcripts (personal media, never commit)
+test_assets/*.jsonl
+
+# Local analysis scratch (session notes and one-off measurement scripts)
+.workbuddy/

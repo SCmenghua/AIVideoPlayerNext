@@ -12,6 +12,7 @@ import '../audio/recognition_controller.dart';
 import '../translation/system_translation_service.dart';
 import '../translation/translation_model_catalog.dart';
 import 'app_settings.dart';
+import 'whisper_model_section.dart';
 
 class SettingsWorkspace extends ConsumerStatefulWidget {
   const SettingsWorkspace({super.key});
@@ -26,6 +27,8 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   late final TextEditingController _genericEndpoint;
   late final TextEditingController _genericKey;
   late final TextEditingController _genericModel;
+  late final TextEditingController _genericGlossary;
+  final FocusNode _genericGlossaryFocus = FocusNode();
   String? _testResult;
   bool _testing = false;
   bool _loadingModels = false;
@@ -33,10 +36,13 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   int _modelRequestGeneration = 0;
   final TranslationModelCatalog _modelCatalog = TranslationModelCatalog();
   AppSettingsController? _settingsController;
+  late final WhisperModelInstallController _whisperModels =
+      WhisperModelInstallController(ref.read(whisperModelStoreProvider));
 
   @override
   void initState() {
     super.initState();
+    unawaited(_whisperModels.refresh());
     _settingsController = ref.read(appSettingsProvider);
     _settingsController!.addListener(_onSettingsChanged);
     final settings = _settingsController!.snapshot;
@@ -47,16 +53,21 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         TextEditingController(text: settings.genericEndpoint?.toString() ?? '');
     _genericKey = TextEditingController(text: settings.genericApiKey ?? '');
     _genericModel = TextEditingController(text: settings.genericModel);
+    _genericGlossary =
+        TextEditingController(text: settings.translationGlossary);
   }
 
   @override
   void dispose() {
     _settingsController?.removeListener(_onSettingsChanged);
+    _whisperModels.dispose();
     _deeplKey.dispose();
     _deeplEndpoint.dispose();
     _genericEndpoint.dispose();
     _genericKey.dispose();
     _genericModel.dispose();
+    _genericGlossary.dispose();
+    _genericGlossaryFocus.dispose();
     super.dispose();
   }
 
@@ -68,6 +79,11 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
     _replaceText(_genericEndpoint, settings.genericEndpoint?.toString() ?? '');
     _replaceText(_genericKey, settings.genericApiKey ?? '');
     _replaceText(_genericModel, settings.genericModel);
+    // The glossary has its own apply button; an in-progress edit must not be
+    // overwritten by the persisted value.
+    if (!_genericGlossaryFocus.hasFocus) {
+      _replaceText(_genericGlossary, settings.translationGlossary);
+    }
     setState(() {});
   }
 
@@ -174,11 +190,11 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         return;
       }
       final result = await service
-          .translate(const TranslationRequest(
+          .translate(TranslationRequest(
             segmentId: 'connection-test',
             text: 'Hello',
             sourceLanguage: 'en',
-            targetLanguage: 'zh-CN',
+            targetLanguage: settings.translationTargetLanguage,
           ))
           .timeout(const Duration(seconds: 20));
       if (!mounted) return;
@@ -228,6 +244,70 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                           .read(appSettingsProvider)
                           .setPrefetchMode(selection.single),
                     ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: settings.recognitionLanguage,
+                      decoration: const InputDecoration(
+                        labelText: '识别原语言',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: recognitionLanguageOptions
+                          .map((option) => DropdownMenuItem<String>(
+                                value: option.code,
+                                child: Text(option.label),
+                              ))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          ref
+                              .read(appSettingsProvider)
+                              .setRecognitionLanguage(value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: settings.whisperModel,
+                      decoration: const InputDecoration(
+                        labelText: 'Whisper 模型',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: whisperModelOptions
+                          .map((option) => DropdownMenuItem<String>(
+                                value: option.fileName,
+                                child: Text(option.label),
+                              ))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          ref.read(appSettingsProvider).setWhisperModel(value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      Platform.isIOS
+                          // iOS builds carry no weights at all.
+                          ? '模型不随应用分发，需在下方按需下载；下载完成后校验 SHA-256，'
+                              '中断可续传。所选模型缺失时自动回退到已安装的其他模型，'
+                              '诊断页可确认当前加载的模型。'
+                          : '模型文件需位于程序目录 models 文件夹内；所选文件缺失时自动回退到已安装的默认模型。'
+                              '切换后重启应用生效，诊断页可确认当前加载的模型。',
+                      style: const TextStyle(color: Color(0xFF9EA7AC)),
+                    ),
+                    // Only iOS loads weights from the sandbox store, so
+                    // offering the download anywhere else would fetch
+                    // gigabytes into a directory nothing reads.
+                    if (Platform.isIOS) ...[
+                      const SizedBox(height: 12),
+                      WhisperModelSection(
+                        controller: _whisperModels,
+                        selectedFileName: settings.whisperModel,
+                        onSelect: (model) => ref
+                            .read(appSettingsProvider)
+                            .setWhisperModel(model.fileName),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     Text(
                       settings.prefetchMode == RecognitionPrefetchMode.fullMedia
@@ -282,6 +362,32 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                       },
                     ),
                     const SizedBox(height: 14),
+                    DropdownButtonFormField<String>(
+                      initialValue: settings.translationTargetLanguage,
+                      decoration: const InputDecoration(
+                        labelText: '翻译目标语言',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: translationTargetLanguageOptions
+                          .map((option) => DropdownMenuItem<String>(
+                                value: option.code,
+                                child: Text(option.label),
+                              ))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          ref
+                              .read(appSettingsProvider)
+                              .setTranslationTargetLanguage(value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '更改后已完成翻译会按新目标语言重新翻译。',
+                      style: TextStyle(color: Color(0xFF9EA7AC)),
+                    ),
+                    const SizedBox(height: 6),
                     if (settings.translationMode == TranslationMode.deepl)
                       _deepLForm()
                     else if (settings.translationMode ==
@@ -517,6 +623,32 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
             ),
           ],
           const SizedBox(height: 10),
+          TextField(
+            controller: _genericGlossary,
+            focusNode: _genericGlossaryFocus,
+            minLines: 3,
+            maxLines: 6,
+            decoration: const InputDecoration(
+              labelText: '术语表（可选）',
+              hintText: '每行一条：原文=译文',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                ref
+                    .read(appSettingsProvider)
+                    .setTranslationGlossary(_genericGlossary.text);
+                setState(() => _testResult = '术语表已应用。');
+              },
+              icon: const Icon(Icons.rule_outlined),
+              label: const Text('应用术语表'),
+            ),
+          ),
+          const SizedBox(height: 10),
           Align(
             alignment: Alignment.centerLeft,
             child: OutlinedButton.icon(
@@ -644,9 +776,12 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
           Text(
             settings.translationMode == TranslationMode.deepl
                 ? '设置会立即应用到后续翻译请求；批次不足时最多等待约 300 ms 后发送。'
+                    '推荐值：每批 8、并发 10；低于识别产出速度时字幕会持续落后。'
                 : settings.translationMode == TranslationMode.systemTranslation
                     ? '系统翻译由 iOS 在本机完成，串行返回；语言包需已在系统设置中下载。'
-                    : '通用 API 逐句翻译、直接并发，不组批；设置会立即应用到后续翻译请求。',
+                    : '通用 API 逐句翻译、直接并发，不组批；设置会立即应用到后续翻译请求。'
+                        '推荐并发 10（上限 20）；低于识别产出速度时字幕会持续落后，'
+                        '诊断页会显示最久等待时间。',
             style: const TextStyle(color: Color(0xFF9EA7AC)),
           ),
         ],

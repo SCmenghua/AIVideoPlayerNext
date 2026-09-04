@@ -177,8 +177,14 @@ class TranscriptDocument {
           return byEnd != 0 ? byEnd : left.id.compareTo(right.id);
         });
 
-  TranscriptDocument upsertSegment(TranscriptSegment segment) {
-    final next = <TranscriptSegment>[...segments];
+  /// True when a segment with the same ID and text still exists in the
+  /// timeline. Used by schedulers to drop jobs whose input was re-assembled.
+  bool hasSegment(TranscriptSegment candidate) => segments.any(
+        (segment) =>
+            segment.id == candidate.id && segment.text == candidate.text,
+      );
+
+  TranscriptDocument upsertSegment(TranscriptSegment segment) {    final next = <TranscriptSegment>[...segments];
     final index = next.indexWhere((value) => value.id == segment.id);
     if (index == -1) {
       next.add(segment);

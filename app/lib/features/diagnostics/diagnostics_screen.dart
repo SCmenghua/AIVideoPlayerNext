@@ -660,6 +660,11 @@ class _RecognitionSummary extends StatelessWidget {
                     translationQueue?.metrics.averageQueueWait),
               ),
               _Metric(
+                label: '最久等待',
+                value: _formatDurationMetric(
+                    translationQueue?.metrics.oldestWaitingAge),
+              ),
+              _Metric(
                 label: '端到端翻译',
                 value: _formatDurationMetric(
                     translationQueue?.metrics.averageEndToEndWait),

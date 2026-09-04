@@ -58,7 +58,7 @@ void capture(const speech_core_segment* segment, void* user_data) {
 }  // namespace
 
 int main() {
-  check(speech_core_abi_version() == 2);
+  check(speech_core_abi_version() == 3);
   check(speech_core_model_actual_backend(nullptr) ==
         SPEECH_CORE_ACTUAL_BACKEND_UNAVAILABLE);
   check(speech_core_model_gpu_enabled(nullptr) == 0);
@@ -100,7 +100,7 @@ int main() {
   const float samples[1600] = {};
   CapturedSegment captured;
   check(speech_core_session_recognize(
-            session, samples, 1600, 16000, "en", 1, capture, &captured,
+            session, samples, 1600, 16000, "en", nullptr, 1, capture, &captured,
             &diagnostics) == SPEECH_CORE_OK);
   check(captured.count == 1);
   check(captured.end_ms == 100);

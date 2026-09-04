@@ -77,7 +77,26 @@ typedef struct speech_core_segment {
   int64_t end_ms;
   const char* text;
   const char* language;
+
+  /// Geometric mean of the per-token probabilities, i.e. `exp(avg_logprob)`.
+  /// This is a recognition-quality measure. It falls back to
+  /// `1 - no_speech_prob` only when the backend reports no token probabilities.
   float confidence;
+
+  /// Mean per-token log probability. Whisper's own decoder rejects a candidate
+  /// below roughly -1.0, so callers can use the same scale for their own gate.
+  /// Zero means the backend did not report it.
+  float avg_logprob;
+
+  /// Whisper's probability that the window carries no speech at all. High
+  /// values accompany music and room tone, where the decoder still emits
+  /// confident but invented text.
+  float no_speech_prob;
+
+  /// Share of repeated 4-grams inside the text, from 0 (no repetition) to
+  /// nearly 1 (a degenerate loop such as a single phrase repeated forever).
+  float repetition;
+
   uint8_t is_final;
 } speech_core_segment;
 
@@ -120,12 +139,18 @@ SPEECH_CORE_API void speech_core_session_destroy(speech_core_session* session);
 SPEECH_CORE_API speech_core_status speech_core_session_cancel(
     speech_core_session* session);
 
+/// Recognizes one window. [initial_prompt] may be NULL; when it is not, the
+/// text is fed to the decoder as preceding context so an utterance split
+/// across two windows keeps its wording, spelling, and punctuation. Callers
+/// should pass the tail of the previous window's transcript, not the whole
+/// transcript, because the prompt competes with the audio for decoder context.
 SPEECH_CORE_API speech_core_status speech_core_session_recognize(
     speech_core_session* session,
     const float* samples,
     size_t sample_count,
     uint32_t sample_rate,
     const char* language,
+    const char* initial_prompt,
     int32_t n_threads,
     speech_core_segment_callback callback,
     void* user_data,

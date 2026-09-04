@@ -12,6 +12,48 @@
       "license": "MIT",
       "sha256": "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2",
       "sizeBytes": 574041195
+    },
+    {
+      "modelId": "ggml-large-v3-q5_0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+      "sourceRevision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "license": "MIT",
+      "sha256": "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
+      "sizeBytes": 1081140203
+    },
+    {
+      "modelId": "ggml-large-v3",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+      "sourceRevision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "license": "MIT",
+      "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+      "sizeBytes": 3095033483
+    },
+    {
+      "modelId": "ggml-kotoba-whisper-v2.0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin",
+      "license": "Apache-2.0",
+      "sha256": "eff70a8a236e731abba774ba71e1f6d0fce53302137208c32207e694e0bf4546",
+      "sizeBytes": 1519521155
+    },
+    {
+      "modelId": "ggml-kotoba-whisper-v2.0-q5_0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin",
+      "license": "Apache-2.0",
+      "sha256": "4a3b92192b5d3578ff854a5876213e2e27af0c2d357492c2d14271e82c303658",
+      "sizeBytes": 537819875
     }
   ],
   "assets": [

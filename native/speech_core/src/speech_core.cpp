@@ -11,6 +11,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef SPEECH_CORE_WITH_WHISPER
 #include "whisper.h"
@@ -113,6 +114,69 @@ void clear_diagnostics(speech_core_diagnostics* diagnostics) {
   if (diagnostics != nullptr) *diagnostics = {};
 }
 
+/// Decodes UTF-8 into code points, dropping whitespace. Japanese output spaces
+/// words inconsistently, so comparing code points rather than bytes keeps the
+/// repetition measure stable across the same phrase written with and without
+/// separators.
+std::vector<uint32_t> decode_utf8(std::string_view text) {
+  std::vector<uint32_t> code_points;
+  code_points.reserve(text.size());
+  size_t index = 0;
+  while (index < text.size()) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    size_t length = 1;
+    uint32_t value = lead;
+    if ((lead & 0xE0u) == 0xC0u) {
+      length = 2;
+      value = lead & 0x1Fu;
+    } else if ((lead & 0xF0u) == 0xE0u) {
+      length = 3;
+      value = lead & 0x0Fu;
+    } else if ((lead & 0xF8u) == 0xF0u) {
+      length = 4;
+      value = lead & 0x07u;
+    }
+    if (index + length > text.size()) break;
+    for (size_t offset = 1; offset < length; ++offset) {
+      value = (value << 6) |
+              (static_cast<unsigned char>(text[index + offset]) & 0x3Fu);
+    }
+    index += length;
+    if (value == ' ' || value == '\t' || value == '\n' || value == '\r' ||
+        value == 0x3000u) {
+      continue;
+    }
+    code_points.push_back(value);
+  }
+  return code_points;
+}
+
+/// Share of repeated 4-grams in [text]. Whisper's own entropy threshold only
+/// rejects a decode while it is still choosing a temperature; a loop that
+/// survives that check - one short phrase repeated for a whole window, the
+/// usual failure on music and room tone - still reaches the caller, and this
+/// catches it.
+float repeated_ngram_ratio(std::string_view text) {
+  constexpr size_t kGram = 4;
+  const std::vector<uint32_t> code_points = decode_utf8(text);
+  if (code_points.size() < kGram * 2) return 0.0f;
+  const size_t total = code_points.size() - kGram + 1;
+  std::vector<uint64_t> hashes;
+  hashes.reserve(total);
+  for (size_t start = 0; start < total; ++start) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t offset = 0; offset < kGram; ++offset) {
+      hash = (hash ^ code_points[start + offset]) * 1099511628211ull;
+    }
+    hashes.push_back(hash);
+  }
+  std::sort(hashes.begin(), hashes.end());
+  const size_t unique =
+      static_cast<size_t>(std::unique(hashes.begin(), hashes.end()) -
+                          hashes.begin());
+  return static_cast<float>(total - unique) / static_cast<float>(total);
+}
+
 #ifdef SPEECH_CORE_WITH_WHISPER
 bool whisper_abort_callback(void* user_data) {
   const auto* session = static_cast<const speech_core_session*>(user_data);
@@ -139,7 +203,7 @@ extern "C" const char* speech_core_status_message(speech_core_status status) {
   return "unknown error";
 }
 
-extern "C" uint32_t speech_core_abi_version(void) { return 2; }
+extern "C" uint32_t speech_core_abi_version(void) { return 3; }
 
 extern "C" speech_core_status speech_core_model_create_with_backend(
     const char* model_path,
@@ -321,6 +385,7 @@ extern "C" speech_core_status speech_core_session_recognize(
     size_t sample_count,
     uint32_t sample_rate,
     const char* language,
+    const char* initial_prompt,
     int32_t n_threads,
     speech_core_segment_callback callback,
     void* user_data,
@@ -338,11 +403,16 @@ extern "C" speech_core_status speech_core_session_recognize(
   const auto started = std::chrono::steady_clock::now();
 
   if (session->model->backend == speech_core_model::Backend::test) {
+    // The test backend answers with a fixed transcript, so decoder context
+    // has nothing to steer; the cast keeps the parameter used in builds that
+    // leave the whisper backend out entirely.
+    (void)initial_prompt;
     if (session->cancelled.load()) return SPEECH_CORE_CANCELLED;
     const char* output_language = (language == nullptr || language[0] == '\0') ? "en" : language;
     const speech_core_segment segment = {
         0, 0, static_cast<int64_t>((sample_count * 1000) / sample_rate),
-        "speech_core test transcript", output_language, 1.0f, 1};
+        "speech_core test transcript", output_language,
+        1.0f, 0.0f, 0.0f, 0.0f, 1};
     callback(&segment, user_data);
     if (diagnostics != nullptr) {
       diagnostics->audio_samples = sample_count;
@@ -361,12 +431,27 @@ extern "C" speech_core_status speech_core_session_recognize(
     params.print_realtime = false;
     params.print_timestamps = false;
     params.no_context = true;
-    // The live recognizer submits short windows. A smaller encoder context
-    // avoids processing the unused tail of Whisper's ten-second input frame.
-    params.audio_ctx = 512;
+    // Whisper's encoder is trained on a fixed 30-second frame with 1500
+    // positions, not the ten seconds an earlier comment here assumed.
+    // Truncating that context (the old value was 512, i.e. 10.24 seconds)
+    // leaves the encoder outside its training distribution: timestamps stop
+    // matching the audio, and long-form decoding skips whole 30-second chunks
+    // because the decoder emits an end timestamp calibrated for audio it never
+    // saw. Zero keeps the full context. The cost is real but small next to the
+    // headroom here - windows still finish far faster than realtime.
+    params.audio_ctx = 0;
     params.suppress_blank = true;
     params.suppress_nst = true;
+    // Segment timestamps only partition the window: whisper hands back spans
+    // that touch end to end with no gaps, so every quiet stretch is charged to
+    // whichever segment reaches it and a window holding one short line reports
+    // that line as filling the window. Token timestamps are computed against
+    // the audio itself, which is what a subtitle needs.
+    params.token_timestamps = true;
     params.language = (language == nullptr || language[0] == '\0') ? "auto" : language;
+    if (initial_prompt != nullptr && initial_prompt[0] != '\0') {
+      params.initial_prompt = initial_prompt;
+    }
     // "auto" selects a language and then continues transcription. In whisper.cpp,
     // detect_language=true is a detect-only mode that returns before decoding text.
     params.detect_language = false;
@@ -433,19 +518,66 @@ extern "C" speech_core_status speech_core_session_recognize(
           whisper_full_get_segment_t0(session->model->whisper, i) * 10;
       const int64_t raw_end_ms =
           whisper_full_get_segment_t1(session->model->whisper, i) * 10;
-      const int64_t start_ms = std::clamp(raw_start_ms, int64_t{0}, audio_duration_ms);
-      const int64_t end_ms = std::clamp(raw_end_ms, start_ms, audio_duration_ms);
+      const int64_t segment_start_ms =
+          std::clamp(raw_start_ms, int64_t{0}, audio_duration_ms);
+      const int64_t segment_end_ms =
+          std::clamp(raw_end_ms, segment_start_ms, audio_duration_ms);
       const char* text = whisper_full_get_segment_text(session->model->whisper, i);
       const float no_speech_probability =
           whisper_full_get_segment_no_speech_prob(session->model->whisper, i);
-      if (text == nullptr || text[0] == '\0' || end_ms <= start_ms ||
+      if (text == nullptr || text[0] == '\0' || segment_end_ms <= segment_start_ms ||
           no_speech_probability >= 0.6f) {
         continue;
       }
+
+      // Mean log probability over the segment's real tokens, and the span the
+      // tokens themselves were placed at. Special tokens (timestamps,
+      // language, task markers) carry probabilities of their own that say
+      // nothing about transcription quality, so they stay out of both.
+      const int token_count =
+          whisper_full_n_tokens(session->model->whisper, i);
+      double logprob_sum = 0.0;
+      int scored_tokens = 0;
+      int64_t token_start_ms = -1;
+      int64_t token_end_ms = -1;
+      for (int token = 0; token < token_count; ++token) {
+        const whisper_token_data data =
+            whisper_full_get_token_data(session->model->whisper, i, token);
+        if (data.id >= whisper_token_eot(session->model->whisper)) continue;
+        logprob_sum += data.plog;
+        ++scored_tokens;
+        const int64_t t0 = data.t0 * 10;
+        const int64_t t1 = data.t1 * 10;
+        if (t0 < 0 || t1 <= t0) continue;
+        if (token_start_ms < 0) token_start_ms = t0;
+        token_end_ms = t1;
+      }
+
+      // Token times stay inside the segment whisper already agreed on, so a
+      // single misplaced token cannot move a subtitle out of its window.
+      int64_t start_ms = segment_start_ms;
+      int64_t end_ms = segment_end_ms;
+      if (token_start_ms >= 0 && token_end_ms > token_start_ms) {
+        start_ms = std::clamp(token_start_ms, segment_start_ms, segment_end_ms);
+        end_ms = std::clamp(token_end_ms, start_ms, segment_end_ms);
+        if (end_ms <= start_ms) {
+          start_ms = segment_start_ms;
+          end_ms = segment_end_ms;
+        }
+      }
+
+      const float avg_logprob = scored_tokens == 0
+          ? 0.0f
+          : static_cast<float>(logprob_sum / scored_tokens);
+      const float confidence = scored_tokens == 0
+          ? 1.0f - no_speech_probability
+          : std::clamp(std::exp(avg_logprob), 0.0f, 1.0f);
+
       const speech_core_segment segment = {
           static_cast<uint32_t>(i), start_ms, end_ms, text,
           detected == nullptr ? "" : detected,
-          1.0f - no_speech_probability, 1};
+          confidence, avg_logprob, no_speech_probability,
+          repeated_ngram_ratio(text), 1};
       callback(&segment, user_data);
       ++emitted_segments;
     }

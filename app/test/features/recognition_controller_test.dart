@@ -38,6 +38,7 @@ AudioChunk _partialChunk(int milliseconds) => AudioChunk(
     );
 
 AudioWindowPlanner _planner() => AudioWindowPlanner(
+      windowOverlap: Duration.zero,
       targetWindow: const Duration(seconds: 1),
       minimumSpeechWindow: const Duration(milliseconds: 100),
       maximumWindow: const Duration(seconds: 2),

@@ -424,6 +424,43 @@ void main() {
       throwsA(isA<TimeoutException>()),
     );
   });
+
+  test('sends the user glossary in the system prompt of every request',
+      () async {
+    final capturedBodies = <String>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      capturedBodies.add(await utf8.decoder.bind(request).join());
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'choices': [
+            {
+              'message': {'content': '春日です。'},
+            },
+          ],
+        }));
+      await request.response.close();
+    });
+    final service = OpenAiCompatibleTranslationService(
+      endpoint: Uri.parse(
+          'http://${server.address.address}:${server.port}/v1/chat/completions'),
+      apiKey: 'test-secret',
+      model: 'test-model',
+      glossary: const {'ハルヒ': '春日'},
+      clientFactory: _directClient,
+    );
+
+    final result = await service.translate(_request());
+
+    expect(result.text, '春日です。');
+    expect(capturedBodies, hasLength(1));
+    expect(capturedBodies.single, contains('Glossary'));
+    expect(capturedBodies.single, contains('ハルヒ = 春日'));
+    expect(service.diagnostics['术语表条数'], 1);
+  });
 }
 
 class _CapturedRequest {

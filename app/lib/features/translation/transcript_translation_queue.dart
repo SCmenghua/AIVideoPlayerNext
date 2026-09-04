@@ -6,6 +6,7 @@ import '../../core/diagnostics/diagnostic_log_service.dart';
 import '../../core/diagnostics/recognition_result_store.dart';
 import '../../domain/subtitles/transcript_document.dart';
 import '../../domain/translation/translation_service.dart';
+import '../../domain/translation/translation_text_normalizer.dart';
 
 /// Bounded, session-aware translation scheduler. A batch is one provider call;
 /// every individual segment keeps its own stable ID and retry state.
@@ -71,6 +72,11 @@ class TranscriptTranslationQueue extends ChangeNotifier {
   Duration? _lastQueueWait;
   Duration? _lastEndToEndWait;
   Duration? _priorityPosition;
+  DateTime? _lastBacklogWarning;
+
+  static const int _backlogWarnSegments = 8;
+  static const Duration _backlogWarnAfter = Duration(seconds: 10);
+  static const Duration _backlogWarnInterval = Duration(seconds: 30);
 
   TranslationServiceStatus get serviceStatus =>
       _service is TranslationServiceStatusProvider
@@ -101,7 +107,18 @@ class TranscriptTranslationQueue extends ChangeNotifier {
         lastQueueWait: _lastQueueWait,
         averageEndToEndWait: _average(_totalEndToEndWait, _completedSegments),
         lastEndToEndWait: _lastEndToEndWait,
+        oldestWaitingAge: _oldestWaitingAge,
       );
+
+  /// Age of the segment that has been waiting for a worker the longest, i.e.
+  /// a lower bound on how far visible translation latency can lag.
+  Duration? get _oldestWaitingAge {
+    if (_waiting.isEmpty) return null;
+    final oldest = _waiting
+        .map((job) => job.firstEnqueuedAt)
+        .reduce((left, right) => left.isBefore(right) ? left : right);
+    return DateTime.now().difference(oldest);
+  }
 
   void updateConfiguration({
     required TranslationService service,
@@ -174,6 +191,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
       _restartScheduling(resetMetrics: true);
     }
     if (document == null) return;
+    _pruneStaleWaitingJobs(document);
     final status = serviceStatus;
     if (!status.available) {
       if (!_unavailableLogged) {
@@ -226,7 +244,36 @@ class TranscriptTranslationQueue extends ChangeNotifier {
         provider: status.provider,
       ));
     }
+    _warnIfBacklogged();
     _pump();
+  }
+
+  /// Waiting jobs whose segment no longer exists with the same text were
+  /// re-assembled (for example a sentence fragment merged with its
+  /// continuation); their results could never be written back.
+  void _pruneStaleWaitingJobs(TranscriptDocument document) {
+    if (_waiting.isEmpty) return;
+    _waiting.removeWhere((job) => !document.hasSegment(job.segment));
+  }
+
+  /// Recognition may outpace a slow provider; a persistent backlog must be
+  /// visible instead of silently growing subtitle latency.
+  void _warnIfBacklogged() {
+    if (_disposed || _waiting.length < _backlogWarnSegments) return;
+    final oldest = _oldestWaitingAge;
+    if (oldest == null || oldest < _backlogWarnAfter) return;
+    final now = DateTime.now();
+    if (_lastBacklogWarning != null &&
+        now.difference(_lastBacklogWarning!) < _backlogWarnInterval) {
+      return;
+    }
+    _lastBacklogWarning = now;
+    _logs?.warning('翻译', '翻译进度落后于识别产出', {
+      '等待条数': _waiting.length,
+      '最久等待秒': oldest.inSeconds,
+      '并发请求数': maxConcurrent,
+      '建议': '提高并发请求数，或将识别策略切换为按需预取',
+    });
   }
 
   void _pump() {
@@ -331,7 +378,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
             job,
             _translationFor(
               segment: job.segment,
-              text: result.text,
+              text: _displayResultText(result.text),
               status: TranscriptTranslationStatus.translated,
               provider: result.provider,
             ));
@@ -402,6 +449,13 @@ class TranscriptTranslationQueue extends ChangeNotifier {
   }
 
   int _max(int left, int right) => left > right ? left : right;
+
+  /// Provider output shown in the subtitle area. Chinese targets get subtitle
+  /// typography normalization; other targets only trim.
+  String _displayResultText(String text) =>
+      targetLanguage.toLowerCase().startsWith('zh')
+          ? normalizeChineseSubtitleText(text)
+          : text.trim();
 
   String _errorCategory(Object error) => switch (error) {
         TimeoutException() => 'timeout',
@@ -703,6 +757,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
     _lastApiWait = null;
     _lastQueueWait = null;
     _lastEndToEndWait = null;
+    _lastBacklogWarning = null;
     _apiWaitSamples.clear();
     _notifyMetrics();
   }
@@ -758,6 +813,7 @@ class TranslationQueueMetrics {
     required this.lastQueueWait,
     required this.averageEndToEndWait,
     required this.lastEndToEndWait,
+    required this.oldestWaitingAge,
   });
 
   final int configuredBatchSize;
@@ -783,6 +839,7 @@ class TranslationQueueMetrics {
   final Duration? lastQueueWait;
   final Duration? averageEndToEndWait;
   final Duration? lastEndToEndWait;
+  final Duration? oldestWaitingAge;
 }
 
 class _TranslationJob {
