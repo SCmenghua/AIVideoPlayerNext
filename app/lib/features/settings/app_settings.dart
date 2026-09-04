@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../audio/recognition_controller.dart';
+import '../../domain/speech/whisper_model_catalog.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../../domain/translation/translation_service.dart';
 
@@ -132,6 +133,28 @@ class AppSettings {
   final SubtitleDisplayMode subtitleDisplayMode;
   final PlaybackStartStrategy playbackStartStrategy;
   final bool waitForSubtitlePreparation;
+
+  /// True when the recognition language, not the dropdown, decides which
+  /// weight is loaded.
+  bool get whisperModelFollowsLanguage =>
+      whisperModelForLanguage(recognitionLanguage) != null;
+
+  /// Weight recognition should actually load.
+  ///
+  /// Pinning a recognition language picks the weight suited to it, so the
+  /// choice does not have to be made twice; on `auto` the manual selection
+  /// stands.
+  String get effectiveWhisperModel => whisperModelPreference.first;
+
+  /// Weights to try in order. The language's weight comes first, then whatever
+  /// the user picked by hand - a language pin naming a weight that is not
+  /// installed should fall back to their choice rather than to an arbitrary
+  /// one.
+  List<String> get whisperModelPreference {
+    final automatic = whisperModelForLanguage(recognitionLanguage)?.fileName;
+    if (automatic == null || automatic == whisperModel) return [whisperModel];
+    return [automatic, whisperModel];
+  }
 
   bool sameTranslationConfiguration(AppSettings other) =>
       translationMode == other.translationMode &&

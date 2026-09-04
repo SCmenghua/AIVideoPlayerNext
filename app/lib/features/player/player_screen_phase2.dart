@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -138,22 +140,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             .info('识别', '识别原语言已更新', {'语言': next.recognitionLanguage});
       }
     }
-    if (next.whisperModel != _lastSettings.whisperModel) {
-      final recognizer = ref.read(windowRecognitionServiceProvider);
-      final path = resolveWhisperModelPath(next.whisperModel);
-      final logs = ref.read(diagnosticsLogProvider);
-      if (path == null) {
-        logs.warning('识别', '所选 Whisper 模型文件不存在，保留当前模型', {
-          '模型': next.whisperModel,
-        });
-      } else if (recognizer is WindowRecognitionModelController) {
-        (recognizer as WindowRecognitionModelController).setModel(path);
-        logs.info('识别', 'Whisper 模型切换已开始', {'模型': next.whisperModel});
-      } else {
-        logs.warning('识别', '当前识别器不支持切换模型，重启应用后生效', {
-          '模型': next.whisperModel,
-        });
-      }
+    // Both the dropdown and the recognition language can move the model, so
+    // the whole preference order is what decides whether a swap is needed.
+    if (!listEquals(
+        next.whisperModelPreference, _lastSettings.whisperModelPreference)) {
+      unawaited(_applyWhisperModel(next));
     }
     if (!next.sameTranslationConfiguration(_lastSettings) ||
         next.translationTargetLanguage !=
@@ -189,6 +180,39 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _lastSettings = next;
     setState(() {});
     _evaluatePlaybackContent();
+  }
+
+  /// Points the recognizer at the weight [settings] now asks for.
+  ///
+  /// Resolving is asynchronous because iOS keeps its weights in the sandbox
+  /// store rather than beside the executable; the synchronous resolver this
+  /// used to call always returns null there, so a model switch on iOS never
+  /// took effect.
+  Future<void> _applyWhisperModel(AppSettings settings) async {
+    final logs = ref.read(diagnosticsLogProvider);
+    final path = await resolveWhisperModelPathAsync(
+      settings.whisperModelPreference,
+      ref.read(whisperModelStoreProvider),
+    );
+    if (!mounted) return;
+    if (path == null) {
+      logs.warning('识别', '所选 Whisper 模型文件不存在，保留当前模型', {
+        '模型': settings.effectiveWhisperModel,
+      });
+      return;
+    }
+    final recognizer = ref.read(windowRecognitionServiceProvider);
+    if (recognizer is! WindowRecognitionModelController) {
+      logs.warning('识别', '当前识别器不支持切换模型，重启应用后生效', {
+        '模型': settings.effectiveWhisperModel,
+      });
+      return;
+    }
+    (recognizer as WindowRecognitionModelController).setModel(path);
+    logs.info('识别', 'Whisper 模型切换已开始', {
+      '模型': File(path).uri.pathSegments.last,
+      '来源': settings.whisperModelFollowsLanguage ? '按识别语言自动选择' : '手动选择',
+    });
   }
 
   Future<void> _openLocalMedia() async {

@@ -100,6 +100,30 @@ const _whisperCppBase =
 const _kotobaBase =
     'https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main';
 
+/// Weight that suits a pinned recognition language, or null when no language
+/// is pinned.
+///
+/// Japanese gets the specialised kotoba weight, which transcribed Japanese
+/// noticeably better than any general model in the Phase 10 comparisons -
+/// large-v3 in particular hallucinates a stock closing phrase over near-silent
+/// audio. Every other language gets turbo, the fastest multilingual weight
+/// that still punctuates. `auto` returns null: with nothing pinned there is no
+/// language to choose from, so the user's own selection stands.
+WhisperModelDescriptor? whisperModelForLanguage(String recognitionLanguage) {
+  final language = recognitionLanguage.trim().toLowerCase();
+  if (language.isEmpty || language == 'auto') return null;
+  final japanese = language == 'ja' || language.startsWith('ja-');
+  return whisperModelByFileName(
+    japanese ? japaneseWhisperModel : multilingualWhisperModel,
+  );
+}
+
+/// Weight picked automatically for Japanese.
+const japaneseWhisperModel = 'ggml-kotoba-whisper-v2.0.bin';
+
+/// Weight picked automatically for every other pinned language.
+const multilingualWhisperModel = 'ggml-large-v3-turbo-q5_0.bin';
+
 /// The catalog entry a stored settings value refers to, or null when the value
 /// names a weight this build does not know about.
 WhisperModelDescriptor? whisperModelByFileName(String fileName) {

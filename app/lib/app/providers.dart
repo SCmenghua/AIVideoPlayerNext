@@ -47,9 +47,6 @@ String? _windowsArtifact(String fileName, String environmentVariable) {
   return null;
 }
 
-/// Resolves the Whisper model file for the settings-selected model name.
-/// An `AI_VIDEO_WHISPER_MODEL` environment override wins; a missing selected
-/// file falls back to the first installed known model.
 /// Sandbox store the installable weights live in. iOS ships without a model,
 /// so this is the only place one can come from there; on Windows the weights
 /// published beside the executable still take precedence.
@@ -64,14 +61,15 @@ final whisperModelStoreProvider = Provider<WhisperModelStore>(
 /// one is missing - a stored setting naming a model that was never downloaded
 /// should not leave recognition dead when another one is right there.
 Future<String?> resolveWhisperModelPathAsync(
-  String selectedModel,
+  List<String> preferredModels,
   WhisperModelStore store,
 ) async {
-  final windowsPath = resolveWhisperModelPath(selectedModel);
+  final windowsPath = resolveWhisperModelPath(preferredModels);
   if (windowsPath != null || Platform.isWindows) return windowsPath;
-  final selected = whisperModelByFileName(selectedModel);
-  if (selected != null) {
-    final installed = await store.installedPath(selected);
+  for (final name in preferredModels) {
+    final preferred = whisperModelByFileName(name);
+    if (preferred == null) continue;
+    final installed = await store.installedPath(preferred);
     if (installed != null) return installed;
   }
   for (final candidate in whisperModelCatalog) {
@@ -81,17 +79,19 @@ Future<String?> resolveWhisperModelPathAsync(
   return null;
 }
 
-String? resolveWhisperModelPath(String selectedModel) {
+String? resolveWhisperModelPath(List<String> preferredModels) {
   final configured = Platform.environment['AI_VIDEO_WHISPER_MODEL'];
   if (configured != null && File(configured).existsSync()) return configured;
   if (!Platform.isWindows) return null;
   final executableDirectory = File(Platform.resolvedExecutable).parent.path;
   String modelFile(String fileName) =>
       '$executableDirectory\\models\\$fileName';
-  final selected = File(modelFile(selectedModel));
-  if (selected.existsSync()) return selected.path;
-  // Selected model missing from the program directory: fall back to the
-  // first installed known model instead of leaving recognition unavailable.
+  for (final name in preferredModels) {
+    final selected = File(modelFile(name));
+    if (selected.existsSync()) return selected.path;
+  }
+  // No preferred model sits in the program directory: fall back to the first
+  // installed known model instead of leaving recognition unavailable.
   for (final option in whisperModelOptions) {
     final fallback = File(modelFile(option.fileName));
     if (fallback.existsSync()) return fallback.path;
@@ -206,7 +206,7 @@ final windowRecognitionServiceProvider =
     'AI_VIDEO_SPEECH_CORE_LIBRARY',
   );
   final model = resolveWhisperModelPath(
-      ref.read(appSettingsProvider).snapshot.whisperModel);
+      ref.read(appSettingsProvider).snapshot.whisperModelPreference);
   final logs = ref.read(diagnosticsLogProvider);
   final WindowRecognitionService service =
       nativeLibrary != null && model != null && File(model).existsSync()
@@ -246,8 +246,8 @@ void _scheduleWhisperModelBootstrap(
 ) {
   unawaited(() async {
     await settings.ready;
-    final path =
-        await resolveWhisperModelPathAsync(settings.snapshot.whisperModel, store);
+    final path = await resolveWhisperModelPathAsync(
+        settings.snapshot.whisperModelPreference, store);
     if (service is WindowRecognitionModelController && path != null) {
       (service as WindowRecognitionModelController).setModel(path);
     }

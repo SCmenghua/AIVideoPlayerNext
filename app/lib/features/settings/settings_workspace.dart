@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../../core/app_build_info.dart';
+import '../../domain/speech/whisper_model_catalog.dart';
 import '../../domain/translation/translation_service.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../audio/recognition_controller.dart';
@@ -284,6 +285,16 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                         }
                       },
                     ),
+                    if (settings.whisperModelFollowsLanguage) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        '识别原语言已固定，正在自动使用 '
+                        '${whisperModelForLanguage(settings.recognitionLanguage)!.label}'
+                        '；上面的手动选择只在该模型未安装时作为回退，'
+                        '改回「自动检测」后重新生效。',
+                        style: const TextStyle(color: Color(0xFFE0A030)),
+                      ),
+                    ],
                     const SizedBox(height: 6),
                     Text(
                       Platform.isIOS
