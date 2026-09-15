@@ -39,7 +39,7 @@ ThemeData buildAppTheme() {
       thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
       overlayShape: RoundSliderOverlayShape(overlayRadius: 14),
     ),
-    snackBarTheme: SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
     dividerTheme: DividerThemeData(color: scheme.outlineVariant.withValues(alpha: 0.4)),
   );
 }

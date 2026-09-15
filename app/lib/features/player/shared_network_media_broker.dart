@@ -1,6 +1,6 @@
 import '../../core/diagnostics/diagnostic_log_service.dart';
 import '../../domain/audio/recognition_media_source.dart';
-import '../audio/recognition_media_cache_worker.dart';
+import '../recognition/recognition_media_cache_worker.dart';
 
 /// One shared loopback media session for the currently playing network media.
 ///

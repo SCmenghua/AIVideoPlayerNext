@@ -3,8 +3,8 @@ import 'dart:async';
 import '../../core/diagnostics/diagnostic_log_service.dart';
 import '../../domain/audio/recognition_media_source.dart';
 import '../../domain/player/player_service.dart';
-import '../audio/recognition_media_cache_worker.dart';
 import '../player/shared_network_media_broker.dart';
+import 'recognition_media_cache_worker.dart';
 
 class ResolvedRecognitionMedia {
   const ResolvedRecognitionMedia({required this.uri, required this.viaProxy});

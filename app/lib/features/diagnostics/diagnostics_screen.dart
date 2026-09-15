@@ -97,7 +97,7 @@ class _StatusTab extends ConsumerWidget {
                   ('每批/并发', '${metrics.configuredBatchSize}/${metrics.configuredMaxConcurrent}'),
                 ]),
                 const SizedBox(height: 12),
-                _KeyValueCard(title: '应用', rows: [
+                const _KeyValueCard(title: '应用', rows: [
                   ('版本', AppBuildInfo.version),
                   ('构建时间', AppBuildInfo.buildTime),
                   ('构建编号', AppBuildInfo.buildId),
