@@ -174,9 +174,22 @@ CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符�
 | 2026-09-15 | Step 4 | 代码完成，待 CI | `WindowsPcmSource`/`IosPcmSource`、`RecognitionMediaResolver`、`WhisperModelCatalog`/`WhisperModelStore`（断点续传 + SHA-256）、`TranscriptStore`、`RecognitionService`；设置新增识别语言/模型/VAD/目标语言/字号；翻译队列改接 `TranscriptStore`；Windows 解码器优先协商 16 kHz 单声道；AppDelegate 删除模型通道；CMake 打包 `windows/models/`。**偏离：** `recognition_media_cache_worker` 未拆分（无编译器条件下盲改 2k 行网络代码风险过高，行为保持不变，后续单独处理） |
 | 2026-09-15 | Step 5 | 代码完成，待 CI | `PlayerShell` + `PlayerOverlay`（自动隐藏控制层、键盘/手势、进度 hover 预览、音量/倍速/字幕模式/全屏）+ `SubtitleLayer`（2.5 s 保持、字号）+ `PlaybackGate`；设置/诊断改为独立页面；Material 3 token 主题；widget 测试与门控单测 |
 | 2026-09-15 | Step 6 | 文档完成 | `docs/architecture.md` 重写；版本 `0.11.0`；发布待 Step 1–5 CI 全绿与真机验收后触发 |
+| 2026-09-15 | CI 首轮通过 | 已完成 | `refactor` @ `e37ab15`，7 轮修复后 `windows.yml` 与 `ios.yml` 全绿：原生 CTest、Dart 包 28 项、Flutter 139 项、Windows 包内 DLL/VAD 校验、iOS 编译。修复内容均为盲写错误（MSVC 字面量、测试期望、接口未 `implements`、import 路径、`dispose` 内用 `ref`、控制条溢出）与 Vulkan 构建 MAX_PATH 问题 |
+
+### 识别回归基线（CI，JSUT 前 20 条，kotoba-whisper-v2.0 fp16 + Silero VAD，CPU 4 线程）
+
+| 指标 | 值 |
+|---|---|
+| 总体 CER | 11.34% |
+| 单条 CER 中位数 | 6.07% |
+| 首段起点偏差中位数 | 278 ms |
+| 无输出的条目 | 1 / 20（`0006.wav`，待查） |
+| 窗口 / 片段 / 丢弃 | 18 / 30 / 0 |
+| 实时倍率（CI CPU） | 5.92（GPU 真机另计） |
+
+后续每轮改动以此为基线：总体 CER 或起点偏差劣化即视为未完成。
 
 ### 待用户操作
 
-1. 配置 git 身份与推送凭据，将 `refactor` 分支推送到 GitHub 触发 `windows.yml` 与 `ios.yml`。
-2. 首轮 CI 大概率有编译错误（全部代码在无工具链环境下编写）；按 CI 日志逐项修复后再进入真机验收。
-3. 真机验收（§3 Step 4/5 完成条件）：Windows 与 iPhone 各跑一段日语素材。
+1. 真机验收（§3 Step 4/5 完成条件）：手动触发 `build-windows-release.yml` 与 `build-unsigned-ios-ipa.yml`，Windows 与 iPhone 各跑一段日语素材；首次启动会提示下载 kotoba 模型（1.5 GB）。
+2. 验收通过后合并 `refactor` 到 `main`。
