@@ -7,6 +7,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../app/providers.dart';
 import '../../domain/player/player_service.dart';
+import '../recognition/model_import.dart';
 import '../recognition/recognition_service.dart';
 import '../recognition/whisper_model_store.dart';
 import '../settings/app_settings.dart';
@@ -580,15 +581,29 @@ class _RecognitionBanner extends StatelessWidget {
                                   : download.phase == ModelDownloadPhase.verifying
                                       ? '正在校验 ${spec.fileName}'
                                       : '正在下载 ${spec.fileName} '
-                                          '${(download.fraction * 100).toStringAsFixed(0)}%',
+                                          '${(download.fraction * 100).toStringAsFixed(0)}% · '
+                                          '${download.speedLabel}'
+                                          '${download.attempt > 1 ? ' · 第 ${download.attempt} 次' : ''}'
+                                          '${download.source == null ? '' : ' · ${download.source}'}',
                           style: Theme.of(context).textTheme.bodyMedium,
                         ),
                       ),
-                      if (spec != null && (download == null || download.isFailed))
+                      if (spec != null && (download == null || download.isFailed)) ...[
+                        TextButton(
+                          onPressed: () async {
+                            final messenger = ScaffoldMessenger.maybeOf(context);
+                            final message = await pickAndImportModel(recognition, expected: spec);
+                            if (message != null) {
+                              messenger?.showSnackBar(SnackBar(content: Text(message)));
+                            }
+                          },
+                          child: const Text('导入文件'),
+                        ),
                         FilledButton(
                           onPressed: () => recognition.installModel(spec),
-                          child: const Text('下载'),
+                          child: Text(download == null ? '下载' : '重试'),
                         ),
+                      ],
                     ],
                   ),
                   if (download != null && !download.isFailed) ...[
@@ -598,6 +613,13 @@ class _RecognitionBanner extends StatelessWidget {
                   if (download?.error != null) ...[
                     const SizedBox(height: 6),
                     Text(download!.error!, style: TextStyle(color: scheme.error, fontSize: 12)),
+                  ],
+                  if (spec != null && (download == null || download.isFailed)) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '下载慢或失败时可在设置中切换 hf-mirror.com 镜像或填写代理，也可以从文件导入。',
+                      style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+                    ),
                   ],
                 ],
               ),

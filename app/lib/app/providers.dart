@@ -108,7 +108,9 @@ final recognitionServiceProvider = ChangeNotifierProvider<RecognitionService>((r
   final service = RecognitionService(
     logs: logs,
     store: ref.read(transcriptStoreProvider),
-    modelStore: WhisperModelStore.platformDefault(),
+    modelStore: WhisperModelStore.platformDefault(
+      downloadSettings: () => ref.read(appSettingsProvider).modelDownload,
+    ),
     resolver: RecognitionMediaResolver(
       broker: ref.read(sharedNetworkMediaBrokerProvider),
       logs: logs,

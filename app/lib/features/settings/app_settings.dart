@@ -25,6 +25,7 @@ const defaultGenericModel = 'gpt-4.1-mini';
 class AppSettings {
   const AppSettings({
     required this.recognition,
+    required this.modelDownload,
     required this.translationMode,
     required this.localTranslationModel,
     required this.deeplApiKey,
@@ -43,6 +44,7 @@ class AppSettings {
   });
 
   final RecognitionSettings recognition;
+  final ModelDownloadSettings modelDownload;
   final TranslationMode translationMode;
   final LocalTranslationModel localTranslationModel;
   final String? deeplApiKey;
@@ -78,6 +80,7 @@ class AppSettings {
 class AppSettingsController extends ChangeNotifier {
   AppSettingsController({
     RecognitionSettings recognition = const RecognitionSettings(),
+    ModelDownloadSettings modelDownload = const ModelDownloadSettings(),
     TranslationMode translationMode = TranslationMode.deepl,
     LocalTranslationModel localTranslationModel =
         LocalTranslationModel.gemma4E2BItQatMobileTransformers,
@@ -95,6 +98,7 @@ class AppSettingsController extends ChangeNotifier {
     PlaybackStartStrategy playbackStartStrategy = PlaybackStartStrategy.subtitlePriority,
     bool waitForSubtitlePreparation = true,
   })  : _recognition = recognition,
+        _modelDownload = modelDownload,
         _translationMode = translationMode,
         _localTranslationModel = localTranslationModel,
         _deeplApiKey = _clean(deeplApiKey),
@@ -131,6 +135,7 @@ class AppSettingsController extends ChangeNotifier {
   static final Uri defaultDeepLEndpoint = Uri.parse('https://api-free.deepl.com/v2/translate');
 
   RecognitionSettings _recognition;
+  ModelDownloadSettings _modelDownload;
   TranslationMode _translationMode;
   LocalTranslationModel _localTranslationModel;
   String? _deeplApiKey;
@@ -151,6 +156,7 @@ class AppSettingsController extends ChangeNotifier {
   int _saveGeneration = 0;
 
   RecognitionSettings get recognition => _recognition;
+  ModelDownloadSettings get modelDownload => _modelDownload;
   TranslationMode get translationMode => _translationMode;
   LocalTranslationModel get localTranslationModel => _localTranslationModel;
   String? get deeplApiKey => _deeplApiKey;
@@ -169,6 +175,7 @@ class AppSettingsController extends ChangeNotifier {
 
   AppSettings get snapshot => AppSettings(
         recognition: _recognition,
+        modelDownload: _modelDownload,
         translationMode: _translationMode,
         localTranslationModel: _localTranslationModel,
         deeplApiKey: _deeplApiKey,
@@ -210,6 +217,20 @@ class AppSettingsController extends ChangeNotifier {
         );
         if (next != _recognition) {
           _recognition = next;
+          changed = true;
+        }
+      }
+      if (!_changedBeforeLoad.contains('modelDownload')) {
+        final base = values['modelDownloadBaseUrl'];
+        final proxy = values['modelDownloadProxy'];
+        final next = ModelDownloadSettings(
+          baseUrl: base is String && Uri.tryParse(base)?.host.isNotEmpty == true
+              ? base
+              : _modelDownload.baseUrl,
+          proxy: proxy is String ? _clean(proxy) : _modelDownload.proxy,
+        );
+        if (next != _modelDownload) {
+          _modelDownload = next;
           changed = true;
         }
       }
@@ -386,6 +407,20 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setModelDownload({required String baseUrl, required String proxy}) {
+    final parsedBase = Uri.tryParse(baseUrl.trim());
+    final next = ModelDownloadSettings(
+      baseUrl: parsedBase != null && parsedBase.host.isNotEmpty
+          ? baseUrl.trim()
+          : ModelDownloadSettings.officialBaseUrl,
+      proxy: _clean(proxy),
+    );
+    if (next == _modelDownload) return;
+    _modelDownload = next;
+    _markChanged('modelDownload');
+    notifyListeners();
+  }
+
   void setTranslationMode(TranslationMode value) {
     if (_translationMode == value) return;
     _translationMode = value;
@@ -544,6 +579,8 @@ class AppSettingsStore {
       'recognitionLanguage': settings.recognition.language,
       'whisperModelId': settings.recognition.modelId,
       'vadEnabled': settings.recognition.vadEnabled,
+      'modelDownloadBaseUrl': settings.modelDownload.baseUrl,
+      'modelDownloadProxy': settings.modelDownload.proxy,
       'translationMode': settings.translationMode.name,
       'localTranslationModel': settings.localTranslationModel.name,
       'deeplApiKey': settings.deeplApiKey,

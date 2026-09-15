@@ -109,6 +109,17 @@ class RecognitionService extends ChangeNotifier {
 
   Future<WhisperModelStore> get modelStore => _modelStoreFuture;
 
+  /// Installs a model file obtained outside the app after verifying it.
+  Future<void> importModel(WhisperModelSpec spec, String path) async {
+    final modelStore = await _modelStoreFuture;
+    await modelStore.importFile(spec, path);
+    logs.info('识别', '模型已从文件导入', {'模型': spec.fileName});
+    _setStatus(const RecognitionStatus(availability: RecognitionAvailability.checking));
+    await _ensureRuntime();
+    final media = _media;
+    if (media != null && _session == null) await open(media, start: _playbackPosition);
+  }
+
   Future<void> installModel(WhisperModelSpec spec) async {
     final modelStore = await _modelStoreFuture;
     await for (final progress in modelStore.download(spec)) {

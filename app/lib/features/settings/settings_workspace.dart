@@ -8,6 +8,7 @@ import '../../app/providers.dart';
 import '../../core/app_build_info.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../../domain/translation/translation_service.dart';
+import '../recognition/model_import.dart';
 import '../recognition/recognition_service.dart';
 import '../recognition/recognition_settings.dart';
 import '../recognition/whisper_model_catalog.dart';
@@ -39,7 +40,11 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
   late final TextEditingController _genericEndpoint;
   late final TextEditingController _genericKey;
   late final TextEditingController _genericModel;
+  late final TextEditingController _modelBaseUrl;
+  late final TextEditingController _modelProxy;
   String? _testResult;
+  String? _modelMessage;
+  String? _modelsDirectory;
   bool _testing = false;
   bool _loadingModels = false;
   List<String> _models = const [];
@@ -59,6 +64,8 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
     _genericEndpoint = TextEditingController(text: settings.genericEndpoint?.toString() ?? '');
     _genericKey = TextEditingController(text: settings.genericApiKey ?? '');
     _genericModel = TextEditingController(text: settings.genericModel);
+    _modelBaseUrl = TextEditingController(text: settings.modelDownload.baseUrl);
+    _modelProxy = TextEditingController(text: settings.modelDownload.proxy ?? '');
     unawaited(_refreshInstalled());
   }
 
@@ -70,6 +77,8 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
     _genericEndpoint.dispose();
     _genericKey.dispose();
     _genericModel.dispose();
+    _modelBaseUrl.dispose();
+    _modelProxy.dispose();
     super.dispose();
   }
 
@@ -80,10 +89,30 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
       for (final spec in WhisperModelCatalog.all) {
         installed[spec.id] = await store.isInstalled(spec);
       }
-      if (mounted) setState(() => _installed = installed);
+      if (mounted) {
+        setState(() {
+          _installed = installed;
+          _modelsDirectory = store.installDirectory.path;
+        });
+      }
     } on Object {
       // The store may be unavailable in tests or before the platform is ready.
     }
+  }
+
+  void _applyModelDownload() {
+    ref.read(appSettingsProvider).setModelDownload(
+          baseUrl: _modelBaseUrl.text,
+          proxy: _modelProxy.text,
+        );
+    setState(() => _modelMessage = '下载设置已应用，重试时生效。');
+  }
+
+  Future<void> _importModel() async {
+    final message = await pickAndImportModel(ref.read(recognitionServiceProvider));
+    if (!mounted || message == null) return;
+    setState(() => _modelMessage = message);
+    await _refreshInstalled();
   }
 
   void _onSettingsChanged() {
@@ -94,6 +123,8 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
     _replaceText(_genericEndpoint, settings.genericEndpoint?.toString() ?? '');
     _replaceText(_genericKey, settings.genericApiKey ?? '');
     _replaceText(_genericModel, settings.genericModel);
+    _replaceText(_modelBaseUrl, settings.modelDownload.baseUrl);
+    _replaceText(_modelProxy, settings.modelDownload.proxy ?? '');
     setState(() {});
   }
 
@@ -306,6 +337,75 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
                 },
               ),
           ],
+        ),
+        const SizedBox(height: 12),
+        Text('模型下载', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: [
+            ChoiceChip(
+              label: const Text('Hugging Face 官方'),
+              selected: _modelBaseUrl.text.trim() == ModelDownloadSettings.officialBaseUrl,
+              onSelected: (_) {
+                _modelBaseUrl.text = ModelDownloadSettings.officialBaseUrl;
+                _applyModelDownload();
+              },
+            ),
+            ChoiceChip(
+              label: const Text('hf-mirror.com 镜像'),
+              selected: _modelBaseUrl.text.trim() == ModelDownloadSettings.mirrorBaseUrl,
+              onSelected: (_) {
+                _modelBaseUrl.text = ModelDownloadSettings.mirrorBaseUrl;
+                _applyModelDownload();
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _modelBaseUrl,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: '下载源（Hugging Face 兼容地址）',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _applyModelDownload(),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _modelProxy,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: '下载代理（可选，如 http://127.0.0.1:10808）',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _applyModelDownload(),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _applyModelDownload,
+              icon: const Icon(Icons.check_outlined),
+              label: const Text('应用下载设置'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _importModel,
+              icon: const Icon(Icons.file_open_outlined),
+              label: const Text('从文件导入模型…'),
+            ),
+            if (_modelMessage != null) Text(_modelMessage!, style: TextStyle(color: hint)),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '下载失败会自动断点续传并在官方与镜像间交替重试。也可以用浏览器或下载工具取得 .bin 文件后导入，'
+          '或直接放入模型目录：${_modelsDirectory ?? '（启动后显示）'}',
+          style: TextStyle(color: hint),
         ),
         const SizedBox(height: 8),
         SwitchListTile.adaptive(
@@ -669,7 +769,8 @@ class _ModelChip extends StatelessWidget {
       ),
       label: Text(
         downloading
-            ? '${spec.fileName} ${(progress!.fraction * 100).toStringAsFixed(0)}%'
+            ? '${spec.fileName} ${(progress!.fraction * 100).toStringAsFixed(0)}% '
+                '${progress!.speedLabel}${progress!.attempt > 1 ? ' · 第 ${progress!.attempt} 次' : ''}'
             : '${spec.fileName} · ${spec.sizeLabel}',
       ),
       onPressed: installed || downloading ? null : onInstall,
