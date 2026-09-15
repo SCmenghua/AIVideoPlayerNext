@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'contracts.dart';
 import 'native_bindings.dart';
 import 'pcm.dart';
 
@@ -12,7 +13,7 @@ import 'pcm.dart';
 /// Call [reset] after a seek or whenever the source restarts; a discontinuity
 /// in [RawPcmChunk.mediaStart] larger than [discontinuityTolerance] resets
 /// automatically.
-class PcmNormalizer {
+class PcmNormalizer implements PcmConverter {
   PcmNormalizer(
     this._bindings, {
     this.discontinuityTolerance = const Duration(milliseconds: 60),
@@ -31,6 +32,7 @@ class PcmNormalizer {
 
   Duration get producedThrough => _outputTime(_producedSamples);
 
+  @override
   void reset() {
     _destroyResampler();
     _producedSamples = 0;
@@ -40,6 +42,7 @@ class PcmNormalizer {
 
   /// Returns the normalised chunk, or `null` when the filter is still holding
   /// every sample back. A chunk flagged [RawPcmChunk.isLast] flushes.
+  @override
   PcmChunk? process(RawPcmChunk raw) {
     if (_disposed) throw StateError('normalizer disposed');
     final formatChanged = raw.sampleRate != _rate || raw.channels != _channels;
@@ -92,6 +95,7 @@ class PcmNormalizer {
     }
   }
 
+  @override
   void dispose() {
     if (_disposed) return;
     _disposed = true;

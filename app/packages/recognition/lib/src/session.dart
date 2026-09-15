@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'assembler.dart';
 import 'config.dart';
+import 'contracts.dart';
 import 'diagnostics.dart';
 import 'engine.dart';
 import 'gate.dart';
@@ -15,33 +16,6 @@ import 'segmenter.dart';
 import 'text.dart';
 import 'transcript.dart';
 import 'vad.dart';
-
-/// Recognition engine contract, so tests can substitute a fake for
-/// [WhisperEngine].
-abstract interface class RecognitionEngine {
-  EngineState get state;
-  EngineBackendInfo? get backendInfo;
-  Future<void> load();
-  Future<EngineResult> recognize(EngineRequest request);
-  void cancel();
-  Future<void> dispose();
-}
-
-/// Speech probability contract; [VadDetector] is the production
-/// implementation and [EnergyVad] the model-free fallback.
-abstract interface class SpeechProbabilityProvider {
-  int get frameSamples;
-  Future<void> load();
-  Future<Float32List> probabilities(Float32List samples);
-  Future<void> dispose();
-}
-
-/// PCM conversion contract; [PcmNormalizer] is the production implementation.
-abstract interface class PcmConverter {
-  PcmChunk? process(RawPcmChunk raw);
-  void reset();
-  void dispose();
-}
 
 /// RMS-threshold fallback used when no VAD model is installed.
 class EnergyVad implements SpeechProbabilityProvider {

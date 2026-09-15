@@ -48,7 +48,7 @@ class PcmChunk {
   Duration get mediaEnd => mediaStart + duration;
 }
 
-enum PcmSourceState { idle, opening, running, paused, ended, stopped, error }
+enum PcmSourceState { idle, opening, ready, running, paused, ended, stopped, error }
 
 class PcmSourceStatus {
   const PcmSourceStatus({

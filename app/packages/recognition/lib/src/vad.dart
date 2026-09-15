@@ -5,12 +5,13 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'contracts.dart';
 import 'native_bindings.dart';
 
 typedef VadProbabilityFunction = Future<Float32List> Function(Float32List samples);
 
 /// Silero VAD in a worker isolate, one speech probability per frame.
-class VadDetector {
+class VadDetector implements SpeechProbabilityProvider {
   VadDetector({
     required this.libraryPath,
     required this.modelPath,
@@ -30,9 +31,11 @@ class VadDetector {
   final Map<int, Completer<Float32List>> _pending = {};
   bool _disposed = false;
 
+  @override
   int get frameSamples => _frameSamples;
   bool get isLoaded => _commandPort != null;
 
+  @override
   Future<void> load() async {
     if (_disposed) throw StateError('vad disposed');
     if (isLoaded) return;
@@ -91,6 +94,7 @@ class VadDetector {
     _frameSamples = first['frameSamples'] as int;
   }
 
+  @override
   Future<Float32List> probabilities(Float32List samples) {
     final port = _commandPort;
     if (port == null) return Future.error(StateError('vad not loaded'));
@@ -105,6 +109,7 @@ class VadDetector {
     return completer.future;
   }
 
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

@@ -6,6 +6,7 @@ library;
 
 export 'src/assembler.dart';
 export 'src/config.dart';
+export 'src/contracts.dart';
 export 'src/diagnostics.dart';
 export 'src/engine.dart';
 export 'src/gate.dart';

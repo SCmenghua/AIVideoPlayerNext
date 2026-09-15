@@ -79,11 +79,18 @@ jobs:
       - name: Build speech_core (Vulkan, for the package)
         shell: pwsh
         run: |
-          cmake -S native/speech_core -B native/speech_core/build-whisper-vulkan -A x64 `
-            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON `
+          # The Vulkan shader generator nests an ExternalProject; under the
+          # source tree its .tlog paths exceed MAX_PATH, so build in a short
+          # temp directory and copy the DLL to where app/windows expects it.
+          $build = Join-Path $env:RUNNER_TEMP 'vk'
+          cmake -S native/speech_core -B $build -A x64 `
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON -DSPEECH_CORE_BUILD_TOOLS=OFF `
             -DWHISPER_CPP_SOURCE_DIR="$env:WHISPER_CPP_SOURCE_DIR"
-          cmake --build native/speech_core/build-whisper-vulkan --config Release --target speech_core
-          if (-not (Test-Path native/speech_core/build-whisper-vulkan/Release/speech_core.dll)) { throw 'speech_core.dll (vulkan) was not produced' }
+          cmake --build $build --config Release --target speech_core
+          $dll = Join-Path $build 'Release/speech_core.dll'
+          if (-not (Test-Path $dll)) { throw 'speech_core.dll (vulkan) was not produced' }
+          New-Item -ItemType Directory -Force -Path native/speech_core/build-whisper-vulkan/Release | Out-Null
+          Copy-Item $dll native/speech_core/build-whisper-vulkan/Release/
 
       - name: Cache models
         uses: actions/cache@v4

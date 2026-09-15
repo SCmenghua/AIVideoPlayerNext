@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'config.dart';
+import 'contracts.dart';
 import 'native_bindings.dart';
 
 enum EngineState { unloaded, loading, ready, busy, error, disposed }
@@ -131,7 +132,7 @@ class EngineResult {
 
 /// A resident whisper.cpp model in a worker isolate. Requests run one at a
 /// time; [cancel] aborts the in-flight native call from the owner isolate.
-class WhisperEngine {
+class WhisperEngine implements RecognitionEngine {
   WhisperEngine({
     required this.libraryPath,
     required this.modelPath,
@@ -157,12 +158,15 @@ class WhisperEngine {
   int _nextId = 0;
   final StreamController<EngineState> _states = StreamController<EngineState>.broadcast();
 
+  @override
   EngineState get state => _state;
   String? get error => _error;
+  @override
   EngineBackendInfo? get backendInfo => _backend;
   Stream<EngineState> get states => _states.stream;
   bool get isReady => _state == EngineState.ready || _state == EngineState.busy;
 
+  @override
   Future<void> load() {
     final pending = _loading;
     if (pending != null) return pending.future;
@@ -219,6 +223,7 @@ class WhisperEngine {
     _backend = EngineBackendInfo.fromMap(first['backend'] as Map<Object?, Object?>);
   }
 
+  @override
   Future<EngineResult> recognize(EngineRequest request) {
     if (_state == EngineState.disposed) {
       return Future.error(StateError('engine disposed'));
@@ -239,6 +244,7 @@ class WhisperEngine {
 
   /// Aborts the in-flight recognition and drops queued requests. Their
   /// futures complete with a cancelled [SpeechCoreException].
+  @override
   void cancel() {
     for (final queued in _queue) {
       queued.completer.completeError(
@@ -252,6 +258,7 @@ class WhisperEngine {
     }
   }
 
+  @override
   Future<void> dispose() async {
     if (_state == EngineState.disposed) return;
     cancel();

@@ -70,10 +70,15 @@ jobs:
         run: |
           cmake -S native/audio_decoder -B native/audio_decoder/build-vs -A x64
           cmake --build native/audio_decoder/build-vs --config Release
-          cmake -S native/speech_core -B native/speech_core/build-whisper-vulkan -A x64 `
-            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON `
+          # Short build path: the Vulkan shader generator's nested project
+          # exceeds MAX_PATH under the source tree.
+          $build = Join-Path $env:RUNNER_TEMP 'vk'
+          cmake -S native/speech_core -B $build -A x64 `
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON -DSPEECH_CORE_BUILD_TOOLS=OFF `
             -DWHISPER_CPP_SOURCE_DIR="$env:WHISPER_CPP_SOURCE_DIR"
-          cmake --build native/speech_core/build-whisper-vulkan --config Release --target speech_core
+          cmake --build $build --config Release --target speech_core
+          New-Item -ItemType Directory -Force -Path native/speech_core/build-whisper-vulkan/Release | Out-Null
+          Copy-Item (Join-Path $build 'Release/speech_core.dll') native/speech_core/build-whisper-vulkan/Release/
           foreach ($file in @('native/audio_decoder/build-vs/Release/ai_audio_decoder.dll', 'native/speech_core/build-whisper-vulkan/Release/speech_core.dll')) {
             if (-not (Test-Path $file)) { throw "$file was not produced" }
           }
