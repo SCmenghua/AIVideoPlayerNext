@@ -75,7 +75,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
   @override
   void didUpdateWidget(covariant PlayerOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.snapshot.status != widget.snapshot.status && !_playing) _reveal();
+    if (oldWidget.snapshot.status != widget.snapshot.status) _reveal();
   }
 
   @override
@@ -89,8 +89,11 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
     _scheduleHide();
   }
 
+  // Controls only auto-hide during playback; a paused player keeps them.
   void _scheduleHide() {
     _hideTimer?.cancel();
+    _hideTimer = null;
+    if (!_playing) return;
     _hideTimer = Timer(_hideAfter, () {
       if (!mounted || !_playing || _scrubFraction != null) return;
       setState(() => _visible = false);
@@ -154,7 +157,6 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
     final recognition = ref.watch(recognitionServiceProvider);
     final scheme = Theme.of(context).colorScheme;
     final compact = MediaQuery.sizeOf(context).width < 640;
-    final controlsHeight = compact ? 96.0 : 104.0;
 
     return CallbackShortcuts(
       bindings: {
@@ -210,7 +212,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
                 targetLanguage: settings.translationTargetLanguage,
                 displayMode: settings.subtitleDisplayMode,
                 fontScale: settings.subtitleFontScale,
-                bottomPadding: _visible ? controlsHeight + 8 : 28,
+                bottomPadding: _visible ? 132 : 28,
               ),
               if (widget.waitingReason != null && !_playing)
                 Center(
@@ -226,7 +228,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
                     children: [
                       _topBar(context, scheme, compact),
                       const Spacer(),
-                      _bottomBar(context, scheme, compact, controlsHeight),
+                      _bottomBar(context, scheme, compact),
                     ],
                   ),
                 ),
@@ -287,7 +289,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
         ),
       );
 
-  Widget _bottomBar(BuildContext context, ColorScheme scheme, bool compact, double height) {
+  Widget _bottomBar(BuildContext context, ColorScheme scheme, bool compact) {
     final durationMs = _duration.inMilliseconds;
     final fraction = durationMs == 0
         ? 0.0
@@ -296,8 +298,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
         ? 0.0
         : (_snapshot.bufferedDuration.inMilliseconds / durationMs).clamp(0.0, 1.0).toDouble();
     return Container(
-      height: height + MediaQuery.paddingOf(context).bottom,
-      padding: EdgeInsets.fromLTRB(12, 8, 12, MediaQuery.paddingOf(context).bottom + 6),
+      padding: EdgeInsets.fromLTRB(12, 24, 12, MediaQuery.paddingOf(context).bottom + 6),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.bottomCenter,
@@ -306,7 +307,7 @@ class _PlayerOverlayState extends ConsumerState<PlayerOverlay> {
         ),
       ),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             children: [

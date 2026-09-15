@@ -37,6 +37,8 @@ class _PlayerShellState extends ConsumerState<PlayerShell> {
   final GlobalKey<VideoState> _videoKey = GlobalKey<VideoState>();
   late final TranscriptTranslationQueue _translationQueue;
   late final AppSettingsController _settings;
+  late final TranscriptStore _store;
+  late final RecognitionService _recognition;
   late final PlaybackGate _gate;
   late AppSettings _lastSettings;
   StreamSubscription<PlaybackSnapshot>? _playbackSubscription;
@@ -53,6 +55,8 @@ class _PlayerShellState extends ConsumerState<PlayerShell> {
     final logs = ref.read(diagnosticsLogProvider);
     logs.info('播放器', '播放器已打开');
     _settings = ref.read(appSettingsProvider);
+    _store = ref.read(transcriptStoreProvider);
+    _recognition = ref.read(recognitionServiceProvider);
     _lastSettings = _settings.snapshot;
     _gate = PlaybackGate(
       now: widget.now,
@@ -60,7 +64,7 @@ class _PlayerShellState extends ConsumerState<PlayerShell> {
       waitForPreparation: _settings.waitForSubtitlePreparation,
     );
     _translationQueue = TranscriptTranslationQueue(
-      results: ref.read(transcriptStoreProvider),
+      results: _store,
       service: ref.read(translationServiceProvider),
       targetLanguage: _settings.translationTargetLanguage,
       batchSize: _settings.translationBatchSize,
@@ -72,14 +76,12 @@ class _PlayerShellState extends ConsumerState<PlayerShell> {
       if (!mounted) return;
       final positionChanged = snapshot.position != _snapshot.position;
       setState(() => _snapshot = snapshot);
-      if (positionChanged) {
-        ref.read(recognitionServiceProvider).updatePlaybackPosition(snapshot.position);
-      }
+      if (positionChanged) _recognition.updatePlaybackPosition(snapshot.position);
       _evaluateGate();
     });
     _settings.addListener(_onSettingsChanged);
-    ref.read(transcriptStoreProvider).addListener(_onTranscriptChanged);
-    ref.read(recognitionServiceProvider).addListener(_onRecognitionChanged);
+    _store.addListener(_onTranscriptChanged);
+    _recognition.addListener(_onRecognitionChanged);
     _gateTimer = Timer.periodic(const Duration(milliseconds: 500), (_) => _evaluateGate());
   }
 
@@ -88,8 +90,8 @@ class _PlayerShellState extends ConsumerState<PlayerShell> {
     _gateTimer?.cancel();
     _playbackSubscription?.cancel();
     _settings.removeListener(_onSettingsChanged);
-    ref.read(transcriptStoreProvider).removeListener(_onTranscriptChanged);
-    ref.read(recognitionServiceProvider).removeListener(_onRecognitionChanged);
+    _store.removeListener(_onTranscriptChanged);
+    _recognition.removeListener(_onRecognitionChanged);
     _translationQueue.dispose();
     super.dispose();
   }
