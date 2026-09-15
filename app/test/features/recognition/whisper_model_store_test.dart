@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -31,22 +32,35 @@ class _FlakyModelServer {
       var start = 0;
       if (range != null) {
         start = int.parse(range.substring('bytes='.length, range.length - 1));
+      }
+      final drop = requests == 1 ? dropAfterBytes : null;
+      if (drop != null) {
+        // Write the response by hand so the socket can be destroyed part way
+        // through the declared body, which is what a dropped connection is.
+        final socket = await request.response.detachSocket(writeHeaders: false);
+        final header = StringBuffer()
+          ..write(range == null ? 'HTTP/1.1 200 OK\r\n' : 'HTTP/1.1 206 Partial Content\r\n')
+          ..write('Content-Length: ${bytes.length - start}\r\n');
+        if (range != null) {
+          header.write('Content-Range: bytes $start-${bytes.length - 1}/${bytes.length}\r\n');
+        }
+        header.write('\r\n');
+        socket.add(utf8.encode(header.toString()));
+        socket.add(bytes.sublist(start, (start + drop).clamp(0, bytes.length).toInt()));
+        await socket.flush();
+        socket.destroy();
+        return;
+      }
+      if (range != null) {
         request.response.statusCode = HttpStatus.partialContent;
         request.response.headers.set(
           HttpHeaders.contentRangeHeader,
           'bytes $start-${bytes.length - 1}/${bytes.length}',
         );
       }
-      final drop = requests == 1 ? dropAfterBytes : null;
-      final end = drop == null ? bytes.length : (start + drop).clamp(0, bytes.length).toInt();
       request.response.contentLength = bytes.length - start;
-      request.response.add(bytes.sublist(start, end));
-      await request.response.flush();
-      if (drop != null) {
-        await request.response.detachSocket().then((socket) => socket.destroy());
-      } else {
-        await request.response.close();
-      }
+      request.response.add(bytes.sublist(start));
+      await request.response.close();
     });
   }
 
@@ -109,7 +123,11 @@ void main() {
 
     expect(progress.last.isDone, isTrue);
     expect(server.requests, 2);
-    expect(server.ranges.last, 'bytes=64000-');
+    expect(server.ranges.first, isNull);
+    // Exactly how many bytes reached the file before the socket died depends
+    // on the kernel; what matters is that the retry resumed instead of
+    // restarting.
+    expect(server.ranges.last, matches(r'^bytes=[1-9]\d*-$'));
     expect(progress.any((p) => !p.isFailed && p.error != null), isTrue,
         reason: 'the retry is reported with the previous error');
     final installed = await store.installedFile(spec);
