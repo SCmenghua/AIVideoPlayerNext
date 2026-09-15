@@ -19,9 +19,10 @@ void main() {
     expect(transcript.segments.map((s) => s.id), ['a', 'b']);
     expect(transcript.at(const Duration(milliseconds: 500)), isNull);
     expect(transcript.at(const Duration(milliseconds: 1500))?.id, 'a');
-    expect(transcript.at(const Duration(milliseconds: 3500))?.id, 'a');
-    expect(transcript.at(const Duration(milliseconds: 5600))?.id, 'a');
-    expect(transcript.at(const Duration(milliseconds: 5600), hold: Duration.zero), isNull);
+    expect(transcript.at(const Duration(milliseconds: 3500))?.id, 'a', reason: 'held after end');
+    expect(transcript.at(const Duration(milliseconds: 3500), hold: Duration.zero), isNull);
+    expect(transcript.at(const Duration(milliseconds: 5600))?.id, 'b',
+        reason: 'a later segment takes over immediately');
     expect(transcript.at(const Duration(milliseconds: 6000))?.id, 'b');
     expect(transcript.at(const Duration(milliseconds: 9600)), isNull);
   });
