@@ -11,6 +11,7 @@ import '../../domain/player/player_service.dart';
 import '../browser/browser_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
 import '../recognition/recognition_service.dart';
+import '../recognition/transcript_store.dart';
 import '../settings/app_settings.dart';
 import '../settings/settings_workspace.dart';
 import '../translation/transcript_translation_queue.dart';
