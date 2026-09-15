@@ -97,6 +97,13 @@ jobs:
         working-directory: app
         run: flutter pub get
 
+      # The recognition package lives under app/, so flutter analyze covers
+      # its tests too; without its own pub get their package:test import is
+      # unresolved and the analysis fails.
+      - name: Resolve recognition package
+        working-directory: app/packages/recognition
+        run: dart pub get
+
       - name: Run Dart analysis
         working-directory: app
         run: flutter analyze
