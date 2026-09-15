@@ -1,11 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:recognition/recognition.dart' as rec;
 
-import 'package:ai_video_player_next/core/diagnostics/recognition_result_store.dart';
-import 'package:ai_video_player_next/domain/speech/speech_models.dart';
 import 'package:ai_video_player_next/domain/subtitles/transcript_document.dart';
 import 'package:ai_video_player_next/domain/translation/translation_service.dart';
+import 'package:ai_video_player_next/features/recognition/transcript_store.dart';
 import 'package:ai_video_player_next/features/translation/transcript_translation_queue.dart';
 
 class _ControlledTranslationService
@@ -63,8 +63,7 @@ class _UnavailableTranslationService
   int requestCount = 0;
 
   @override
-  TranslationServiceStatus get status =>
-      const TranslationServiceStatus.unavailable(
+  TranslationServiceStatus get status => const TranslationServiceStatus.unavailable(
         provider: 'test',
         message: 'not configured',
       );
@@ -133,10 +132,7 @@ class _RetryAfterTranslationService
 }
 
 class _ControlledBatchTranslationService
-    implements
-        TranslationService,
-        BatchTranslationService,
-        TranslationServiceStatusProvider {
+    implements TranslationService, BatchTranslationService, TranslationServiceStatusProvider {
   final List<List<TranslationRequest>> requests = [];
   final List<Completer<List<TranslationResult>>> pending = [];
   int active = 0;
@@ -151,8 +147,7 @@ class _ControlledBatchTranslationService
       (await translateBatch([request])).single;
 
   @override
-  Future<List<TranslationResult>> translateBatch(
-      List<TranslationRequest> batch) {
+  Future<List<TranslationResult>> translateBatch(List<TranslationRequest> batch) {
     requests.add(batch);
     active++;
     if (active > maximumActive) maximumActive = active;
@@ -165,23 +160,36 @@ class _ControlledBatchTranslationService
   }
 }
 
-RecognitionEvent _event({
+final _segments = Expando<List<rec.TranscriptSegment>>();
+
+/// Appends a recognised line to [store], starting a new session when
+/// [sessionId] changes, the way the recognition service mirrors transcripts.
+void _addSegment(
+  TranscriptStore store, {
   required String sessionId,
   required String segmentId,
   required String text,
   String language = 'en',
   int startSeconds = 0,
-}) =>
-    RecognitionEvent(
-      sessionId: sessionId,
-      segmentId: segmentId,
-      start: Duration(seconds: startSeconds),
-      end: Duration(seconds: startSeconds + 2),
-      text: text,
-      language: language,
-      kind: RecognitionKind.finalResult,
-      source: RecognitionSource.whisperCpp,
-    );
+}) {
+  if (store.sessionId != sessionId) {
+    store.beginSession(sessionId);
+    _segments[store] = [];
+  }
+  final list = _segments[store] ??= [];
+  list.add(rec.TranscriptSegment(
+    id: segmentId,
+    startMs: startSeconds * 1000,
+    endMs: startSeconds * 1000 + 2000,
+    text: text,
+    language: language,
+    windowId: 'w',
+  ));
+  store.applyTranscript(rec.Transcript(list, revision: list.length));
+}
+
+Iterable<TranscriptTranslation> _translated(TranscriptStore store, String text) =>
+    store.translations.where((translation) => translation.text == text);
 
 Future<void> _settle() async {
   await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -190,7 +198,7 @@ Future<void> _settle() async {
 
 void main() {
   test('uses a forty-second default request timeout', () {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final queue = TranscriptTranslationQueue(
       results: store,
       service: _ControlledTranslationService(),
@@ -201,9 +209,8 @@ void main() {
     queue.dispose();
   });
 
-  test('queues stable final segments and writes translated text by ID',
-      () async {
-    final store = RecognitionResultStore();
+  test('queues stable final segments and writes translated text by ID', () async {
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -216,35 +223,29 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
 
     expect(service.requests.single.text, 'hello');
     expect(service.requests.single.sourceLanguage, 'en');
     expect(service.requests.single.targetLanguage, 'zh-CN');
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.translating);
+    expect(store.translations.single.status, TranscriptTranslationStatus.translating);
 
     service.pending.single.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: '你好',
       provider: 'test',
     ));
     await _settle();
 
-    final result = store.translationResults.single.translation;
-    expect(result.status, TranscriptTranslationStatus.translated,
-        reason: result.error);
+    final result = store.translations.single;
+    expect(result.status, TranscriptTranslationStatus.translated, reason: result.error);
     expect(result.text, '你好');
-    expect(result.segmentId, 'seg-000001');
+    expect(result.segmentId, 'seg-1');
   });
 
   test('keeps translation concurrency bounded', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -258,12 +259,11 @@ void main() {
     });
 
     for (var index = 0; index < 4; index++) {
-      store.addRecognition(_event(
-        sessionId: 'session-1',
-        segmentId: 'seg-$index',
-        text: 'line $index',
-        startSeconds: index * 2,
-      ));
+      _addSegment(store,
+          sessionId: 'session-1',
+          segmentId: 'seg-$index',
+          text: 'line $index',
+          startSeconds: index * 2);
     }
     await _settle();
 
@@ -272,9 +272,8 @@ void main() {
     expect(queue.waitingCount, 2);
   });
 
-  test('keeps non-batch providers at one request per concurrency slot',
-      () async {
-    final store = RecognitionResultStore();
+  test('keeps non-batch providers at one request per concurrency slot', () async {
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -289,12 +288,11 @@ void main() {
     });
 
     for (var index = 0; index < 4; index++) {
-      store.addRecognition(_event(
-        sessionId: 'session-single',
-        segmentId: 'single-$index',
-        text: 'line $index',
-        startSeconds: index * 2,
-      ));
+      _addSegment(store,
+          sessionId: 'session-single',
+          segmentId: 'single-$index',
+          text: 'line $index',
+          startSeconds: index * 2);
     }
     await _settle();
 
@@ -304,7 +302,7 @@ void main() {
   });
 
   test('prioritizes the current and future segments after a seek', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -323,16 +321,15 @@ void main() {
       (id: 'current', seconds: 300),
       (id: 'future', seconds: 310),
     ]) {
-      store.addRecognition(_event(
-        sessionId: 'session-1',
-        segmentId: entry.id,
-        text: entry.id,
-        startSeconds: entry.seconds,
-      ));
+      _addSegment(store,
+          sessionId: 'session-1',
+          segmentId: entry.id,
+          text: entry.id,
+          startSeconds: entry.seconds);
     }
     await _settle();
 
-    expect(service.requests.single.segmentId, 'seg-000001');
+    expect(service.requests.single.segmentId, 'old-1');
     expect(queue.waitingCount, 3);
 
     queue.prioritizeFrom(const Duration(minutes: 5));
@@ -344,7 +341,7 @@ void main() {
   });
 
   test('ignores an in-flight request from before a seek', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -357,18 +354,10 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'old',
-      text: 'old text',
-      startSeconds: 60,
-    ));
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'current',
-      text: 'current text',
-      startSeconds: 300,
-    ));
+    _addSegment(store,
+        sessionId: 'session-1', segmentId: 'old', text: 'old text', startSeconds: 60);
+    _addSegment(store,
+        sessionId: 'session-1', segmentId: 'current', text: 'current text', startSeconds: 300);
     await _settle();
 
     queue.prioritizeFrom(const Duration(minutes: 5));
@@ -377,38 +366,26 @@ void main() {
 
     final staleCompleter = service.pending.removeAt(0);
     staleCompleter.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'old',
       text: 'stale translation',
       provider: 'test',
     ));
     await _settle();
 
-    expect(
-      store.translationResults
-          .where((result) => result.translation.text == 'stale translation'),
-      isEmpty,
-    );
-    expect(
-      store.translationResults
-          .where((result) => result.translation.text == 'current text'),
-      isEmpty,
-    );
+    expect(_translated(store, 'stale translation'), isEmpty);
+    expect(_translated(store, 'current text'), isEmpty);
 
     service.pending.single.complete(const TranslationResult(
-      segmentId: 'seg-000002',
+      segmentId: 'current',
       text: 'current translation',
       provider: 'test',
     ));
     await _settle();
-    expect(
-      store.translationResults
-          .where((result) => result.translation.text == 'current translation'),
-      hasLength(1),
-    );
+    expect(_translated(store, 'current translation'), hasLength(1));
   });
 
   test('drops late results after switching sessions', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -421,23 +398,14 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'old',
-      segmentId: 'old-seg',
-      text: 'old text',
-    ));
+    _addSegment(store, sessionId: 'old', segmentId: 'old-seg', text: 'old text');
     await _settle();
     final oldRequest = service.requests.single;
 
-    store.addRecognition(_event(
-      sessionId: 'new',
-      segmentId: 'new-seg',
-      text: 'new text',
-    ));
+    _addSegment(store, sessionId: 'new', segmentId: 'new-seg', text: 'new text');
     await _settle();
     expect(store.sessionId, 'new');
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.translating);
+    expect(store.translations.single.status, TranscriptTranslationStatus.translating);
 
     service.pending.first.complete(const TranslationResult(
       segmentId: 'old-seg',
@@ -446,16 +414,12 @@ void main() {
     ));
     await _settle();
 
-    expect(oldRequest.segmentId, 'seg-000001');
-    expect(
-      store.translationResults
-          .where((result) => result.translation.text == 'stale translation'),
-      isEmpty,
-    );
+    expect(oldRequest.segmentId, 'old-seg');
+    expect(_translated(store, 'stale translation'), isEmpty);
   });
 
   test('does not call an unavailable provider', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _UnavailableTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -467,20 +431,15 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
 
     expect(service.requestCount, 0);
-    expect(store.translationResults, isEmpty);
+    expect(store.translations, isEmpty);
   });
 
-  test('switching providers drops stale work and retranslates the session',
-      () async {
-    final store = RecognitionResultStore();
+  test('switching providers drops stale work and retranslates the session', () async {
+    final store = TranscriptStore();
     final oldService = _ControlledTranslationService();
     final newService = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
@@ -494,11 +453,7 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     expect(oldService.requests, hasLength(1));
 
@@ -507,29 +462,25 @@ void main() {
     expect(newService.requests, hasLength(1));
 
     oldService.pending.single.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: 'stale',
       provider: 'old',
     ));
     await _settle();
-    expect(
-      store.translationResults
-          .where((result) => result.translation.text == 'stale'),
-      isEmpty,
-    );
+    expect(_translated(store, 'stale'), isEmpty);
 
     newService.pending.single.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: 'new translation',
       provider: 'new',
     ));
     await _settle();
-    expect(store.translationResults.single.translation.text, 'new translation');
-    expect(store.translationResults.single.translation.provider, 'new');
+    expect(store.translations.single.text, 'new translation');
+    expect(store.translations.single.provider, 'new');
   });
 
   test('retries provider failures and stops at the attempt limit', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService(fail: true);
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -543,27 +494,21 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
 
-    expect(store.recognitions.single.text, 'hello');
+    expect(store.document!.segments.single.text, 'hello');
     await _settle();
     expect(service.requests, hasLength(3));
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.failed);
+    expect(store.translations.single.status, TranscriptTranslationStatus.failed);
     expect(queue.waitingCount, 0);
     expect(queue.metrics.failedAttempts, 3);
     expect(queue.metrics.terminalFailedSegments, 1);
     expect(queue.metrics.retriedSegments, 2);
   });
 
-  test('retries a transient provider failure and writes the later result',
-      () async {
-    final store = RecognitionResultStore();
+  test('retries a transient provider failure and writes the later result', () async {
+    final store = TranscriptStore();
     final service = _ControlledTranslationService(failuresBeforeSuccess: 1);
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -577,29 +522,23 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
 
     expect(service.requests, hasLength(2));
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.translating);
+    expect(store.translations.single.status, TranscriptTranslationStatus.translating);
     service.pending.last.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: '你好',
       provider: 'test',
     ));
     await _settle();
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.translated);
-    expect(store.translationResults.single.translation.text, '你好');
+    expect(store.translations.single.status, TranscriptTranslationStatus.translated);
+    expect(store.translations.single.text, '你好');
   });
 
   test('retries empty provider results as failures', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService(empty: true);
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -613,19 +552,14 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     expect(service.requests, hasLength(2));
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.failed);
+    expect(store.translations.single.status, TranscriptTranslationStatus.failed);
   });
 
   test('attaches preceding lines as context by media time', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -638,25 +572,16 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-      startSeconds: 0,
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     expect(service.requests.single.context, isEmpty);
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-2',
-      text: 'world',
-      startSeconds: 2,
-    ));
+    _addSegment(store,
+        sessionId: 'session-1', segmentId: 'seg-2', text: 'world', startSeconds: 2);
     await _settle();
 
     service.pending.first.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: '你好',
       provider: 'test',
     ));
@@ -672,7 +597,7 @@ void main() {
   });
 
   test('omits context entirely when the setting is disabled', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -686,17 +611,9 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-2',
-      text: 'world',
-      startSeconds: 2,
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
+    _addSegment(store,
+        sessionId: 'session-1', segmentId: 'seg-2', text: 'world', startSeconds: 2);
     await _settle();
 
     service.completeNext();
@@ -711,7 +628,7 @@ void main() {
   });
 
   test('does not retry a fatal provider error', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _FatalTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -725,16 +642,12 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     await Future<void>.delayed(const Duration(milliseconds: 30));
 
     expect(service.requestCount, 1, reason: 'HTTP 401 属配置错误，不应重试。');
-    final result = store.translationResults.single.translation;
+    final result = store.translations.single;
     expect(result.status, TranscriptTranslationStatus.failed);
     expect(result.error, contains('不会自动重试'));
     expect(queue.metrics.terminalFailedSegments, 1);
@@ -742,10 +655,8 @@ void main() {
   });
 
   test('honors the provider retry-after delay before re-enqueueing', () async {
-    final store = RecognitionResultStore();
-    final service = _RetryAfterTranslationService(
-      retryAfter: const Duration(milliseconds: 40),
-    );
+    final store = TranscriptStore();
+    final service = _RetryAfterTranslationService(retryAfter: const Duration(milliseconds: 40));
     final queue = TranscriptTranslationQueue(
       results: store,
       service: service,
@@ -758,11 +669,7 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     expect(service.requestCount, 1);
 
@@ -773,12 +680,11 @@ void main() {
     expect(service.requestCount, 2);
     service.completeLast();
     await _settle();
-    expect(store.translationResults.single.translation.status,
-        TranscriptTranslationStatus.translated);
+    expect(store.translations.single.status, TranscriptTranslationStatus.translated);
   });
 
   test('cancels pending retries after seek', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledTranslationService(fail: true);
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -792,12 +698,8 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'old',
-      text: 'old text',
-      startSeconds: 60,
-    ));
+    _addSegment(store,
+        sessionId: 'session-1', segmentId: 'old', text: 'old text', startSeconds: 60);
     await _settle();
     expect(service.requests, hasLength(1));
 
@@ -806,9 +708,8 @@ void main() {
     expect(service.requests, hasLength(1));
   });
 
-  test('records API round-trip waits and resets them for a new session',
-      () async {
-    final store = RecognitionResultStore();
+  test('records API round-trip waits and resets them for a new session', () async {
+    final store = TranscriptStore();
     final service = _ControlledTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -821,15 +722,11 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'session-1',
-      segmentId: 'seg-1',
-      text: 'hello',
-    ));
+    _addSegment(store, sessionId: 'session-1', segmentId: 'seg-1', text: 'hello');
     await _settle();
     await Future<void>.delayed(const Duration(milliseconds: 2));
     service.pending.single.complete(const TranslationResult(
-      segmentId: 'seg-000001',
+      segmentId: 'seg-1',
       text: '你好',
       provider: 'test',
     ));
@@ -837,14 +734,9 @@ void main() {
 
     expect(queue.metrics.completedApiRequests, 1);
     expect(queue.metrics.averageApiWait, isNotNull);
-    expect(queue.metrics.averageApiWait,
-        greaterThanOrEqualTo(const Duration(milliseconds: 1)));
+    expect(queue.metrics.averageApiWait, greaterThanOrEqualTo(const Duration(milliseconds: 1)));
 
-    store.addRecognition(_event(
-      sessionId: 'session-2',
-      segmentId: 'seg-2',
-      text: 'new text',
-    ));
+    _addSegment(store, sessionId: 'session-2', segmentId: 'seg-2', text: 'new text');
     await _settle();
 
     expect(queue.metrics.completedApiRequests, 0);
@@ -852,7 +744,7 @@ void main() {
   });
 
   test('uses configured batch size and request concurrency', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledBatchTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -868,12 +760,11 @@ void main() {
     });
 
     for (var index = 0; index < 6; index++) {
-      store.addRecognition(_event(
-        sessionId: 'session-batch',
-        segmentId: 'batch-$index',
-        text: 'line $index',
-        startSeconds: index * 2,
-      ));
+      _addSegment(store,
+          sessionId: 'session-batch',
+          segmentId: 'batch-$index',
+          text: 'line $index',
+          startSeconds: index * 2);
     }
     await _settle();
 
@@ -890,7 +781,7 @@ void main() {
   });
 
   test('retries a failed batch as individual requests', () async {
-    final store = RecognitionResultStore();
+    final store = TranscriptStore();
     final service = _ControlledBatchTranslationService();
     final queue = TranscriptTranslationQueue(
       results: store,
@@ -906,23 +797,14 @@ void main() {
       store.dispose();
     });
 
-    store.addRecognition(_event(
-      sessionId: 'batch-fallback',
-      segmentId: 'first',
-      text: 'first',
-    ));
-    store.addRecognition(_event(
-      sessionId: 'batch-fallback',
-      segmentId: 'second',
-      text: 'second',
-      startSeconds: 2,
-    ));
+    _addSegment(store, sessionId: 'batch-fallback', segmentId: 'first', text: 'first');
+    _addSegment(store,
+        sessionId: 'batch-fallback', segmentId: 'second', text: 'second', startSeconds: 2);
     await _settle();
     expect(service.requests, hasLength(1));
     expect(service.requests.single, hasLength(2));
 
-    service.pending.single
-        .completeError(const FormatException('batch response'));
+    service.pending.single.completeError(const FormatException('batch response'));
     await _settle();
     expect(service.requests, hasLength(2));
     expect(service.requests[1], hasLength(1));
@@ -947,11 +829,9 @@ void main() {
     ]);
     await _settle();
     expect(
-      store.translationResults
-          .where((result) =>
-              result.translation.status ==
-              TranscriptTranslationStatus.translated)
-          .map((result) => result.translation.text),
+      store.translations
+          .where((translation) => translation.status == TranscriptTranslationStatus.translated)
+          .map((translation) => translation.text),
       containsAll(<String>['one', 'two']),
     );
   });

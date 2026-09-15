@@ -99,8 +99,9 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
-# Phase 6 keeps the Windows decoder and Whisper worker outside the Dart
-# package. Include locally built Release DLLs when they are available.
+# The Windows decoder and speech_core are built by CMake outside the Dart
+# package (see .github/workflows/windows.yml). Include the Release DLLs when
+# they are available.
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/../../native/audio_decoder/build-vs/Release/ai_audio_decoder.dll"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../native/speech_core/build-whisper-vulkan/Release/speech_core.dll"
@@ -109,12 +110,15 @@ install(FILES
   OPTIONAL
   COMPONENT Runtime)
 
-install(FILES
-  "${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-large-v3-turbo-q5_0.bin"
+# Everything staged under windows/models/ ships next to the executable. CI
+# places the small Silero VAD model there; Whisper weights are downloaded by
+# the application into its data directory.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/models/"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/models"
   CONFIGURATIONS Release
   OPTIONAL
-  COMPONENT Runtime)
+  COMPONENT Runtime
+  FILES_MATCHING PATTERN "*.bin")
 
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")

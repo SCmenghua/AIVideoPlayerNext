@@ -1,84 +1,98 @@
-import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_video_player_next/app/app.dart';
 import 'package:ai_video_player_next/app/providers.dart';
+import 'package:ai_video_player_next/core/diagnostics/diagnostic_log_service.dart';
 import 'package:ai_video_player_next/domain/player/player_service.dart';
 import 'package:ai_video_player_next/features/browser/mock_browser_service.dart';
 import 'package:ai_video_player_next/features/player/media_picker.dart';
 import 'package:ai_video_player_next/features/player/mock_services.dart';
+import 'package:ai_video_player_next/features/recognition/recognition_media_resolver.dart';
+import 'package:ai_video_player_next/features/recognition/recognition_service.dart';
+import 'package:ai_video_player_next/features/recognition/transcript_store.dart';
+import 'package:ai_video_player_next/features/recognition/whisper_model_store.dart';
+import 'package:ai_video_player_next/features/settings/app_settings.dart';
 
 class _FakeMediaPicker implements MediaPicker {
   @override
   Future<MediaSource?> pickLocalVideo() async => MediaSource.localFile(
-        path: r'C:\test\示例视频.mp4',
+        path: Platform.isWindows ? r'C:\test\示例视频.mp4' : '/test/示例视频.mp4',
         title: '示例视频.mp4',
       );
 }
 
+RecognitionService _testRecognition(TranscriptStore store) => RecognitionService(
+      logs: DiagnosticLogService(),
+      store: store,
+      modelStore: Future.value(
+        WhisperModelStore(installDirectory: Directory.systemTemp.createTempSync('models')),
+      ),
+      resolver: RecognitionMediaResolver(),
+      sourceFactory: () => UnavailablePcmSource(message: 'test'),
+      libraryPath: null,
+    );
+
+Widget _app({
+  required MockPlayerService player,
+  required MockBrowserService browser,
+  AppSettingsController? settings,
+}) {
+  final store = TranscriptStore();
+  return ProviderScope(
+    overrides: [
+      playerServiceProvider.overrideWithValue(player),
+      mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
+      browserServiceProvider.overrideWithValue(browser),
+      transcriptStoreProvider.overrideWith((ref) => store),
+      recognitionServiceProvider.overrideWith((ref) => _testRecognition(store)),
+      if (settings != null) appSettingsProvider.overrideWith((ref) => settings),
+    ],
+    child: const AIVideoPlayerApp(),
+  );
+}
+
 void main() {
-  testWidgets('workbench opens local media through injected services',
-      (tester) async {
+  testWidgets('empty state opens local media and shows the player overlay', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final player = MockPlayerService();
     final browser = MockBrowserService();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playerServiceProvider.overrideWithValue(player),
-          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
-          browserServiceProvider.overrideWithValue(browser),
-        ],
-        child: const AIVideoPlayerApp(),
-      ),
-    );
+    await tester.pumpWidget(_app(
+      player: player,
+      browser: browser,
+      settings: AppSettingsController(waitForSubtitlePreparation: false),
+    ));
     await tester.pump();
 
-    expect(find.text('尚未选择媒体'), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byType(AppBar),
-        matching: find.byTooltip('打开本地视频'),
-      ),
-      findsNothing,
-    );
-    expect(
-      find.descendant(
-        of: find.byType(AppBar),
-        matching: find.byTooltip('打开内置浏览器'),
-      ),
-      findsNothing,
-    );
-    await tester.tap(find.text('打开本地视频').first);
+    expect(find.text('打开本地视频'), findsOneWidget);
+    await tester.tap(find.text('打开本地视频'));
     await tester.pump();
     await tester.pump();
 
     expect(find.text('示例视频.mp4'), findsOneWidget);
+    expect(find.byTooltip('播放速度'), findsOneWidget);
+    expect(find.byTooltip('全屏 (F)'), findsOneWidget);
     await player.dispose();
   });
 
-  testWidgets(
-      'browser media handoff returns to the persistent player workspace',
+  testWidgets('browser handoff returns to the player and keeps the browser alive',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final player = MockPlayerService();
     final browser = MockBrowserService();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playerServiceProvider.overrideWithValue(player),
-          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
-          browserServiceProvider.overrideWithValue(browser),
-        ],
-        child: const AIVideoPlayerApp(),
-      ),
-    );
+    await tester.pumpWidget(_app(
+      player: player,
+      browser: browser,
+      settings: AppSettingsController(waitForSubtitlePreparation: false),
+    ));
     await tester.pump();
 
-    await tester.tap(find.text('内置浏览器').first);
+    await tester.tap(find.text('从内置浏览器打开'));
     await tester.pump();
     expect(find.text('输入网址'), findsOneWidget);
 
@@ -94,7 +108,7 @@ void main() {
     expect(find.text('浏览器视频'), findsOneWidget);
     expect(find.byTooltip('播放速度'), findsOneWidget);
 
-    await tester.tap(find.text('内置浏览器').first);
+    await tester.tap(find.byTooltip('内置浏览器'));
     await tester.pump();
     expect(find.text('输入网址'), findsOneWidget);
     expect(browser.isDisposed, isFalse);
@@ -102,82 +116,53 @@ void main() {
     await browser.dispose();
   });
 
-  testWidgets('settings workspace exposes recognition and translation modes',
+  testWidgets('settings page exposes recognition, translation and playback options',
       (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final player = MockPlayerService();
     final browser = MockBrowserService();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playerServiceProvider.overrideWithValue(player),
-          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
-          browserServiceProvider.overrideWithValue(browser),
-        ],
-        child: const AIVideoPlayerApp(),
-      ),
-    );
+    await tester.pumpWidget(_app(player: player, browser: browser));
     await tester.pump();
 
-    await tester.tap(find.text('设置').first);
-    await tester.pump();
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
 
-    expect(find.text('完整预识别'), findsOneWidget);
-    expect(find.text('按需预取'), findsOneWidget);
+    expect(find.text('识别原语言'), findsOneWidget);
+    expect(find.text('Whisper 模型'), findsOneWidget);
     expect(find.text('DeepL'), findsOneWidget);
     expect(find.text('通用 API'), findsOneWidget);
     expect(find.text('系统翻译'), findsOneWidget);
     expect(find.text('本地模型'), findsOneWidget);
-    expect(find.text('字幕显示'), findsOneWidget);
+    expect(find.text('翻译目标语言'), findsOneWidget);
     expect(find.text('双语'), findsOneWidget);
     expect(find.text('原文'), findsOneWidget);
-    expect(find.text('翻译'), findsOneWidget);
-    expect(find.text('播放启动策略'), findsOneWidget);
+    expect(find.text('译文'), findsOneWidget);
     expect(find.text('字幕优先'), findsOneWidget);
     expect(find.text('翻译优先'), findsOneWidget);
     expect(find.text('播放优先'), findsOneWidget);
-    expect(find.text('等待前两条翻译或跳过四个窗口'), findsOneWidget);
     expect(find.textContaining('构建时间'), findsOneWidget);
-
-    await tester.tap(find.text('按需预取'));
-    await tester.pump();
-    expect(find.text('识别保持约 20 至 45 秒的前瞻缓冲。'), findsOneWidget);
 
     final playbackPriority = find.text('播放优先');
     await tester.ensureVisible(playbackPriority);
     await tester.tap(playbackPriority);
     await tester.pump();
-    final gateSwitch = tester.widget<SwitchListTile>(
-      find.byType(SwitchListTile).first,
-    );
-    expect(gateSwitch.onChanged, isNotNull);
-    expect(gateSwitch.value, isTrue);
+    expect(find.text('不等待字幕，播放永不因识别暂停。'), findsOneWidget);
 
     await player.dispose();
     await browser.dispose();
   });
 
-  testWidgets('system translation mode hides batching and answers the test',
-      (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1200, 800));
+  testWidgets('system translation mode hides batching and answers the test', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final player = MockPlayerService();
     final browser = MockBrowserService();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          playerServiceProvider.overrideWithValue(player),
-          mediaPickerProvider.overrideWithValue(_FakeMediaPicker()),
-          browserServiceProvider.overrideWithValue(browser),
-        ],
-        child: const AIVideoPlayerApp(),
-      ),
-    );
+    await tester.pumpWidget(_app(player: player, browser: browser));
     await tester.pump();
 
-    await tester.tap(find.text('设置').first);
-    await tester.pump();
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
 
     final systemMode = find.text('系统翻译');
     await tester.ensureVisible(systemMode);

@@ -2,7 +2,7 @@ name: iOS smoke
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor]
   pull_request:
 
 jobs:
@@ -28,6 +28,20 @@ jobs:
           git -C "$whisper_dir" submodule update --init --recursive --depth 1
           echo "AI_VIDEO_WHISPER_CPP_SOURCE_DIR=$whisper_dir" >> "$GITHUB_ENV"
           echo "Using whisper.cpp commit: $(git -C "$whisper_dir" rev-parse HEAD)"
+      - name: Native tests (CPU speech_core)
+        working-directory: native/speech_core
+        run: |
+          cmake -S . -B build-cpu -DCMAKE_BUILD_TYPE=Release \
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_METAL=OFF \
+            -DWHISPER_CPP_SOURCE_DIR="$AI_VIDEO_WHISPER_CPP_SOURCE_DIR"
+          cmake --build build-cpu --config Release
+          ctest --test-dir build-cpu -C Release --output-on-failure
+      - name: Recognition package tests
+        working-directory: app/packages/recognition
+        run: |
+          dart pub get
+          dart analyze
+          dart test
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test

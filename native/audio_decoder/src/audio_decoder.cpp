@@ -56,8 +56,28 @@ std::wstring utf8_to_wide(const char* value) {
   return result;
 }
 
+// Asks the source reader for 16 kHz mono float first so Media Foundation's
+// resampler DSP performs the anti-aliased conversion; falls back to float at
+// the native rate and channel count, which speech_core then resamples.
 bool set_float_output(IMFSourceReader* reader) {
   if (reader == nullptr) return false;
+  {
+    ComPtr<IMFMediaType> speech_type;
+    if (SUCCEEDED(MFCreateMediaType(&speech_type)) &&
+        SUCCEEDED(speech_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio)) &&
+        SUCCEEDED(speech_type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 16000)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 64000)) &&
+        SUCCEEDED(speech_type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE)) &&
+        SUCCEEDED(reader->SetCurrentMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr,
+            speech_type.Get()))) {
+      return true;
+    }
+  }
   ComPtr<IMFMediaType> type;
   if (FAILED(MFCreateMediaType(&type))) return false;
   if (FAILED(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio)) ||

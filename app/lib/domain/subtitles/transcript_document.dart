@@ -1,5 +1,3 @@
-import '../speech/speech_models.dart';
-
 const int transcriptSchemaVersion = 1;
 
 enum TranscriptSegmentStatus { timelineFinal }
@@ -19,21 +17,6 @@ class TranscriptSegment {
     this.confidence,
   })  : assert(startMs >= 0),
         assert(endMs >= startMs);
-
-  factory TranscriptSegment.fromRecognitionEvent(RecognitionEvent event) {
-    final sourceWindowId = event.sourceWindowId ??
-        '${event.sessionId}-window-${event.start.inMilliseconds.toString().padLeft(12, '0')}';
-    return TranscriptSegment(
-      id: event.segmentId,
-      startMs: event.start.inMilliseconds,
-      endMs: event.end.inMilliseconds,
-      text: event.text,
-      language: event.language,
-      confidence: event.confidence,
-      status: TranscriptSegmentStatus.timelineFinal,
-      sourceWindows: [sourceWindowId],
-    );
-  }
 
   factory TranscriptSegment.fromJson(Map<String, Object?> json) =>
       TranscriptSegment(

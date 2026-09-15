@@ -1,0 +1,14 @@
+name: recognition
+description: VAD-driven whisper.cpp recognition pipeline (pure Dart + FFI).
+publish_to: none
+version: 0.11.0
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  ffi: ^2.1.0
+
+dev_dependencies:
+  lints: ^4.0.0
+  test: ^1.25.0

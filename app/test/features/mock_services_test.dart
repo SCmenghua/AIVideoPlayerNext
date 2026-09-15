@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_video_player_next/domain/player/player_service.dart';
-import 'package:ai_video_player_next/domain/speech/speech_models.dart';
 import 'package:ai_video_player_next/features/player/mock_services.dart';
 
 void main() {
@@ -26,20 +25,5 @@ void main() {
     expect(snapshots.last.rate, 1.5);
     await subscription.cancel();
     await player.dispose();
-  });
-
-  test('mock speech emits partial then final for the same segment', () async {
-    final speech = MockSpeechRecognitionService();
-    final events = <RecognitionEvent>[];
-    final subscription = speech.events.listen(events.add);
-
-    await speech
-        .start(const RecognitionRequest(sessionId: 's1', from: Duration.zero));
-    await Future<void>.delayed(const Duration(milliseconds: 100));
-
-    expect(events.map((event) => event.kind),
-        [RecognitionKind.partial, RecognitionKind.finalResult]);
-    expect(events[0].segmentId, events[1].segmentId);
-    await subscription.cancel();
   });
 }

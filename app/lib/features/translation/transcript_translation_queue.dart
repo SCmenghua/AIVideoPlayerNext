@@ -3,15 +3,15 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../core/diagnostics/diagnostic_log_service.dart';
-import '../../core/diagnostics/recognition_result_store.dart';
 import '../../domain/subtitles/transcript_document.dart';
 import '../../domain/translation/translation_service.dart';
+import '../recognition/transcript_store.dart';
 
 /// Bounded, session-aware translation scheduler. A batch is one provider call;
 /// every individual segment keeps its own stable ID and retry state.
 class TranscriptTranslationQueue extends ChangeNotifier {
   TranscriptTranslationQueue({
-    required RecognitionResultStore results,
+    required TranscriptStore results,
     required TranslationService service,
     required String targetLanguage,
     this.maxConcurrent = 2,
@@ -32,7 +32,7 @@ class TranscriptTranslationQueue extends ChangeNotifier {
     sync();
   }
 
-  final RecognitionResultStore _results;
+  final TranscriptStore _results;
   TranslationService _service;
   final DiagnosticLogService? _logs;
   String _targetLanguage;

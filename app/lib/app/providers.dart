@@ -3,74 +3,48 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:recognition/recognition.dart';
 
 import '../core/diagnostics/diagnostic_log_service.dart';
 import '../domain/browser/browser_service.dart';
 import '../domain/player/player_service.dart';
-import '../domain/audio/audio_models.dart';
-import '../domain/speech/speech_models.dart';
-import '../domain/speech/speech_core_status.dart';
 import '../domain/translation/translation_service.dart';
 import '../features/browser/mobile_browser_service.dart';
 import '../features/browser/windows_browser_service.dart';
 import '../features/player/media_kit_player_service.dart';
 import '../features/player/media_picker.dart';
-import '../features/player/mock_services.dart';
 import '../features/player/shared_network_media_broker.dart';
+import '../features/recognition/ios_pcm_source.dart';
+import '../features/recognition/recognition_media_resolver.dart';
+import '../features/recognition/recognition_service.dart';
+import '../features/recognition/transcript_store.dart';
+import '../features/recognition/whisper_model_store.dart';
+import '../features/recognition/windows_pcm_source.dart';
 import '../features/settings/app_settings.dart';
 import '../features/translation/deepl_translation_service.dart';
 import '../features/translation/local_model_translation_service.dart';
-import '../features/translation/system_translation_service.dart';
 import '../features/translation/openai_compatible_translation_service.dart';
-import '../features/audio/audio_recognition_adapters.dart';
-import '../features/audio/ios_audio_decoder.dart';
-import '../features/audio/recognition_controller.dart';
-import '../features/audio/windows_audio_decoder.dart';
+import '../features/translation/system_translation_service.dart';
 
 String? _windowsArtifact(String fileName, String environmentVariable) {
   if (!Platform.isWindows) return null;
   final configured = Platform.environment[environmentVariable];
   if (configured != null && File(configured).existsSync()) return configured;
   final executableDirectory = File(Platform.resolvedExecutable).parent.path;
-  final candidates = <String>[
+  for (final candidate in [
     '$executableDirectory\\$fileName',
     '$executableDirectory\\ai_$fileName',
     '$executableDirectory\\native\\$fileName',
     '$executableDirectory\\native\\ai_$fileName',
-  ];
-  for (final candidatePath in candidates) {
-    if (File(candidatePath).existsSync()) return candidatePath;
+  ]) {
+    if (File(candidate).existsSync()) return candidate;
   }
   return null;
 }
 
-String? _whisperModelPath() {
-  final configured = Platform.environment['AI_VIDEO_WHISPER_MODEL'];
-  if (configured != null && File(configured).existsSync()) return configured;
-  if (!Platform.isWindows) return null;
-  final executableDirectory = File(Platform.resolvedExecutable).parent.path;
-  final candidate = File(
-    '$executableDirectory\\models\\'
-    'ggml-large-v3-turbo-q5_0.bin',
-  );
-  return candidate.existsSync() ? candidate.path : null;
-}
-
-WhisperRequestedBackend _whisperRequestedBackend() {
-  final configured =
-      Platform.environment['AI_VIDEO_WHISPER_BACKEND']?.trim().toLowerCase();
-  return switch (configured) {
-    'cpu' => WhisperRequestedBackend.cpu,
-    'metal' => WhisperRequestedBackend.metal,
-    'vulkan' => WhisperRequestedBackend.vulkan,
-    'auto' => WhisperRequestedBackend.auto,
-    null => Platform.isIOS
-        ? WhisperRequestedBackend.metal
-        : WhisperRequestedBackend.vulkan,
-    _ => Platform.isIOS
-        ? WhisperRequestedBackend.metal
-        : WhisperRequestedBackend.vulkan,
-  };
+String? speechCoreLibraryPath() {
+  if (Platform.isIOS || Platform.isMacOS) return '@process';
+  return _windowsArtifact('speech_core.dll', 'AI_VIDEO_SPEECH_CORE_LIBRARY');
 }
 
 final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
@@ -83,9 +57,7 @@ final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
 });
 
 final sharedNetworkMediaBrokerProvider = Provider<SharedNetworkMediaBroker>((ref) {
-  final broker = SharedNetworkMediaBroker(
-    logs: ref.read(diagnosticsLogProvider),
-  );
+  final broker = SharedNetworkMediaBroker(logs: ref.read(diagnosticsLogProvider));
   ref.onDispose(broker.dispose);
   return broker;
 });
@@ -99,9 +71,7 @@ final playerServiceProvider = Provider<PlayerService>((ref) {
   return service;
 });
 
-final mediaPickerProvider = Provider<MediaPicker>(
-  (ref) => FileSelectorMediaPicker(),
-);
+final mediaPickerProvider = Provider<MediaPicker>((ref) => FileSelectorMediaPicker());
 
 final browserServiceProvider = AutoDisposeProvider<BrowserService>((ref) {
   final BrowserService service = defaultTargetPlatform == TargetPlatform.windows
@@ -111,101 +81,51 @@ final browserServiceProvider = AutoDisposeProvider<BrowserService>((ref) {
   return service;
 });
 
-final speechRecognitionServiceProvider =
-    Provider<SpeechRecognitionService>((ref) {
-  final service = MockSpeechRecognitionService();
-  ref.onDispose(() async {
-    await service.stop();
-  });
-  return service;
-});
+final appSettingsProvider = ChangeNotifierProvider<AppSettingsController>(
+  (ref) => AppSettingsController.fromEnvironment(),
+);
 
-final audioDecoderProvider = Provider<AudioDecoder>((ref) {
-  if (Platform.isIOS) {
-    final decoder = IosAudioDecoder();
-    ref.onDispose(decoder.dispose);
-    return decoder;
-  }
-  final library = _windowsArtifact(
-    'audio_decoder.dll',
-    'AI_VIDEO_AUDIO_DECODER_LIBRARY',
-  );
-  final decoder = library == null
-      ? UnavailableAudioDecoder(message: '未找到 Windows 音频解码 DLL。')
-      : WindowsAudioDecoder(libraryPath: library);
-  ref.onDispose(decoder.dispose);
-  return decoder;
-});
+final transcriptStoreProvider = ChangeNotifierProvider<TranscriptStore>(
+  (ref) => TranscriptStore(),
+);
 
-final windowRecognitionServiceProvider =
-    Provider<WindowRecognitionService>((ref) {
-  final requestedBackend = _whisperRequestedBackend();
-  if (Platform.isIOS) {
-    final service = IosWhisperWindowRecognitionService(
-      logs: ref.read(diagnosticsLogProvider),
-      threads: 4,
-      language: 'ja',
-      requestedBackend: requestedBackend,
-    );
-    ref.read(diagnosticsLogProvider).info('识别音频', 'iOS Whisper 模块初始化', {
-      '请求后端': requestedBackend.name,
-      '模型位置': 'Application Support/models/ggml-large-v3-turbo-q5_0.bin',
-    });
-    unawaited(service.prepare());
-    ref.onDispose(service.dispose);
-    return service;
-  }
-  final nativeLibrary = _windowsArtifact(
-    'speech_core.dll',
-    'AI_VIDEO_SPEECH_CORE_LIBRARY',
-  );
-  final model = _whisperModelPath();
+final recognitionServiceProvider = ChangeNotifierProvider<RecognitionService>((ref) {
   final logs = ref.read(diagnosticsLogProvider);
-  final WindowRecognitionService service =
-      nativeLibrary != null && model != null && File(model).existsSync()
-          ? WhisperWindowRecognitionService(
-              libraryPath: nativeLibrary,
-              modelPath: model,
-              logs: logs,
-              language: 'ja',
-              threads: 16,
-              requestedBackend: requestedBackend,
-            )
-          : _UnavailableWindowRecognitionService(
-              message: nativeLibrary == null
-                  ? '未找到 speech_core DLL。'
-                  : '未配置本地 Whisper 模型。',
-            );
-  logs.info('识别音频', 'Whisper 模块初始化', {
-    'speech_core DLL': nativeLibrary == null ? '未找到' : '已找到',
-    '模型': model == null ? '未找到' : '已找到',
-    '模型位置': model,
-    '请求后端': requestedBackend.name,
-  });
-  if (service is WhisperWindowRecognitionService) {
-    unawaited(service.prepare());
+  final library = speechCoreLibraryPath();
+  final PcmSource Function() sourceFactory;
+  if (Platform.isIOS) {
+    sourceFactory = IosPcmSource.new;
+  } else {
+    final decoder = _windowsArtifact('audio_decoder.dll', 'AI_VIDEO_AUDIO_DECODER_LIBRARY');
+    sourceFactory = decoder == null
+        ? () => UnavailablePcmSource(message: '未找到 Windows 音频解码 DLL。')
+        : () => WindowsPcmSource(libraryPath: decoder);
+    logs.info('识别', '识别运行时初始化', {
+      'speech_core DLL': library ?? '未找到',
+      '音频解码 DLL': decoder ?? '未找到',
+    });
   }
-  ref.onDispose(service.dispose);
-  return service;
-});
-
-final recognitionControllerProvider = Provider<RecognitionController>((ref) {
-  final settings = ref.read(appSettingsProvider).snapshot;
-  final controller = RecognitionController(
-    player: ref.read(playerServiceProvider),
-    decoder: ref.read(audioDecoderProvider),
-    recognizer: ref.read(windowRecognitionServiceProvider),
-    logs: ref.read(diagnosticsLogProvider),
-    prefetchMode: settings.prefetchMode,
-    sharedMediaBroker: ref.read(sharedNetworkMediaBrokerProvider),
+  final service = RecognitionService(
+    logs: logs,
+    store: ref.read(transcriptStoreProvider),
+    modelStore: WhisperModelStore.platformDefault(),
+    resolver: RecognitionMediaResolver(
+      broker: ref.read(sharedNetworkMediaBrokerProvider),
+      logs: logs,
+    ),
+    sourceFactory: sourceFactory,
+    libraryPath: library,
+    settings: ref.read(appSettingsProvider).recognition,
   );
-  ref.onDispose(controller.dispose);
-  return controller;
-});
-
-final appSettingsProvider =
-    ChangeNotifierProvider<AppSettingsController>((ref) {
-  return AppSettingsController.fromEnvironment();
+  final settings = ref.read(appSettingsProvider);
+  void onSettings() => unawaited(service.applySettings(settings.recognition));
+  settings.addListener(onSettings);
+  ref.onDispose(() {
+    settings.removeListener(onSettings);
+    unawaited(service.dispose());
+  });
+  unawaited(settings.ready.then((_) => service.warmUp()));
+  return service;
 });
 
 TranslationService createTranslationService(AppSettings settings) =>
@@ -232,27 +152,3 @@ final translationServiceProvider = Provider<TranslationService>((ref) {
 final playbackSnapshotProvider = StreamProvider<PlaybackSnapshot>((ref) {
   return ref.watch(playerServiceProvider).snapshots;
 });
-
-class _UnavailableWindowRecognitionService
-    implements WindowRecognitionService, WindowRecognitionStatusProvider {
-  const _UnavailableWindowRecognitionService({required this.message});
-
-  final String message;
-
-  @override
-  WindowRecognitionStatus get status =>
-      WindowRecognitionStatus.unavailable(message: message);
-
-  @override
-  Stream<WindowRecognitionStatus> get statuses => const Stream.empty();
-
-  @override
-  Future<WindowRecognitionResult> recognize(RecognitionWindow window) async =>
-      WindowRecognitionResult(window: window, events: const [], error: message);
-
-  @override
-  Future<void> stop() async {}
-
-  @override
-  Future<void> dispose() async {}
-}

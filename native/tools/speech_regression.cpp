@@ -1,6 +1,10 @@
+// Low-level smoke tool: decodes one WAV, runs one recognition call through the
+// C ABI and prints JSONL. The end-to-end regression (VAD segmenter, prompts,
+// CER) lives in app/packages/recognition/bin/regression.dart.
 #include "speech_core.h"
 #include "speech_core_pcm.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -12,8 +16,9 @@ namespace {
 
 void usage() {
   std::cerr << "usage: speech_regression --model PATH --audio PATH "
-               "[--backend auto|cpu|vulkan] [--language LANG] [--threads N] "
-               "[--manifest PATH] [--output PATH]\n";
+               "[--backend auto|cpu|vulkan|metal] [--language LANG] [--threads N] "
+               "[--beam N] [--prompt TEXT] [--no-token-timestamps] "
+               "[--vad-model PATH] [--output PATH]\n";
 }
 
 bool parse_backend(const std::string& value,
@@ -28,6 +33,10 @@ bool parse_backend(const std::string& value,
   }
   if (value == "vulkan") {
     *backend = SPEECH_CORE_REQUESTED_BACKEND_VULKAN;
+    return true;
+  }
+  if (value == "metal") {
+    *backend = SPEECH_CORE_REQUESTED_BACKEND_METAL;
     return true;
   }
   return false;
@@ -89,22 +98,56 @@ bool read_file(const std::string& path, std::vector<uint8_t>* data) {
 
 struct OutputContext {
   std::ostream* output;
-  const char* session_id;
   uint32_t count = 0;
 };
 
 void on_segment(const speech_core_segment* segment, void* user_data) {
   auto* context = static_cast<OutputContext*>(user_data);
-  *context->output << "{\"type\":\"segment\",\"sessionId\":\""
-                   << json_escape(context->session_id)
-                   << "\",\"segmentId\":\"segment-"
-                   << segment->segment_index << "\",\"startMs\":"
-                   << segment->start_ms << ",\"endMs\":" << segment->end_ms
+  *context->output << "{\"type\":\"segment\",\"index\":" << segment->segment_index
+                   << ",\"startMs\":" << segment->start_ms
+                   << ",\"endMs\":" << segment->end_ms
                    << ",\"text\":\"" << json_escape(segment->text)
                    << "\",\"language\":\"" << json_escape(segment->language)
-                   << "\",\"confidence\":" << segment->confidence
-                   << ",\"kind\":\"final\",\"source\":\"whisperCpp\"}\n";
+                   << "\",\"avgLogprob\":" << segment->avg_logprob
+                   << ",\"noSpeechProb\":" << segment->no_speech_prob
+                   << ",\"repetition\":" << segment->repetition
+                   << ",\"tokenCount\":" << segment->token_count << "}\n";
   ++context->count;
+}
+
+int run_vad(const std::string& vad_model, const speech_core_pcm_buffer& pcm,
+            std::ostream& output) {
+  speech_core_vad* vad = nullptr;
+  if (speech_core_vad_create(vad_model.c_str(), 2, &vad) != SPEECH_CORE_OK) {
+    std::cerr << "vad model failed to load\n";
+    return 4;
+  }
+  const uint32_t frame = speech_core_vad_frame_samples(vad);
+  const size_t chunk = static_cast<size_t>(frame) * 32 * 30;  // ~30 s
+  size_t offset = 0;
+  size_t speech_frames = 0;
+  size_t total_frames = 0;
+  std::vector<float> probabilities(chunk / frame + 1);
+  while (offset < pcm.sample_count) {
+    const size_t take = std::min(chunk, pcm.sample_count - offset);
+    size_t produced = 0;
+    if (speech_core_vad_probabilities(vad, pcm.samples + offset, take,
+                                      probabilities.data(), probabilities.size(),
+                                      &produced) != SPEECH_CORE_OK) {
+      speech_core_vad_destroy(vad);
+      return 5;
+    }
+    for (size_t i = 0; i < produced; ++i) {
+      if (probabilities[i] >= 0.5f) ++speech_frames;
+    }
+    total_frames += produced;
+    offset += take;
+  }
+  speech_core_vad_destroy(vad);
+  output << "{\"type\":\"vad\",\"frameSamples\":" << frame
+         << ",\"frames\":" << total_frames
+         << ",\"speechFrames\":" << speech_frames << "}\n";
+  return 0;
 }
 
 }  // namespace
@@ -112,16 +155,19 @@ void on_segment(const speech_core_segment* segment, void* user_data) {
 int main(int argc, char** argv) {
   std::string model_path;
   std::string audio_path;
+  std::string vad_model_path;
   std::string language = "auto";
-  std::string manifest_path;
+  std::string prompt;
   std::string output_path;
   speech_core_requested_backend requested_backend =
       SPEECH_CORE_REQUESTED_BACKEND_AUTO;
-  int32_t threads = 4;
+  speech_core_recognize_options options;
+  speech_core_recognize_options_init(&options);
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--model" && i + 1 < argc) model_path = argv[++i];
     else if (argument == "--audio" && i + 1 < argc) audio_path = argv[++i];
+    else if (argument == "--vad-model" && i + 1 < argc) vad_model_path = argv[++i];
     else if (argument == "--backend" && i + 1 < argc) {
       if (!parse_backend(argv[++i], &requested_backend)) {
         usage();
@@ -129,19 +175,23 @@ int main(int argc, char** argv) {
       }
     }
     else if (argument == "--language" && i + 1 < argc) language = argv[++i];
-    else if (argument == "--manifest" && i + 1 < argc) manifest_path = argv[++i];
+    else if (argument == "--prompt" && i + 1 < argc) prompt = argv[++i];
     else if (argument == "--output" && i + 1 < argc) output_path = argv[++i];
-    else if (argument == "--threads" && i + 1 < argc) {
+    else if (argument == "--no-token-timestamps") options.token_timestamps = 0;
+    else if ((argument == "--threads" || argument == "--beam") && i + 1 < argc) {
+      int value = 0;
       try {
-        threads = std::stoi(argv[++i]);
+        value = std::stoi(argv[++i]);
       } catch (...) {
         usage();
         return 2;
       }
-      if (threads <= 0) {
+      if (value <= 0) {
         usage();
         return 2;
       }
+      if (argument == "--threads") options.n_threads = value;
+      else options.beam_size = value;
     } else {
       usage();
       return 2;
@@ -150,11 +200,6 @@ int main(int argc, char** argv) {
   if (model_path.empty() || audio_path.empty()) {
     usage();
     return 2;
-  }
-
-  if (!manifest_path.empty()) {
-    std::vector<uint8_t> manifest;
-    if (!read_file(manifest_path, &manifest)) return 2;
   }
 
   std::ofstream file_output;
@@ -172,6 +217,14 @@ int main(int argc, char** argv) {
       wav.data(), wav.size(), &pcm, &diagnostics);
   if (status != SPEECH_CORE_OK) return 3;
 
+  if (!vad_model_path.empty()) {
+    const int vad_result = run_vad(vad_model_path, pcm, *output);
+    if (vad_result != 0) {
+      speech_core_pcm_buffer_free(&pcm);
+      return vad_result;
+    }
+  }
+
   speech_core_model* model = nullptr;
   status = speech_core_model_create_with_backend(
       model_path.c_str(), requested_backend, &model);
@@ -188,13 +241,25 @@ int main(int argc, char** argv) {
     speech_core_pcm_buffer_free(&pcm);
     return 5;
   }
-  OutputContext context{output, "regression"};
-  status = speech_core_session_recognize(
-      session, pcm.samples, pcm.sample_count, pcm.sample_rate,
-      language.c_str(), threads, on_segment, &context, &diagnostics);
+  options.language = language.c_str();
+  options.initial_prompt = prompt.empty() ? nullptr : prompt.c_str();
+
+  // Feed at most 30 seconds per call so the tool exercises the same window
+  // contract as the application.
+  const size_t window = static_cast<size_t>(SPEECH_CORE_SAMPLE_RATE) * 30;
+  OutputContext context{output};
+  uint64_t inference_ms = 0;
+  size_t offset = 0;
+  while (offset < pcm.sample_count && status == SPEECH_CORE_OK) {
+    const size_t take = std::min(window, pcm.sample_count - offset);
+    status = speech_core_session_recognize(
+        session, pcm.samples + offset, take, pcm.sample_rate, &options,
+        on_segment, &context, &diagnostics);
+    inference_ms += diagnostics.inference_ms;
+    offset += take;
+  }
   if (status == SPEECH_CORE_OK) {
-    *output << "{\"type\":\"backend\",\"sessionId\":\"regression\","
-            << "\"requestedBackend\":\""
+    *output << "{\"type\":\"backend\",\"requestedBackend\":\""
             << requested_backend_name(speech_core_model_requested_backend(model))
             << "\",\"actualBackend\":\""
             << actual_backend_name(speech_core_model_actual_backend(model))
@@ -207,15 +272,13 @@ int main(int argc, char** argv) {
             << ",\"backendMessage\":\""
             << json_escape(speech_core_model_backend_message(model))
             << "\"}\n";
-    *output << "{\"type\":\"diagnostic\",\"sessionId\":\"regression\","
-            << "\"audioSamples\":" << diagnostics.audio_samples
+    const double seconds = static_cast<double>(pcm.sample_count) / pcm.sample_rate;
+    *output << "{\"type\":\"diagnostic\",\"audioSamples\":" << pcm.sample_count
             << ",\"inputSampleRate\":" << diagnostics.input_sample_rate
             << ",\"inputChannels\":" << diagnostics.input_channels
-            << ",\"inputSamples\":" << diagnostics.input_samples
-            << ",\"outputSampleRate\":" << diagnostics.output_sample_rate
-            << ",\"outputChannels\":" << diagnostics.output_channels
-            << ",\"inferenceMs\":" << diagnostics.inference_ms
-            << ",\"realtimeFactor\":" << diagnostics.realtime_factor
+            << ",\"inferenceMs\":" << inference_ms
+            << ",\"realtimeFactor\":"
+            << (seconds > 0 ? inference_ms / 1000.0 / seconds : 0.0)
             << ",\"segmentCount\":" << context.count << "}\n";
   }
   speech_core_session_destroy(session);

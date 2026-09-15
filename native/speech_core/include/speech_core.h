@@ -16,8 +16,12 @@
 extern "C" {
 #endif
 
+#define SPEECH_CORE_ABI_VERSION 3
+#define SPEECH_CORE_SAMPLE_RATE 16000
+
 typedef struct speech_core_model speech_core_model;
 typedef struct speech_core_session speech_core_session;
+typedef struct speech_core_vad speech_core_vad;
 
 typedef enum speech_core_status {
   SPEECH_CORE_OK = 0,
@@ -30,7 +34,8 @@ typedef enum speech_core_status {
   SPEECH_CORE_RECOGNITION_FAILED = 7,
   SPEECH_CORE_CANCELLED = 8,
   SPEECH_CORE_BACKEND_UNAVAILABLE = 9,
-  SPEECH_CORE_INTERNAL_ERROR = 10
+  SPEECH_CORE_INTERNAL_ERROR = 10,
+  SPEECH_CORE_BUFFER_TOO_SMALL = 11
 } speech_core_status;
 
 typedef enum speech_core_requested_backend {
@@ -69,7 +74,26 @@ typedef struct speech_core_diagnostics {
   uint64_t inference_ms;
   double realtime_factor;
   uint32_t segment_count;
+  uint32_t dropped_segment_count;
 } speech_core_diagnostics;
+
+/* Decoder parameters for one recognition call. Initialise with
+ * speech_core_recognize_options_init and override individual fields. */
+typedef struct speech_core_recognize_options {
+  const char* language;        /* NULL or "" selects automatic detection */
+  const char* initial_prompt;  /* NULL disables the prompt */
+  int32_t n_threads;
+  int32_t beam_size;           /* <= 1 selects greedy decoding */
+  int32_t audio_context;       /* 0 keeps the model's full encoder context */
+  float temperature;
+  float temperature_increment; /* <= 0 disables temperature fallback */
+  float entropy_threshold;     /* <= 0 disables the compression-ratio check */
+  float logprob_threshold;     /* > 0 disables the log-probability check */
+  float no_speech_threshold;   /* segments above this probability are dropped */
+  uint8_t token_timestamps;
+  uint8_t suppress_non_speech_tokens;
+  uint8_t suppress_blank;
+} speech_core_recognize_options;
 
 typedef struct speech_core_segment {
   uint32_t segment_index;
@@ -77,8 +101,10 @@ typedef struct speech_core_segment {
   int64_t end_ms;
   const char* text;
   const char* language;
-  float confidence;
-  uint8_t is_final;
+  float avg_logprob;      /* mean log-probability of the text tokens */
+  float no_speech_prob;
+  float repetition;       /* share of repeated 4-grams in the text, 0..1 */
+  uint32_t token_count;
 } speech_core_segment;
 
 typedef void (*speech_core_segment_callback)(
@@ -88,6 +114,9 @@ typedef void (*speech_core_segment_callback)(
 SPEECH_CORE_API const char* speech_core_status_message(speech_core_status status);
 
 SPEECH_CORE_API uint32_t speech_core_abi_version(void);
+
+SPEECH_CORE_API void speech_core_recognize_options_init(
+    speech_core_recognize_options* options);
 
 SPEECH_CORE_API speech_core_status speech_core_model_create_with_backend(
     const char* model_path,
@@ -120,16 +149,38 @@ SPEECH_CORE_API void speech_core_session_destroy(speech_core_session* session);
 SPEECH_CORE_API speech_core_status speech_core_session_cancel(
     speech_core_session* session);
 
+/* Recognises one window of 16 kHz mono float samples. Segments are reported
+ * through the callback with window-relative timestamps. */
 SPEECH_CORE_API speech_core_status speech_core_session_recognize(
     speech_core_session* session,
     const float* samples,
     size_t sample_count,
     uint32_t sample_rate,
-    const char* language,
-    int32_t n_threads,
+    const speech_core_recognize_options* options,
     speech_core_segment_callback callback,
     void* user_data,
     speech_core_diagnostics* diagnostics);
+
+/* Silero voice activity detection through whisper.cpp. */
+SPEECH_CORE_API speech_core_status speech_core_vad_create(
+    const char* model_path,
+    int32_t n_threads,
+    speech_core_vad** out_vad);
+SPEECH_CORE_API void speech_core_vad_destroy(speech_core_vad* vad);
+
+/* Number of 16 kHz samples covered by one probability. */
+SPEECH_CORE_API uint32_t speech_core_vad_frame_samples(const speech_core_vad* vad);
+
+/* Writes one speech probability per frame. The detector state is reset on
+ * every call, so callers streaming audio should overlap successive calls by a
+ * few frames and discard the overlapped probabilities. */
+SPEECH_CORE_API speech_core_status speech_core_vad_probabilities(
+    speech_core_vad* vad,
+    const float* samples,
+    size_t sample_count,
+    float* out_probabilities,
+    size_t out_capacity,
+    size_t* out_count);
 
 #ifdef __cplusplus
 }

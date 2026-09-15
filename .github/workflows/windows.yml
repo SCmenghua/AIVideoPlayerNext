@@ -2,25 +2,200 @@ name: Windows quality
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor]
   pull_request:
 
+env:
+  WHISPER_CPP_COMMIT: a8d002cfd879315632a579e73f0148d06959de36
+  VULKAN_SDK_VERSION: 1.4.309.0
+  KOTOBA_MODEL_URL: https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin
+  KOTOBA_MODEL_SHA256: eff70a8a236e731abba774ba71e1f6d0fce53302137208c32207e694e0bf4546
+  KOTOBA_MODEL_SIZE: "1519521155"
+  VAD_MODEL_URL: https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+  VAD_MODEL_SHA256: 29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf
+  VAD_MODEL_SIZE: "885098"
+  JSUT_PARQUET_URL: https://huggingface.co/datasets/japanese-asr/ja_asr.jsut_basic5000/resolve/main/data/test-00000-of-00004.parquet
+  REGRESSION_CLIPS: "20"
+
 jobs:
-  flutter:
+  quality:
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: app
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-      - run: flutter pub get
-      - run: flutter analyze
-      - run: flutter test
+
+      - name: Prepare pinned whisper.cpp source
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'whisper.cpp'
+          git init $dir
+          git -C $dir remote add origin https://github.com/ggerganov/whisper.cpp.git
+          git -C $dir fetch --depth 1 origin $env:WHISPER_CPP_COMMIT
+          git -C $dir checkout --detach FETCH_HEAD
+          "WHISPER_CPP_SOURCE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "whisper.cpp: $(git -C $dir rev-parse HEAD)"
+
+      - name: Cache Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'VulkanSDK-Installer.exe'
+          curl.exe --fail --location --retry 3 --output $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/VulkanSDK-$env:VULKAN_SDK_VERSION-Installer.exe"
+          & $installer --accept-licenses --default-answer --confirm-command install
+          if (-not (Test-Path "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Bin\glslc.exe")) { throw 'glslc.exe missing after Vulkan SDK install' }
+
+      - name: Export Vulkan SDK environment
+        shell: pwsh
+        run: |
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build Windows audio decoder
+        shell: pwsh
+        run: |
+          cmake -S native/audio_decoder -B native/audio_decoder/build-vs -A x64
+          cmake --build native/audio_decoder/build-vs --config Release
+          if (-not (Test-Path native/audio_decoder/build-vs/Release/ai_audio_decoder.dll)) { throw 'ai_audio_decoder.dll was not produced' }
+
+      - name: Build speech_core (CPU, for tests and regression)
+        shell: pwsh
+        run: |
+          cmake -S native/speech_core -B native/speech_core/build-cpu -A x64 `
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=OFF `
+            -DWHISPER_CPP_SOURCE_DIR="$env:WHISPER_CPP_SOURCE_DIR"
+          cmake --build native/speech_core/build-cpu --config Release
+          if (-not (Test-Path native/speech_core/build-cpu/Release/speech_core.dll)) { throw 'speech_core.dll (cpu) was not produced' }
+
+      - name: Build speech_core (Vulkan, for the package)
+        shell: pwsh
+        run: |
+          cmake -S native/speech_core -B native/speech_core/build-whisper-vulkan -A x64 `
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON `
+            -DWHISPER_CPP_SOURCE_DIR="$env:WHISPER_CPP_SOURCE_DIR"
+          cmake --build native/speech_core/build-whisper-vulkan --config Release --target speech_core
+          if (-not (Test-Path native/speech_core/build-whisper-vulkan/Release/speech_core.dll)) { throw 'speech_core.dll (vulkan) was not produced' }
+
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\models
+          key: models-${{ env.KOTOBA_MODEL_SHA256 }}-${{ env.VAD_MODEL_SHA256 }}
+
+      - name: Download and verify models
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'models'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          function Fetch($url, $name, $sha, $size) {
+            $path = Join-Path $dir $name
+            if (-not (Test-Path $path) -or (Get-Item $path).Length -ne [int64]$size) {
+              curl.exe --fail --location --retry 3 --retry-delay 5 --output $path $url
+            }
+            if ((Get-Item $path).Length -ne [int64]$size) { throw "$name size mismatch" }
+            $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $sha) { throw "$name SHA-256 mismatch: $actual" }
+            Write-Host "$name verified"
+          }
+          Fetch $env:KOTOBA_MODEL_URL 'ggml-kotoba-whisper-v2.0.bin' $env:KOTOBA_MODEL_SHA256 $env:KOTOBA_MODEL_SIZE
+          Fetch $env:VAD_MODEL_URL 'ggml-silero-v5.1.2.bin' $env:VAD_MODEL_SHA256 $env:VAD_MODEL_SIZE
+          "MODELS_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Native tests
+        shell: pwsh
+        env:
+          SPEECH_CORE_VAD_MODEL: ${{ runner.temp }}\models\ggml-silero-v5.1.2.bin
+        run: ctest --test-dir native/speech_core/build-cpu -C Release --output-on-failure
+
+      - name: Recognition package tests
+        shell: pwsh
+        working-directory: app/packages/recognition
+        run: |
+          dart pub get
+          dart analyze
+          dart test
+
+      - name: Flutter analyze and test
+        shell: pwsh
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Cache regression parquet
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\jsut-parquet
+          key: jsut-parquet-test-00000-of-00004
+
+      - name: Prepare regression dataset
+        shell: python
+        run: |
+          import io, json, os, pathlib, subprocess, sys, urllib.request
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'pyarrow', 'soundfile', 'numpy'])
+          import pyarrow.parquet as pq
+          import soundfile as sf
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          parquet_dir = temp / 'jsut-parquet'
+          parquet_dir.mkdir(parents=True, exist_ok=True)
+          parquet = parquet_dir / 'test-00000-of-00004.parquet'
+          if not parquet.exists() or parquet.stat().st_size < 1_000_000:
+              urllib.request.urlretrieve(os.environ['JSUT_PARQUET_URL'], parquet)
+          count = int(os.environ['REGRESSION_CLIPS'])
+          out = temp / 'jsut'
+          out.mkdir(parents=True, exist_ok=True)
+          clips = []
+          table = next(pq.ParquetFile(parquet).iter_batches(batch_size=count)).to_pylist()
+          for index, row in enumerate(table):
+              audio = row['audio']
+              data, rate = sf.read(io.BytesIO(audio['bytes']), dtype='float32', always_2d=False)
+              name = f'{index:04d}.wav'
+              sf.write(out / name, data, rate, subtype='PCM_16')
+              clips.append({'file': name, 'text': row['transcription']})
+          (out / 'manifest.json').write_text(json.dumps({'clips': clips}, ensure_ascii=False, indent=2), encoding='utf-8')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'REGRESSION_DATASET={out}\n')
+          print(f'{len(clips)} clips written to {out}')
+
+      - name: Recognition regression (kotoba-whisper-v2.0, CPU)
+        shell: pwsh
+        working-directory: app/packages/recognition
+        run: |
+          dart run bin/regression.dart `
+            --library "$env:GITHUB_WORKSPACE\native\speech_core\build-cpu\Release\speech_core.dll" `
+            --model "$env:MODELS_DIR\ggml-kotoba-whisper-v2.0.bin" `
+            --vad-model "$env:MODELS_DIR\ggml-silero-v5.1.2.bin" `
+            --dataset "$env:REGRESSION_DATASET" `
+            --language ja --backend cpu --threads 4 `
+            --summary "$env:GITHUB_STEP_SUMMARY" `
+            --json "$env:RUNNER_TEMP\regression.json"
+
+      - name: Upload regression report
+        uses: actions/upload-artifact@v4
+        with:
+          name: recognition-regression-${{ github.run_number }}
+          path: ${{ runner.temp }}\regression.json
+          if-no-files-found: error
+
+      - name: Stage bundled VAD model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app/windows/models | Out-Null
+          Copy-Item "$env:MODELS_DIR\ggml-silero-v5.1.2.bin" app/windows/models/
+
       - name: Set build identity
         shell: pwsh
+        working-directory: app
         run: |
           $appVersion = (Select-String -Path pubspec.yaml -Pattern '^version:\s*([^+\s]+)' | Select-Object -First 1).Matches[0].Groups[1].Value
           $appBuildTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'
@@ -28,8 +203,24 @@ jobs:
           "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "APP_BUILD_TIME=$appBuildTime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "APP_BUILD_ID=$appBuildId" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - run: >
+
+      - name: Build Windows application
+        shell: pwsh
+        working-directory: app
+        run: >
           flutter build windows --release
           --dart-define=APP_VERSION="${{ env.APP_VERSION }}"
           --dart-define=APP_BUILD_TIME="${{ env.APP_BUILD_TIME }}"
           --dart-define=APP_BUILD_ID="${{ env.APP_BUILD_ID }}"
+
+      - name: Verify package contents
+        shell: pwsh
+        working-directory: app
+        run: |
+          $release = 'build/windows/x64/runner/Release'
+          foreach ($file in @('ai_audio_decoder.dll', 'speech_core.dll', 'models/ggml-silero-v5.1.2.bin')) {
+            if (-not (Test-Path (Join-Path $release $file))) { throw "$file missing from the Windows package" }
+          }
+          if (Test-Path (Join-Path $release 'vulkan-1.dll')) { throw 'the package must not ship its own vulkan-1.dll' }
+          Get-ChildItem $release -Recurse -File | Where-Object { $_.Length -gt 100MB } | ForEach-Object { throw "unexpected large file in package: $($_.Name)" }
+          Write-Host 'Windows package verified'

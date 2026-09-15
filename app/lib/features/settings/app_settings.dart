@@ -1,13 +1,14 @@
-import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../audio/recognition_controller.dart';
 import '../../domain/translation/local_translation_model.dart';
 import '../../domain/translation/translation_service.dart';
+import '../recognition/recognition_settings.dart';
+import '../recognition/whisper_model_catalog.dart';
 
 enum TranslationMode { deepl, genericApi, systemTranslation, localModel }
 
@@ -19,9 +20,11 @@ enum PlaybackStartStrategy {
   playbackPriority,
 }
 
+const defaultGenericModel = 'gpt-4.1-mini';
+
 class AppSettings {
   const AppSettings({
-    required this.prefetchMode,
+    required this.recognition,
     required this.translationMode,
     required this.localTranslationModel,
     required this.deeplApiKey,
@@ -32,12 +35,14 @@ class AppSettings {
     required this.translationBatchSize,
     required this.translationMaxConcurrent,
     required this.translationContextEnabled,
+    required this.translationTargetLanguage,
     required this.subtitleDisplayMode,
+    required this.subtitleFontScale,
     required this.playbackStartStrategy,
     required this.waitForSubtitlePreparation,
   });
 
-  final RecognitionPrefetchMode prefetchMode;
+  final RecognitionSettings recognition;
   final TranslationMode translationMode;
   final LocalTranslationModel localTranslationModel;
   final String? deeplApiKey;
@@ -48,7 +53,9 @@ class AppSettings {
   final int translationBatchSize;
   final int translationMaxConcurrent;
   final bool translationContextEnabled;
+  final String translationTargetLanguage;
   final SubtitleDisplayMode subtitleDisplayMode;
+  final double subtitleFontScale;
   final PlaybackStartStrategy playbackStartStrategy;
   final bool waitForSubtitlePreparation;
 
@@ -59,7 +66,8 @@ class AppSettings {
       deeplEndpoint == other.deeplEndpoint &&
       genericEndpoint == other.genericEndpoint &&
       genericApiKey == other.genericApiKey &&
-      genericModel == other.genericModel;
+      genericModel == other.genericModel &&
+      translationTargetLanguage == other.translationTargetLanguage;
 
   bool sameTranslationScheduling(AppSettings other) =>
       translationBatchSize == other.translationBatchSize &&
@@ -69,7 +77,7 @@ class AppSettings {
 
 class AppSettingsController extends ChangeNotifier {
   AppSettingsController({
-    RecognitionPrefetchMode prefetchMode = RecognitionPrefetchMode.fullMedia,
+    RecognitionSettings recognition = const RecognitionSettings(),
     TranslationMode translationMode = TranslationMode.deepl,
     LocalTranslationModel localTranslationModel =
         LocalTranslationModel.gemma4E2BItQatMobileTransformers,
@@ -77,30 +85,30 @@ class AppSettingsController extends ChangeNotifier {
     Uri? deeplEndpoint,
     Uri? genericEndpoint,
     String? genericApiKey,
-    String genericModel = 'gpt-4.1-mini',
+    String genericModel = defaultGenericModel,
     int translationBatchSize = 8,
     int translationMaxConcurrent = 10,
     bool translationContextEnabled = true,
+    String translationTargetLanguage = 'zh-CN',
     SubtitleDisplayMode subtitleDisplayMode = SubtitleDisplayMode.bilingual,
-    PlaybackStartStrategy playbackStartStrategy =
-        PlaybackStartStrategy.translationPriority,
+    double subtitleFontScale = 1.0,
+    PlaybackStartStrategy playbackStartStrategy = PlaybackStartStrategy.subtitlePriority,
     bool waitForSubtitlePreparation = true,
-  })  : _prefetchMode = prefetchMode,
+  })  : _recognition = recognition,
         _translationMode = translationMode,
         _localTranslationModel = localTranslationModel,
         _deeplApiKey = _clean(deeplApiKey),
         _deeplEndpoint = deeplEndpoint ?? defaultDeepLEndpoint,
-        _genericEndpoint = genericEndpoint == null
-            ? null
-            : normalizeOpenAiCompatibleEndpoint(genericEndpoint),
+        _genericEndpoint =
+            genericEndpoint == null ? null : normalizeOpenAiCompatibleEndpoint(genericEndpoint),
         _genericApiKey = _clean(genericApiKey),
-        _genericModel =
-            genericModel.trim().isEmpty ? 'gpt-4.1-mini' : genericModel.trim(),
+        _genericModel = genericModel.trim().isEmpty ? defaultGenericModel : genericModel.trim(),
         _translationBatchSize = _boundedBatchSize(translationBatchSize),
-        _translationMaxConcurrent =
-            _boundedConcurrency(translationMaxConcurrent),
+        _translationMaxConcurrent = _boundedConcurrency(translationMaxConcurrent),
         _translationContextEnabled = translationContextEnabled,
+        _translationTargetLanguage = _validTargetLanguage(translationTargetLanguage),
         _subtitleDisplayMode = subtitleDisplayMode,
+        _subtitleFontScale = _boundedFontScale(subtitleFontScale),
         _playbackStartStrategy = playbackStartStrategy,
         _waitForSubtitlePreparation = waitForSubtitlePreparation {
     ready = _loadPersistedSettings();
@@ -111,22 +119,18 @@ class AppSettingsController extends ChangeNotifier {
         Platform.environment['AI_VIDEO_TRANSLATION_ENDPOINT'] ?? '');
     final genericApiKey = Platform.environment['AI_VIDEO_TRANSLATION_API_KEY'];
     final genericModel = Platform.environment['AI_VIDEO_TRANSLATION_MODEL'];
-    final hasGenericConfiguration =
-        genericEndpoint != null && _clean(genericApiKey) != null;
+    final hasGenericConfiguration = genericEndpoint != null && _clean(genericApiKey) != null;
     return AppSettingsController(
-      translationMode: hasGenericConfiguration
-          ? TranslationMode.genericApi
-          : TranslationMode.deepl,
+      translationMode: hasGenericConfiguration ? TranslationMode.genericApi : TranslationMode.deepl,
       genericEndpoint: genericEndpoint,
       genericApiKey: genericApiKey,
-      genericModel: genericModel ?? 'gpt-4.1-mini',
+      genericModel: genericModel ?? defaultGenericModel,
     );
   }
 
-  static final Uri defaultDeepLEndpoint =
-      Uri.parse('https://api-free.deepl.com/v2/translate');
+  static final Uri defaultDeepLEndpoint = Uri.parse('https://api-free.deepl.com/v2/translate');
 
-  RecognitionPrefetchMode _prefetchMode;
+  RecognitionSettings _recognition;
   TranslationMode _translationMode;
   LocalTranslationModel _localTranslationModel;
   String? _deeplApiKey;
@@ -137,14 +141,16 @@ class AppSettingsController extends ChangeNotifier {
   int _translationBatchSize;
   int _translationMaxConcurrent;
   bool _translationContextEnabled;
+  String _translationTargetLanguage;
   SubtitleDisplayMode _subtitleDisplayMode;
+  double _subtitleFontScale;
   PlaybackStartStrategy _playbackStartStrategy;
   bool _waitForSubtitlePreparation;
   late final Future<void> ready;
   final Set<String> _changedBeforeLoad = <String>{};
   int _saveGeneration = 0;
 
-  RecognitionPrefetchMode get prefetchMode => _prefetchMode;
+  RecognitionSettings get recognition => _recognition;
   TranslationMode get translationMode => _translationMode;
   LocalTranslationModel get localTranslationModel => _localTranslationModel;
   String? get deeplApiKey => _deeplApiKey;
@@ -155,12 +161,14 @@ class AppSettingsController extends ChangeNotifier {
   int get translationBatchSize => _translationBatchSize;
   int get translationMaxConcurrent => _translationMaxConcurrent;
   bool get translationContextEnabled => _translationContextEnabled;
+  String get translationTargetLanguage => _translationTargetLanguage;
   SubtitleDisplayMode get subtitleDisplayMode => _subtitleDisplayMode;
+  double get subtitleFontScale => _subtitleFontScale;
   PlaybackStartStrategy get playbackStartStrategy => _playbackStartStrategy;
   bool get waitForSubtitlePreparation => _waitForSubtitlePreparation;
 
   AppSettings get snapshot => AppSettings(
-        prefetchMode: _prefetchMode,
+        recognition: _recognition,
         translationMode: _translationMode,
         localTranslationModel: _localTranslationModel,
         deeplApiKey: _deeplApiKey,
@@ -171,7 +179,9 @@ class AppSettingsController extends ChangeNotifier {
         translationBatchSize: _translationBatchSize,
         translationMaxConcurrent: _translationMaxConcurrent,
         translationContextEnabled: _translationContextEnabled,
+        translationTargetLanguage: _translationTargetLanguage,
         subtitleDisplayMode: _subtitleDisplayMode,
+        subtitleFontScale: _subtitleFontScale,
         playbackStartStrategy: _playbackStartStrategy,
         waitForSubtitlePreparation: _waitForSubtitlePreparation,
       );
@@ -184,32 +194,40 @@ class AppSettingsController extends ChangeNotifier {
       if (decoded is! Map) return;
       final values = Map<String, dynamic>.from(decoded);
       var changed = false;
-      if (!_changedBeforeLoad.contains('prefetchMode')) {
-        final value =
-            _enumValue(values['prefetchMode'], RecognitionPrefetchMode.values);
-        if (value != null && value != _prefetchMode) {
-          _prefetchMode = value;
+
+      if (!_changedBeforeLoad.contains('recognition')) {
+        final language = values['recognitionLanguage'];
+        final modelId = values['whisperModelId'];
+        final vad = values['vadEnabled'];
+        final next = RecognitionSettings(
+          language: language is String && recognitionLanguageLabels.containsKey(language)
+              ? language
+              : _recognition.language,
+          modelId: modelId is String && WhisperModelCatalog.byId(modelId) != null
+              ? modelId
+              : _recognition.modelId,
+          vadEnabled: vad is bool ? vad : _recognition.vadEnabled,
+        );
+        if (next != _recognition) {
+          _recognition = next;
           changed = true;
         }
       }
       if (!_changedBeforeLoad.contains('translationMode')) {
-        final value =
-            _enumValue(values['translationMode'], TranslationMode.values);
+        final value = _enumValue(values['translationMode'], TranslationMode.values);
         if (value != null && value != _translationMode) {
           _translationMode = value;
           changed = true;
         }
       }
       if (!_changedBeforeLoad.contains('localTranslationModel')) {
-        final value = _enumValue(
-            values['localTranslationModel'], LocalTranslationModel.values);
+        final value = _enumValue(values['localTranslationModel'], LocalTranslationModel.values);
         if (value != null && value != _localTranslationModel) {
           _localTranslationModel = value;
           changed = true;
         }
       }
-      if (!_changedBeforeLoad.contains('deeplApiKey') &&
-          values.containsKey('deeplApiKey')) {
+      if (!_changedBeforeLoad.contains('deeplApiKey') && values.containsKey('deeplApiKey')) {
         final value = _clean(values['deeplApiKey']);
         if (value != _deeplApiKey) {
           _deeplApiKey = value;
@@ -217,22 +235,22 @@ class AppSettingsController extends ChangeNotifier {
         }
       }
       if (!_changedBeforeLoad.contains('deeplEndpoint')) {
-        final value = _parseDeepLEndpoint(values['deeplEndpoint']);
+        final raw = values['deeplEndpoint'];
+        final value = raw is String ? _optionalEndpoint(raw) : null;
         if (value != null && value != _deeplEndpoint) {
           _deeplEndpoint = value;
           changed = true;
         }
       }
-      if (!_changedBeforeLoad.contains('genericEndpoint') &&
-          values.containsKey('genericEndpoint')) {
-        final value = _parseGenericEndpoint(values['genericEndpoint']);
+      if (!_changedBeforeLoad.contains('genericEndpoint') && values.containsKey('genericEndpoint')) {
+        final raw = values['genericEndpoint'];
+        final value = raw is String ? parseOpenAiCompatibleEndpoint(raw) : null;
         if (value != _genericEndpoint) {
           _genericEndpoint = value;
           changed = true;
         }
       }
-      if (!_changedBeforeLoad.contains('genericApiKey') &&
-          values.containsKey('genericApiKey')) {
+      if (!_changedBeforeLoad.contains('genericApiKey') && values.containsKey('genericApiKey')) {
         final value = _clean(values['genericApiKey']);
         if (value != _genericApiKey) {
           _genericApiKey = value;
@@ -241,9 +259,7 @@ class AppSettingsController extends ChangeNotifier {
       }
       if (!_changedBeforeLoad.contains('genericModel')) {
         final raw = values['genericModel'];
-        final value = raw is String && raw.trim().isNotEmpty
-            ? raw.trim()
-            : 'gpt-4.1-mini';
+        final value = raw is String && raw.trim().isNotEmpty ? raw.trim() : defaultGenericModel;
         if (value != _genericModel) {
           _genericModel = value;
           changed = true;
@@ -269,32 +285,46 @@ class AppSettingsController extends ChangeNotifier {
           }
         }
       }
-      if (!_changedBeforeLoad.contains('translationContextEnabled') &&
-          values.containsKey('translationContextEnabled')) {
+      if (!_changedBeforeLoad.contains('translationContextEnabled')) {
         final raw = values['translationContextEnabled'];
         if (raw is bool && raw != _translationContextEnabled) {
           _translationContextEnabled = raw;
           changed = true;
         }
       }
+      if (!_changedBeforeLoad.contains('translationTargetLanguage')) {
+        final raw = values['translationTargetLanguage'];
+        if (raw is String && translationTargetLanguageLabels.containsKey(raw) &&
+            raw != _translationTargetLanguage) {
+          _translationTargetLanguage = raw;
+          changed = true;
+        }
+      }
       if (!_changedBeforeLoad.contains('subtitleDisplayMode')) {
-        final value = _enumValue(
-            values['subtitleDisplayMode'], SubtitleDisplayMode.values);
+        final value = _enumValue(values['subtitleDisplayMode'], SubtitleDisplayMode.values);
         if (value != null && value != _subtitleDisplayMode) {
           _subtitleDisplayMode = value;
           changed = true;
         }
       }
+      if (!_changedBeforeLoad.contains('subtitleFontScale')) {
+        final raw = values['subtitleFontScale'];
+        if (raw is num) {
+          final value = _boundedFontScale(raw.toDouble());
+          if (value != _subtitleFontScale) {
+            _subtitleFontScale = value;
+            changed = true;
+          }
+        }
+      }
       if (!_changedBeforeLoad.contains('playbackStartStrategy')) {
-        final value = _enumValue(
-            values['playbackStartStrategy'], PlaybackStartStrategy.values);
+        final value = _enumValue(values['playbackStartStrategy'], PlaybackStartStrategy.values);
         if (value != null && value != _playbackStartStrategy) {
           _playbackStartStrategy = value;
           changed = true;
         }
       }
-      if (!_changedBeforeLoad.contains('waitForSubtitlePreparation') &&
-          values.containsKey('waitForSubtitlePreparation')) {
+      if (!_changedBeforeLoad.contains('waitForSubtitlePreparation')) {
         final raw = values['waitForSubtitlePreparation'];
         if (raw is bool && raw != _waitForSubtitlePreparation) {
           _waitForSubtitlePreparation = raw;
@@ -331,20 +361,28 @@ class AppSettingsController extends ChangeNotifier {
     return null;
   }
 
-  static Uri? _parseDeepLEndpoint(Object? raw) {
-    if (raw is! String) return null;
-    return _optionalEndpoint(raw);
+  void setRecognitionLanguage(String value) {
+    if (!recognitionLanguageLabels.containsKey(value) || value == _recognition.language) return;
+    _recognition = _recognition.copyWith(language: value);
+    _markChanged('recognition');
+    notifyListeners();
   }
 
-  static Uri? _parseGenericEndpoint(Object? raw) {
-    if (raw is! String) return null;
-    return _optionalGenericEndpoint(raw);
+  /// Null restores the catalog default for the current language.
+  void setWhisperModelId(String? value) {
+    if (value != null && WhisperModelCatalog.byId(value) == null) return;
+    if (value == _recognition.modelId) return;
+    _recognition = value == null
+        ? _recognition.copyWith(clearModelId: true)
+        : _recognition.copyWith(modelId: value);
+    _markChanged('recognition');
+    notifyListeners();
   }
 
-  void setPrefetchMode(RecognitionPrefetchMode value) {
-    if (_prefetchMode == value) return;
-    _prefetchMode = value;
-    _markChanged('prefetchMode');
+  void setVadEnabled(bool value) {
+    if (value == _recognition.vadEnabled) return;
+    _recognition = _recognition.copyWith(vadEnabled: value);
+    _markChanged('recognition');
     notifyListeners();
   }
 
@@ -364,7 +402,7 @@ class AppSettingsController extends ChangeNotifier {
 
   void updateDeepL({required String apiKey, required String endpoint}) {
     _deeplApiKey = _clean(apiKey);
-    _deeplEndpoint = _validatedEndpoint(endpoint, defaultDeepLEndpoint);
+    _deeplEndpoint = _optionalEndpoint(endpoint) ?? defaultDeepLEndpoint;
     _markChanged('deeplApiKey');
     _markChanged('deeplEndpoint');
     notifyListeners();
@@ -375,9 +413,9 @@ class AppSettingsController extends ChangeNotifier {
     required String apiKey,
     required String model,
   }) {
-    _genericEndpoint = _optionalGenericEndpoint(endpoint);
+    _genericEndpoint = parseOpenAiCompatibleEndpoint(endpoint);
     _genericApiKey = _clean(apiKey);
-    _genericModel = model.trim().isEmpty ? 'gpt-4.1-mini' : model.trim();
+    _genericModel = model.trim().isEmpty ? defaultGenericModel : model.trim();
     _markChanged('genericEndpoint');
     _markChanged('genericApiKey');
     _markChanged('genericModel');
@@ -415,10 +453,28 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setTranslationTargetLanguage(String value) {
+    if (!translationTargetLanguageLabels.containsKey(value) ||
+        value == _translationTargetLanguage) {
+      return;
+    }
+    _translationTargetLanguage = value;
+    _markChanged('translationTargetLanguage');
+    notifyListeners();
+  }
+
   void setSubtitleDisplayMode(SubtitleDisplayMode value) {
     if (_subtitleDisplayMode == value) return;
     _subtitleDisplayMode = value;
     _markChanged('subtitleDisplayMode');
+    notifyListeners();
+  }
+
+  void setSubtitleFontScale(double value) {
+    final next = _boundedFontScale(value);
+    if (_subtitleFontScale == next) return;
+    _subtitleFontScale = next;
+    _markChanged('subtitleFontScale');
     notifyListeners();
   }
 
@@ -436,9 +492,6 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
-  static Uri _validatedEndpoint(String value, Uri fallback) =>
-      _optionalEndpoint(value) ?? fallback;
-
   static Uri? _optionalEndpoint(String value) {
     final candidate = Uri.tryParse(value.trim());
     if (candidate == null ||
@@ -450,18 +503,20 @@ class AppSettingsController extends ChangeNotifier {
     return candidate;
   }
 
-  static Uri? _optionalGenericEndpoint(String value) {
-    return parseOpenAiCompatibleEndpoint(value);
-  }
-
   static String? _clean(Object? value) {
     final result = value is String ? value.trim() : null;
     return result == null || result.isEmpty ? null : result;
   }
 
+  static String _validTargetLanguage(String value) =>
+      translationTargetLanguageLabels.containsKey(value) ? value : 'zh-CN';
+
   static int _boundedBatchSize(int value) => value.clamp(1, 20);
 
   static int _boundedConcurrency(int value) => value.clamp(1, 20);
+
+  static double _boundedFontScale(double value) =>
+      value.isNaN ? 1.0 : value.clamp(0.7, 1.8).toDouble();
 }
 
 class AppSettingsStore {
@@ -486,7 +541,9 @@ class AppSettingsStore {
     await file.parent.create(recursive: true);
     final temporary = File('${file.path}.tmp');
     await temporary.writeAsString(jsonEncode({
-      'prefetchMode': settings.prefetchMode.name,
+      'recognitionLanguage': settings.recognition.language,
+      'whisperModelId': settings.recognition.modelId,
+      'vadEnabled': settings.recognition.vadEnabled,
       'translationMode': settings.translationMode.name,
       'localTranslationModel': settings.localTranslationModel.name,
       'deeplApiKey': settings.deeplApiKey,
@@ -497,7 +554,9 @@ class AppSettingsStore {
       'translationBatchSize': settings.translationBatchSize,
       'translationContextEnabled': settings.translationContextEnabled,
       'translationMaxConcurrent': settings.translationMaxConcurrent,
+      'translationTargetLanguage': settings.translationTargetLanguage,
       'subtitleDisplayMode': settings.subtitleDisplayMode.name,
+      'subtitleFontScale': settings.subtitleFontScale,
       'playbackStartStrategy': settings.playbackStartStrategy.name,
       'waitForSubtitlePreparation': settings.waitForSubtitlePreparation,
     }));

@@ -1,191 +1,182 @@
-# AIVideoPlayerNext 当前阶段执行计划
+# AIVideoPlayerNext 重构计划
 
-> 当前项目：`AIVideoPlayerNext`
-> 当前阶段：`Phase 9（已跳过，2026-08-23）`
-> 计划状态：已跳过，主线回到 Phase 8 基线（`0.8.0`）；后续从 Phase 10 继续
-> 软件版本目标：~~`0.9.0`~~（未发布）
-> 更新日期：2026-08-23
+> 基线：`main` @ `30dce48`（2026-08-29）
+> 制定日期：2026-09-15
+> 状态：待用户确认后按 Step 0 → Step 6 顺序执行
 
-## 0a. Phase 9 跳过说明（2026-08-23）
+## 0. 背景与结论
 
-Phase 9 按本计划执行过一轮完整实现（六步全部产出代码与测试，自动化 204 项通过），但 Windows Live Captions 引擎在真机应用内无法稳定产出字幕且无法复现定位，调试成本超出收益，经用户决定跳过。代码与本地 Release 已回退到 Phase 8；实现封存在分支 `phase-9-system-engines-archive`，重启时从该分支评估。完整跳过原因与留档见 `NEW.md` 的 Phase 9 章节。下文的执行计划保留为历史留档，各步骤状态不再更新。
+用户反馈：日语识别非常不准；UI 是"工作台"不是播放器。代码审查结论：
 
-## 0. Phase 8 结项摘要（2026-08-22，验收通过）
+**识别不准是管线问题，不是 Whisper 不行。** `main` 上同时存在十处硬伤，每一处都足以单独破坏准确率或时间戳：
 
-Phase 8 八项要求（iOS 识别速度、iOS 原生翻译、翻译速度、三种字幕显示模式、三种播放中策略、启动准备开关、通用 API URL 规范化、模型列表下载）全部交付并验收通过，版本 `0.8.0`。真机回归确认：iOS 识别不再尾随播放；系统翻译（iOS 26 `TranslationSession(installedSource:target:)` 无头会话）在语言包预装后正常出译文，缺失时返回明确终态错误；播放门控在翻译不可用/终态失败时正确放行。最终自动化基线：`flutter analyze` 无问题，`flutter test --concurrency=1` 182 项全部通过；未签名 IPA 由 macOS CI 产出并在真实 iPhone 完成回归。完整结项记录见 `NEW.md` 的 Phase 8 结项记录（2026-08-22）。
+| # | 问题 | 位置 |
+|---|---|---|
+| 1 | `audio_ctx = 512`，编码器上下文从 30 s 砍到 10.24 s，时间戳校准崩坏 | `native/speech_core/src/speech_core.cpp:366` |
+| 2 | 固定 4 s 窗口按采样数硬切，切点与停顿无关 | `app/lib/domain/audio/audio_window_planner.dart` |
+| 3 | `no_context = true`，无 `initial_prompt`，每窗零上下文 | `speech_core.cpp:363` |
+| 4 | 贪心解码，无 beam search、无温度回退 | `speech_core.cpp:358` |
+| 5 | 线性插值重采样无抗混叠；声道等权平均 | `app/lib/domain/audio/audio_models.dart:173-188` |
+| 6 | RMS 能量阈值冒充 VAD | `audio_window_planner.dart:156-181` |
+| 7 | 质量门控只有 `no_speech_prob ≥ 0.6` + 两条黑名单；avg_logprob / compression_ratio 未过 ABI | `speech_core.cpp:439-448` |
+| 8 | 组装器规范化正则剥掉全部假名，日语去重与稳定 ID 失效 | `transcript_assembler.dart:186-190` |
+| 9 | 默认模型 `large-v3-turbo-q5_0`；未合并分支实测 kotoba-whisper-v2.0 对日语零幻觉、快 3 倍 | `providers.dart:54` |
+| 10 | 字幕显示严格 `[start, end)` 无保持，迟到即永不显示 | `transcript_document.dart` |
 
-## 1. 阶段目标
+**结构问题**：四个上帝文件（`recognition_media_cache_worker` 1972 行、`player_screen_phase2` 1681 行、`recognition_controller` 1496 行、`whisper_cpp_speech_service` 949 行）；`features` 之间横向耦合；死代码双轨（旧 `SpeechRecognitionService`、`SubtitleTimeline`、`LegacyPlayerScreen`）；语言/线程/模型名硬编码多处；原生 API 只暴露 `language` 与 `n_threads`；没有可量化的识别质量回归。
 
-### Phase 9：系统语音识别 Adapter
+**分支 `origin/phase-10-ios-model-download` 不合并**，但其实验数据（`audio_ctx=0`、8 s 窗口、kotoba 对比、iOS 模型下载器设计）作为本计划的设计输入。
 
-接入 iOS Speech 与 Windows Live Captions，作为独立、可关闭的系统识别 Provider，与现有 whisper.cpp 本地识别并列。系统识别的价值：
+## 1. 执行规则
 
-- iOS `SFSpeechRecognizer` 提供零模型下载、低延迟的设备识别，可作为轻量替代（部分语言支持设备端识别）。
-- Windows Live Captions 用于在桌面开发阶段快速制造识别文本流，验证翻译 Provider、Overlay、历史与导出工作流，不依赖 Whisper 模型加载。
+1. 开发机是 ARM Linux，没有 Flutter / Dart / Windows / macOS 工具链。本地只做：改代码、写文档、纯文本检查。
+2. **所有本地无法进行的操作（编译、`flutter analyze/test`、`dart test`、原生 CTest、模型下载、识别回归、打包）一律通过 GitHub CI 完成，只修改现有四个 workflow 文件，不新增 workflow 或脚本文件。**
+   - `.github/workflows/windows.yml`：质量门（analyze / test / 原生构建 / CTest / 识别回归）
+   - `.github/workflows/ios.yml`：iOS 编译门
+   - `.github/workflows/build-windows-release.yml`：Windows 发布包
+   - `.github/workflows/build-unsigned-ios-ipa.yml`：未签名 IPA
+3. 工作分支 `refactor`，从 `main` 切出；`windows.yml` / `ios.yml` 的 `push.branches` 加入 `refactor`，每次推送触发 CI。每个 Step 结束条件：CI 绿 + 用户确认（涉及真机的由用户在 Windows / iPhone 验收）。
+4. 每个 Step 完成后在本文件第 5 节追加一行执行记录，只记录已验证事实。
+5. 模型权重、VAD 模型、回归素材一律不入 Git，CI 下载并校验 SHA-256，用 `actions/cache` 缓存。
+6. 不做向后兼容垫片：旧设置字段直接迁移或丢弃；旧接口直接删除。
 
-本阶段目标链路：
-
-```text
-设置：识别引擎选择（whisper.cpp / 系统识别）
-  -> 识别引擎状态契约（可用性、授权、语言、隐私/网络提示）
-       不可用/未授权/语言不支持 -> 明确降级提示 -> 回退 whisper.cpp
-  -> AppleSpeechRecognitionService（iOS）
-       SFSpeechRecognizer 授权与语言检查
-       现有窗口 PCM -> SFSpeechAudioBufferRecognitionRequest
-       partial/final -> RecognitionEvent（媒体时间取自窗口）
-  -> WindowsLiveCaptionsService（仅 Windows 11 + Live Captions 可用）
-       可用性探测与限制说明
-       字幕文本流 -> RecognitionEvent（时间精度受限，明确标注）
-  -> 既有 RecognitionController / TranscriptDocument / 翻译队列不变
-```
-
-必须保留 Phase 7-8 已完成的媒体时间轴权威性、session/generation 隔离、有界队列和稳定 `segmentId` 回填能力。系统识别 Provider 只是 `WindowRecognitionService` 契约后的另一种实现来源；whisper.cpp 路径、固定素材回归和诊断口径不得被系统 Provider 污染。
-
-## 2. 已确认事实与现状
-
-- 当前识别管线：`RecognitionController` 消费 `AudioDecoder` 的带媒体时间 PCM，按窗口规划器切窗（目标 4 秒 / 上限 6 秒，650ms 尾静音，400ms 最小语音），交给 `WindowRecognitionService`（whisper.cpp 经 speech_core FFI）产出 `RecognitionEvent`，整理进 `TranscriptDocument` 供翻译与 Overlay 消费。
-- `RecognitionController` 已具备有界队列、20s/45s 水位背压、session/generation 隔离、暂停/seek/换片取消；Windows 与 iOS 共用同一 Dart 调度，iOS 已移除墙钟节流。
-- 当前设置已有识别预取策略（完整预识别 / 按需预取），但没有识别引擎选择；`WindowRecognitionService` 也没有可用性/授权状态契约（whisper.cpp 始终可用）。
-- iOS 原生桥接模式已成熟：`IOSAudioDecoderBridge`、`SystemTranslationBridge` 均以 MethodChannel + AppDelegate 注册实现，Dart 侧有 `IosAudioDecoder`、`SystemTranslationService` 对应封装与测试替身，可按同一模式新增 Speech 桥接。
-- iOS `SFSpeechRecognizer` 要点：需要 `NSSpeechRecognitionUsageDescription` 与运行时授权；请求级限制约 1 分钟（本项目的 4-6 秒窗口天然满足）；`supportsOnDeviceRecognition` 与语言可用性需逐locale 检查；设备端识别关闭时可能联网。音频输入用 `SFSpeechAudioBufferRecognitionRequest` 逐块追加，`endAudio` 后产出 final。
-- Windows Live Captions 没有公开的字幕读取 API；可行路径是 UI Automation 读取系统字幕窗口文本（参考 LiveCaptions-Translator 的做法），且要求 Windows 11 且用户已在系统设置启用 Live Captions。时间精度只有"文本到达时刻"，无法给出精确媒体起止。
-- 诊断日志已具备五级体系（调试/信息/警告/错误/关闭，默认信息级），新事件按同一分级约定接入。
-
-## 3. 不可违反的约束
-
-0. 若需要下载外网的内容，可使用系统的代理，端口为 mix:10808。
-1. 字幕时间只服从播放器的权威媒体时间轴；系统识别结果的墙钟到达时间不能改变字幕的媒体起止时间。Apple Speech 的媒体时间取自喂入窗口的 `mediaStart/mediaEnd`；Live Captions 只能给出低精度锚点，必须在文档与 UI 中明示，不得伪装成精确时间轴来源。
-2. whisper.cpp 是跨平台识别基准。系统 Provider 的输出、测试替身与开关状态不得影响 whisper.cpp 固定素材回归；两套 Provider 的结果不得混入同一识别会话。
-3. 系统识别引擎必须在设置中可选择、可关闭，并显示授权、隐私与网络状态；未授权、语言不支持或系统不可用时，返回明确状态并回退 whisper.cpp，不得伪造识别结果或静默空跑。
-4. 识别引擎切换、换片、重新开始会话和 seek 后，旧引擎的在途请求与迟到结果不得污染当前会话（沿用 session/generation 隔离）。
-5. Apple Speech 授权弹窗只在用户主动选择该引擎或点击相关按钮时触发，不得在应用启动时抢授权。
-6. Windows Live Captions adapter 是开发辅助与桌面可选能力，默认关闭；不作为移动端方案，不作为生产识别基准。
-7. 设置文件写入保持后台串行和原子替换；新增字段缺失时使用明确默认值，旧设置文件必须可以继续打开（默认引擎为 whisper.cpp）。
-8. 队列、PCM、事件与 UI 状态均有界；系统识别产生的 partial 流不得造成无界事件增长。
-9. 测试构建的诊断数据仅保留在本机；Release 构建继续执行既有脱敏策略。识别内容不新增任何外传路径（Apple Speech 的系统联网行为需在 UI 中提示，由用户选择）。
-
-## 4. 领域模型与决策语义
-
-### 4.1 识别引擎设置
+## 2. 目标架构
 
 ```text
-RecognitionEngineKind
-  whisper        whisper.cpp 本地识别（默认，现状）
-  system         平台系统识别：iOS -> Apple Speech；Windows -> Live Captions
+app/
+  lib/
+    app/            装配（providers）、主题、路由
+    player/         PlayerShell：视频面 + 控制层 + 字幕层（唯一主页面）
+    browser/        内置浏览器（抽屉/弹层）
+    settings/       设置（弹层）
+    diagnostics/    诊断（可选面板）
+    translation/    翻译队列与 Provider（保留，适配新 Transcript）
+    media/          SharedNetworkMediaBroker + 缓存 worker（拆分后）
+  packages/
+    recognition/    纯 Dart 识别管线，不依赖 Flutter
+      lib/src/
+        config.dart          RecognitionConfig
+        pcm.dart             PcmSource 契约（解码器输出，带媒体时间）
+        segmenter.dart       VAD 驱动切窗
+        engine.dart          WhisperEngine（FFI，单 isolate worker）
+        gate.dart            SegmentGate（质量门控 + 跨窗重复）
+        assembler.dart       TranscriptAssembler（CJK 感知）
+        transcript.dart      Transcript（不可变文档，稳定 ID，带保持的 at()）
+        session.dart         RecognitionSession（显式状态机 + 有界队列 + 水位）
+      test/
+native/
+  speech_core/      ABI v3：完整 whisper 参数、VAD、重采样、质量指标
+  audio_decoder/    Windows MF 解码器（优先协商 16 kHz 单声道 float）
+  tools/            speech_regression（CER + 时间戳偏差）
 ```
 
-- 设置持久化、默认值回退与既有字段同一套机制；默认 `whisper` 保证旧设置无缝升级。
-- 引擎选择与预取策略（完整预识别/按需预取）正交：任何引擎都沿用同一预取与背压行为。
-- 引擎切换立即生效于下一次识别会话；当前会话中的切换走既有"配置变更重建"路径，不允许新旧引擎同时产出事件。
+### 2.1 识别管线设计参数（默认值）
 
-### 4.2 识别引擎状态契约
+| 参数 | 值 | 依据 |
+|---|---|---|
+| 模型（日语） | `ggml-kotoba-whisper-v2.0.bin` fp16；备选 q5_0 | 分支实测零幻觉循环、CER 优于 large-v3 |
+| 模型（其他语言） | `ggml-large-v3-turbo-q5_0.bin` | 现状 |
+| VAD | whisper.cpp 内置 Silero `ggml-silero-v5.1.2.bin`，阈值 0.5，最小语音 250 ms，最小静音 100 ms | v1.7.6 原生支持 |
+| 切窗 | 以 VAD 语音段累积：目标 20 s，上限 28 s，停顿 ≥ 500 ms 处切；单段 < 1 s 并入相邻 | Whisper 按 30 s 训练，边界必须落在静音 |
+| `audio_ctx` | 0 | 时间戳校准前提 |
+| 解码 | beam_size 5，temperature 0 起 +0.2 回退 | OpenAI 官方管线默认 |
+| 门控 | entropy_thold 2.4，logprob_thold −1.0，no_speech_thold 0.6；跨窗整窗文本相同即丢弃 | 官方阈值 + 分支发现的跨段循环 |
+| 上下文 | 上一窗口文本尾部 ≤ 120 字作 `initial_prompt`；seek / 换片清空 | 术语与人名一致性 |
+| 时间戳 | `token_timestamps = true`，段边界取 token t0/t1 并 clamp 在段内 | 分支验证不劣化 |
+| 重采样 | 原生 windowed-sinc 抗混叠到 16 kHz；下混按声道数平均 | 消除线性插值混叠 |
+| 水位 | 识别领先播放 30 s 暂停解码，回落到 15 s 恢复；上限 90 s | 有界内存 |
+| 字幕保持 | 段结束后保持 2.5 s，下一段开始即让位 | 首句不丢 |
+| 线程 | Windows 8，iOS 4 | 现状 16 线程无收益 |
 
-为识别引擎建立与 `TranslationServiceStatusProvider` 对称的状态契约：
+### 2.2 识别回归门
 
-```text
-RecognitionEngineStatus
-  available(provider, ...)                        可用
-  unavailable(provider, message, ...)             不可用 + 用户可读原因
-```
+CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符错误率（CER）、段数、时间戳与参考的中位偏差、幻觉循环段数、实时倍率，写入 job summary。Step 1 建立基线，Step 2 起每步与上一步比较；CER 或时间戳偏差劣化即视为该步未完成。
 
-- whisper.cpp：常驻可用（模型加载失败时按现有错误路径报错）。
-- Apple Speech：探测授权状态、locale 语言支持、设备端识别可用性；未授权时提供"去授权"入口，拒绝授权后给出明确回退提示。
-- Live Captions：探测系统版本与功能启用状态；未启用时给出开启指引而不是报错。
-- `RecognitionController` 在引擎不可用时记录警告并按设置回退（默认自动回退 whisper.cpp 并在诊断与 UI 中明示"本次会话已回退"），不中断播放。
+素材候选：JSUT（CC-BY-SA 4.0，单人朗读，带文本）用于 CER；用户自有 10 分钟对白素材仍是真机最终门（不入 Git、不进 CI）。
 
-### 4.3 Apple Speech 的窗口映射
+## 3. 执行步骤
 
-- 复用现有窗口规划：每个 `RecognitionWindow` 的 PCM 逐块追加进一个 `SFSpeechAudioBufferRecognitionRequest`，窗口耗尽即 `endAudio`；`bestTranscription` 变化映射为 partial 事件，`isFinal` 映射为 final 事件，媒体时间取窗口边界。
-- 窗口取消（seek/换片/暂停清空）必须终止对应请求并丢弃迟到结果。
-- 设备端识别可用时默认 `requiresOnDeviceRecognition = true`（零联网、隐私最优）；不可用但在用户选择联网识别时，UI 必须提示该语言会使用服务器识别。
+### Step 0：清理文档与死代码（纯本地）
 
-### 4.4 Live Captions 的定位与锚点
+- 删除 `NEW.md`、`docs/phase-1.md`；`README.md` 重写为一屏（项目定位、目录、CI 入口）；`docs/architecture.md` 清空待 Step 6 重写；本文件替换旧 `PLAN.md`。
+- 删除死代码：`SpeechRecognitionService` / `MockSpeechRecognitionService` / `WhisperCppSpeechRecognitionService`、`SubtitleTimeline`、`LegacyPlayerScreen`、`player_screen.dart` export 壳（`player_screen_phase2.dart` 改名 `player_screen.dart`）、`providers.dart` 中对应 provider。
+- 切 `refactor` 分支，`windows.yml` / `ios.yml` 触发加 `refactor`。
+- 完成条件：`flutter analyze` / `flutter test` 在 CI 通过。
 
-- 输出文本按到达顺序映射为低精度 `RecognitionEvent`，锚点取播放器当前媒体位置的最近窗口边界；UI 与导出明确标注来源为 Live Captions、时间为近似值。
-- 该引擎只用于开发验证与桌面可选场景，移动端设置中不出现；其事件不进入 whisper.cpp 的回归断言。
+### Step 1：CI 补齐原生构建与识别回归门
 
-## 5. 执行步骤
+- `windows.yml`：安装 Vulkan SDK；CMake 构建 `native/audio_decoder` 与 `native/speech_core`（`SPEECH_CORE_WITH_WHISPER=ON`、`GGML_VULKAN=ON`）到 `app/windows/CMakeLists.txt` 期望的路径；运行 CTest；`flutter build windows` 后校验包内存在两个 DLL。
+- 下载并校验（缓存）：kotoba-whisper-v2.0 fp16、`ggml-silero-v5.1.2.bin`、回归素材。
+- 运行 `speech_regression` 写 job summary，作为基线。
+- `build-windows-release.yml` 同样接入原生构建与模型打包；`build-unsigned-ios-ipa.yml` 改为只打包 VAD 模型、不再内置 547 MB 权重并断言包体不含权重。
+- 完成条件：Windows CI 产出含 DLL 的包；回归基线数字记入第 5 节。
 
-### Step 1：识别引擎设置模型与装配骨架
+### Step 2：原生识别核心重写（speech_core ABI v3）
 
-状态：`未开始`
+- `speech_core_recognize_options` 结构体承载 §2.1 全部参数；`speech_core_segment` 增加 `avg_logprob`、`no_speech_prob`、`compression_ratio`、token 级时间戳。
+- 新增 `speech_core_vad_*`：加载 Silero 模型，输入 PCM 输出语音段列表，供 Dart 切窗。
+- 新增 `speech_core_pcm_resample`：抗混叠重采样 + 下混；删除 `audio_ctx = 512`。
+- CTest：参数透传、VAD 分段、重采样（1 kHz + 14 kHz 合成信号验证 14 kHz 被滤除而非折叠）。
+- `speech_regression` 改用新 API，支持 `--vad --beam --prompt`，输出 CER。
+- 完成条件：CTest 通过；回归数字优于 Step 1 基线；iOS CI 编译通过。
 
-- 新增 `RecognitionEngineKind` 设置字段、持久化、默认值回退与设置页"识别引擎"分段控件（iOS 显示 Whisper/系统识别，Windows 显示 Whisper/系统字幕，其余平台仅 Whisper）。
-- `providers.dart` 按设置装配识别引擎；引擎不可见性/可用性不满足的平台只显示 Whisper。
-- 建立识别引擎状态契约（`RecognitionEngineStatus`）与探测接口，whisper.cpp 返回常驻可用。
+### Step 3：Dart 识别管线重建（`app/packages/recognition`）
 
-完成条件：设置可保存、重启恢复；旧 `settings.json` 打开不失败；默认行为与 Phase 8 完全一致。
+- 按 §2 目录实现 `config / pcm / segmenter / engine / gate / assembler / transcript / session`。
+- `TranscriptAssembler` 重写：CJK 感知规范化（保留假名）、时间 + 文本去重、日语句末形态与标点断句、显示宽度切行（36 半角格）。
+- `RecognitionSession` 取代 1496 行控制器：显式状态机（idle / running / paused / seeking / stopped）、单一有界队列、§2.1 水位、seek 即以新 generation 从目标位置重启切窗；旧 generation 结果全部丢弃。
+- 纯 Dart 单测：segmenter（合成 VAD 概率）、gate、assembler（日语固定用例）、session（fake engine）。
+- `windows.yml` / `ios.yml` 增加 `dart test` 步骤（包目录）。
+- 完成条件：包测试 + `flutter analyze` 通过。
 
-### Step 2：识别引擎状态、降级与控制器接线
+### Step 4：接线与平台层
 
-状态：`未开始`
+- Windows 解码器优先协商 16 kHz 单声道 float，失败退回原生格式交原生重采样；iOS 解码器输出原生格式交原生重采样。
+- `providers.dart` 装配新包；删除 `recognition_controller` / `audio_recognition_adapters` / `audio_window_planner` / 旧 `transcript_assembler` / `recognition_queue` / `whisper_cpp_speech_service`。
+- `RecognitionConfig` 由设置生成：识别语言（auto / ja / en / zh / …）、模型选择、VAD 开关、领先水位。
+- 模型管理：目录（kotoba fp16 / q5_0、turbo、Silero）+ 断点续传下载器 + SHA-256 校验；Windows 放程序目录 `models/`，iOS 放 Application Support；设置页可安装 / 删除。
+- 翻译队列适配新 `Transcript`（稳定 ID + `sourceText` 双重校验）。
+- `recognition_media_cache_worker` 拆为 `proxy_server / segment_cache / upstream_filler` 三个文件，行为不变。
+- 完成条件：CI 全绿；用户真机验收：日语素材首句不丢、无重复字幕行、译文跟随、seek 后 5 s 内出字幕。
 
-- `RecognitionController` 接入引擎状态：启动会话前探测；不可用时记录警告、自动回退 whisper.cpp 并在诊断与播放器状态区明示。
-- 引擎切换、换片、seek 与暂停清空时，旧引擎在途请求被取消或隔离，迟到结果不回写当前会话（沿用 generation 机制）。
-- 纯 Dart 单测覆盖：不可用回退、切换隔离、迟到结果丢弃、状态上报。
+### Step 5：播放器 UI 重做
 
-完成条件：任何引擎状态下，播放、字幕时间轴与翻译管线行为不劣于 Phase 8 基线。
+- `PlayerShell` 为唯一主页面：全幅视频面、自动隐藏控制层（3 s）、底部字幕层；浏览器 / 设置 / 诊断改为抽屉或弹层。
+- 控制层：点击 / 空格暂停，双击全屏，← / → 5 s，↑ / ↓ 音量，进度条 hover 时间预览与拖动预览；手机端左右滑 seek、上下滑音量。
+- 字幕层：双语 / 单语，字号可调，2.5 s 保持，译文未到显示原文。
+- 状态提示压缩为一条细状态线（缓冲 / 识别领先 / 翻译）；删除三行启动面板。
+- Material 3 深色 `ColorScheme` token 化，删除全部硬编码 hex。
+- Widget 测试：控制层显隐、键盘快捷键、字幕层显示模式。
+- 完成条件：CI 全绿；用户真机看外观与手感。
 
-### Step 3：iOS Apple Speech Adapter
+### Step 6：收尾与发布
 
-状态：`未开始`
+- 重写 `docs/architecture.md`；更新 `README.md`；版本 `0.11.0`。
+- 触发 `build-windows-release.yml` 与 `build-unsigned-ios-ipa.yml` 产出验收包。
+- 完成条件：两个发布包真机回归通过。
 
-- Swift 侧新增 `AppleSpeechBridge`（MethodChannel 模式同 `SystemTranslationBridge`）：授权请求与状态查询、locale 支持、`supportsOnDeviceRecognition`、按窗口创建 `SFSpeechAudioBufferRecognitionRequest`、partial/final 事件流、取消。
-- `Info.plist` 增加 `NSSpeechRecognitionUsageDescription`（中文说明，注明识别内容可能由系统处理）。
-- Dart 侧 `AppleSpeechRecognitionService` 实现 `WindowRecognitionService` 与状态契约；窗口 PCM 经通道喂入，事件带 requestId/sessionId 回显守卫。
-- 自动化：Dart 契约测试用 mock 通道覆盖授权拒绝、语言不支持、final 映射、取消与迟到丢弃；macOS CI 编译 iOS。
+## 4. 已知风险
 
-完成条件：真机上授权后可产出与 whisper.cpp 同结构的 `RecognitionEvent`，字幕时间取窗口媒体时间；拒绝授权或语言不支持时明确回退。
+- CI 上 Vulkan SDK 安装与 kotoba fp16（约 3 GB）下载耗时，依赖 `actions/cache` 命中；首轮会慢。
+- JSUT 是单人朗读，不代表电视对白噪声；CER 基线只保证"不劣化"，真机素材仍是最终门。
+- Silero VAD 对音乐 / 人群声的判断不是万能，门控阈值需按回归数据调整一到两轮。
+- iOS 侧原生重采样与 Metal 后端只能靠 CI 编译 + 用户真机验证，无法在 CI 运行推理。
 
-### Step 4：Windows Live Captions 调研与 Adapter
+## 5. 执行记录
 
-状态：`未开始`
-
-- 先做可行性 spike：Windows 11 版本检测、Live Captions 启用状态探测、UI Automation 读取字幕文本的技术路径与稳定性（窗口类名/文本节点可能在系统更新中变化，需容错与版本标注）。
-- 依据调研结果实现 `WindowsLiveCaptionsService`：默认关闭；启用时输出低精度 `RecognitionEvent`；系统不支持或功能未开启时返回明确状态与开启指引。
-- 明确该引擎"开发验证工具"定位：用于快速验证翻译 Provider、Overlay、历史与导出工作流；文档与 UI 注明时间近似。
-
-完成条件：Windows 11 环境可开关；不可用环境清晰降级；调研结论（含 UI Automation 的脆弱性风险）写入执行记录。
-
-### Step 5：设置页与诊断集成
-
-状态：`未开始`
-
-- 识别引擎分段的说明文案包含隐私/网络提示：Apple Speech 设备端识别零联网，联网语言会提示；Live Captions 完全本机。
-- 引擎状态、授权入口、回退事件进入诊断日志（信息/警告分级遵循五级体系）。
-- 诊断页能区分事件来源引擎（whisper/system），export 字段与脱敏策略不变。
-
-完成条件：用户可以在设置中选择、关闭、查看状态与授权；诊断可追溯引擎与回退原因。
-
-### Step 6：跨模块集成、回归与结项
-
-状态：`未开始`
-
-- 回归：whisper.cpp 固定素材回归结果与 Phase 8 基线完全一致（系统 Provider 代码不得影响该路径）；识别引擎切换 × 换片 × seek × 翻译并行的组合测试。
-- 真机：iPhone 上 Apple Speech 授权、单句/连续识别、取消、换片、回退；Windows 11 上 Live Captions 验证翻译/Overlay/历史/导出工作流。
-- 运行 `dart analyze lib test`、`flutter analyze`、`flutter test --concurrency=1`；iOS 构建走 macOS CI 产出未签名 IPA 并真机回归。
-- 更新 `NEW.md` 实际进度，只记录已验证行为。
-
-完成条件：验收清单全部通过，`NEW.md` 记录 Phase 9 结项。
-
-## 6. 本阶段范围边界
-
-包含：识别引擎设置与状态契约、引擎降级回退、iOS Apple Speech adapter（Swift + Dart + 授权）、Windows Live Captions 调研与 adapter、设置页与诊断集成、相关自动化与真机回归。
-
-不包含：Android 系统识别、whisper.cpp 模型更换或量化调整、识别控制器核心调度重写、Live Captions 的生产级时间轴精确化、永久字幕历史数据库、与识别引擎无关的视觉重构。
-
-## 7. 验收清单
-
-- [ ] 设置提供识别引擎选择，持久化且旧设置文件兼容；默认 whisper.cpp，行为与 Phase 8 一致。
-- [ ] Apple Speech：授权请求只在用户主动操作时触发；授权后能产出结构一致的 `RecognitionEvent`，媒体时间取自窗口；取消/换片/seek 不串会话。
-- [ ] Apple Speech：拒绝授权、语言不支持或不可用时明确降级回 whisper.cpp，播放与字幕不受影响。
-- [ ] Live Captions：仅 Windows 11 且功能可用时可选；输出标注低精度时间与来源；不可用环境清晰降级。
-- [ ] 两种系统 Provider 都可独立测试与禁用；其输出不污染 whisper.cpp 固定素材回归。
-- [ ] 引擎状态、回退与授权事件可在诊断日志追溯；Release 脱敏策略不变。
-- [ ] `dart analyze lib test`、`flutter analyze`、`flutter test --concurrency=1` 通过；iOS 未签名 IPA 构建并完成真机回归；Windows Release smoke 通过。
-
-## 8. 本轮执行记录
-
-| 日期 | 项目 | 状态 | 说明 |
+| 日期 | Step | 状态 | 说明 |
 |---|---|---|---|
-| 2026-08-22 | Phase 9 计划制定 | 已完成 | Phase 8 验收结项（见第 0 节与 `NEW.md`）；依据 `NEW.md` Phase 9 要求制定本计划：识别引擎设置与状态契约、iOS Apple Speech adapter、Windows Live Captions 调研与 adapter、降级回退与诊断集成。 |
+| 2026-09-15 | 计划制定 | 已完成 | 基于 `main` @ `30dce48` 代码审查；等待用户确认开始 |
+| 2026-09-15 | Step 0 | 代码完成，待 CI | 删除 `NEW.md`、`docs/phase-1.md`；`README.md` 重写；删除旧识别接口、`SubtitleTimeline`、`LegacyPlayerScreen` 等死代码；分支 `refactor` |
+| 2026-09-15 | Step 1 | 代码完成，待 CI | `windows.yml`：Vulkan SDK（缓存）、audio_decoder 与 speech_core（CPU 用于测试/回归，Vulkan 用于打包）、CTest、`dart test`、Flutter 测试、JSUT 前 20 条回归（job summary + JSON artifact）、包内 DLL/VAD 校验；`ios.yml` 增加 CPU CTest 与包测试；发布 workflow 改为只打包 VAD 模型，IPA 不再内置权重 |
+| 2026-09-15 | Step 2 | 代码完成，待 CI | speech_core ABI v3：`speech_core_recognize_options`（beam/温度回退/熵/logprob/no-speech/prompt/token 时间戳/audio_ctx=0）、段级 avg_logprob/no_speech_prob/repetition、Silero VAD API、流式抗混叠重采样器、静默日志；CTest 覆盖重采样混叠/流式一致性/VAD；`speech_regression` 改用新 API |
+| 2026-09-15 | Step 3 | 代码完成，待 CI | `app/packages/recognition`：config/pcm/normalizer/vad/segmenter/engine/gate/assembler/transcript/session + 6 组单测 + `bin/regression.dart`（CER、首段偏差、阈值可选） |
+| 2026-09-15 | Step 4 | 代码完成，待 CI | `WindowsPcmSource`/`IosPcmSource`、`RecognitionMediaResolver`、`WhisperModelCatalog`/`WhisperModelStore`（断点续传 + SHA-256）、`TranscriptStore`、`RecognitionService`；设置新增识别语言/模型/VAD/目标语言/字号；翻译队列改接 `TranscriptStore`；Windows 解码器优先协商 16 kHz 单声道；AppDelegate 删除模型通道；CMake 打包 `windows/models/`。**偏离：** `recognition_media_cache_worker` 未拆分（无编译器条件下盲改 2k 行网络代码风险过高，行为保持不变，后续单独处理） |
+| 2026-09-15 | Step 5 | 代码完成，待 CI | `PlayerShell` + `PlayerOverlay`（自动隐藏控制层、键盘/手势、进度 hover 预览、音量/倍速/字幕模式/全屏）+ `SubtitleLayer`（2.5 s 保持、字号）+ `PlaybackGate`；设置/诊断改为独立页面；Material 3 token 主题；widget 测试与门控单测 |
+| 2026-09-15 | Step 6 | 文档完成 | `docs/architecture.md` 重写；版本 `0.11.0`；发布待 Step 1–5 CI 全绿与真机验收后触发 |
+
+### 待用户操作
+
+1. 配置 git 身份与推送凭据，将 `refactor` 分支推送到 GitHub 触发 `windows.yml` 与 `ios.yml`。
+2. 首轮 CI 大概率有编译错误（全部代码在无工具链环境下编写）；按 CI 日志逐项修复后再进入真机验收。
+3. 真机验收（§3 Step 4/5 完成条件）：Windows 与 iPhone 各跑一段日语素材。

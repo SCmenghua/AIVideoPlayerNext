@@ -1,53 +1,61 @@
 {
-  "schemaVersion": 1,
-  "phase": 5,
+  "schemaVersion": 2,
   "models": [
+    {
+      "modelId": "ggml-kotoba-whisper-v2.0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin",
+      "license": "Apache-2.0",
+      "sha256": "eff70a8a236e731abba774ba71e1f6d0fce53302137208c32207e694e0bf4546",
+      "sizeBytes": 1519521155,
+      "role": "default Japanese recognition model"
+    },
+    {
+      "modelId": "ggml-kotoba-whisper-v2.0-q5_0",
+      "engine": "whisper.cpp",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin",
+      "license": "Apache-2.0",
+      "sha256": "4a3b92192b5d3578ff854a5876213e2e27af0c2d357492c2d14271e82c303658",
+      "sizeBytes": 537819875,
+      "role": "small Japanese recognition model"
+    },
     {
       "modelId": "ggml-large-v3-turbo-q5_0",
       "engine": "whisper.cpp",
       "engineVersion": "v1.7.6",
       "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
       "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-      "sourceRevision": "5359861c739e955e79d9a303bcbc70fb988958b1",
       "license": "MIT",
-      "sha256": "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2",
-      "sizeBytes": 574041195
-    }
-  ],
-  "assets": [
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+      "sizeBytes": 574041195,
+      "role": "multilingual recognition model"
+    },
     {
-      "assetId": "phase5-en-generated",
-      "license": "Project-owned local Windows SAPI generated speech; not distributed.",
-      "language": "en",
-      "inputSampleRate": 16000,
-      "inputChannels": 1,
-      "durationMs": 47895,
-      "backgroundNoise": "None intentionally added; synthetic local voice.",
-      "expectedText": "This is a fixed local speech recognition benchmark for the AI Video Player Next project. The audio is generated locally for engineering tests and is not uploaded. We are testing timestamp, transcription, language detection, and the complete path from a WAV file to a native speech event. The first sentence is short. The second sentence is longer and contains several pauses, so the recognizer must preserve useful segment boundaries. The final sentence confirms that cancellation, session isolation, and diagnostic fields will be checked after the basic recognition path is stable.",
-      "allowedTimingErrorMs": 1200,
-      "knownLimitations": "The local WAV and its absolute path are intentionally excluded from Git. The 2026-08-16 CPU regression with auto language detection produced seven final segments, detected en, and completed at a realtime factor of 1.05725."
+      "modelId": "ggml-silero-v5.1.2",
+      "engine": "whisper.cpp VAD",
+      "engineVersion": "v1.7.6",
+      "engineCommit": "a8d002cfd879315632a579e73f0148d06959de36",
+      "source": "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin",
+      "license": "MIT",
+      "sha256": "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+      "sizeBytes": 885098,
+      "role": "voice activity detection; bundled with every build"
     }
   ],
+  "regression": {
+    "dataset": "japanese-asr/ja_asr.jsut_basic5000 (JSUT basic5000, CC-BY-SA 4.0), first 20 rows of data/test-00000-of-00004.parquet",
+    "runner": "app/packages/recognition/bin/regression.dart",
+    "workflow": ".github/workflows/windows.yml",
+    "metrics": ["overallCer", "medianCer", "medianStartDeviationMs", "missingClips", "realtimeFactor"],
+    "note": "Single-speaker read speech; it guards against regressions and does not represent television dialogue. The user's own 10-minute material remains the real-device gate."
+  },
   "requirements": {
     "license": "Record explicit ownership or permission for every local asset.",
-    "audio": "Use a 30 second to 2 minute authorized speech WAV; normalized output is 16 kHz, mono, Float32 PCM.",
-    "metadata": [
-      "assetId",
-      "license",
-      "language",
-      "inputSampleRate",
-      "inputChannels",
-      "durationMs",
-      "backgroundNoise",
-      "expectedText",
-      "allowedTimingErrorMs",
-      "knownLimitations"
-    ],
-    "comparison": {
-      "text": "Trim each segment, normalize contiguous whitespace and ASCII case, then compare the concatenated transcript.",
-      "language": "The detected language must equal the asset language.",
-      "timing": "Every emitted segment must have startMs >= 0, endMs > startMs, and endMs <= durationMs + allowedTimingErrorMs.",
-      "segments": "At least one final segment is required. Adjacent short segments may merge or split."
-    }
+    "audio": "Normalized pipeline input is 16 kHz, mono, Float32 PCM produced by speech_core's anti-aliased resampler.",
+    "policy": "Model weights, regression audio and results never enter Git; CI downloads and verifies them by SHA-256."
   }
 }

@@ -12,13 +12,17 @@ on:
 permissions:
   contents: write
 
+env:
+  WHISPER_CPP_COMMIT: a8d002cfd879315632a579e73f0148d06959de36
+  VULKAN_SDK_VERSION: 1.4.309.0
+  VAD_MODEL_URL: https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+  VAD_MODEL_SHA256: 29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf
+  VAD_MODEL_SIZE: "885098"
+
 jobs:
   build-windows-release:
     name: Build Windows release
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: app
 
     steps:
       - name: Check out source
@@ -29,17 +33,76 @@ jobs:
         with:
           channel: stable
 
+      - name: Prepare pinned whisper.cpp source
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'whisper.cpp'
+          git init $dir
+          git -C $dir remote add origin https://github.com/ggerganov/whisper.cpp.git
+          git -C $dir fetch --depth 1 origin $env:WHISPER_CPP_COMMIT
+          git -C $dir checkout --detach FETCH_HEAD
+          "WHISPER_CPP_SOURCE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache Vulkan SDK
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install Vulkan SDK
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'VulkanSDK-Installer.exe'
+          curl.exe --fail --location --retry 3 --output $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/VulkanSDK-$env:VULKAN_SDK_VERSION-Installer.exe"
+          & $installer --accept-licenses --default-answer --confirm-command install
+          if (-not (Test-Path "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Bin\glslc.exe")) { throw 'glslc.exe missing after Vulkan SDK install' }
+
+      - name: Export Vulkan SDK environment
+        shell: pwsh
+        run: |
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "C:\VulkanSDK\$env:VULKAN_SDK_VERSION\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build native libraries
+        shell: pwsh
+        run: |
+          cmake -S native/audio_decoder -B native/audio_decoder/build-vs -A x64
+          cmake --build native/audio_decoder/build-vs --config Release
+          cmake -S native/speech_core -B native/speech_core/build-whisper-vulkan -A x64 `
+            -DSPEECH_CORE_WITH_WHISPER=ON -DGGML_VULKAN=ON `
+            -DWHISPER_CPP_SOURCE_DIR="$env:WHISPER_CPP_SOURCE_DIR"
+          cmake --build native/speech_core/build-whisper-vulkan --config Release --target speech_core
+          foreach ($file in @('native/audio_decoder/build-vs/Release/ai_audio_decoder.dll', 'native/speech_core/build-whisper-vulkan/Release/speech_core.dll')) {
+            if (-not (Test-Path $file)) { throw "$file was not produced" }
+          }
+
+      - name: Download and stage the VAD model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app/windows/models | Out-Null
+          $path = 'app/windows/models/ggml-silero-v5.1.2.bin'
+          curl.exe --fail --location --retry 3 --retry-delay 5 --output $path $env:VAD_MODEL_URL
+          if ((Get-Item $path).Length -ne [int64]$env:VAD_MODEL_SIZE) { throw 'VAD model size mismatch' }
+          $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:VAD_MODEL_SHA256) { throw "VAD model SHA-256 mismatch: $actual" }
+
       - name: Resolve Flutter packages
+        working-directory: app
         run: flutter pub get
 
       - name: Run Dart analysis
+        working-directory: app
         run: flutter analyze
 
       - name: Run Flutter tests
+        working-directory: app
         run: flutter test
 
       - name: Set build identity
         shell: pwsh
+        working-directory: app
         run: |
           $appVersion = (Select-String -Path pubspec.yaml -Pattern '^version:\s*([^+\s]+)' | Select-Object -First 1).Matches[0].Groups[1].Value
           $appBuildTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'
@@ -53,6 +116,7 @@ jobs:
           Write-Host "构建编号：$appBuildId"
 
       - name: Build Windows application
+        working-directory: app
         run: >
           flutter build windows --release
           --dart-define=APP_VERSION="${{ env.APP_VERSION }}"
@@ -61,11 +125,16 @@ jobs:
 
       - name: Package Windows application
         shell: pwsh
+        working-directory: app
         run: |
           $releaseDirectory = Join-Path $PWD 'build/windows/x64/runner/Release'
           if (-not (Test-Path (Join-Path $releaseDirectory '*.exe'))) {
             throw 'Windows Release 目录中没有找到主程序 exe。'
           }
+          foreach ($file in @('ai_audio_decoder.dll', 'speech_core.dll', 'models/ggml-silero-v5.1.2.bin')) {
+            if (-not (Test-Path (Join-Path $releaseDirectory $file))) { throw "$file missing from the Windows package" }
+          }
+          if (Test-Path (Join-Path $releaseDirectory 'vulkan-1.dll')) { throw 'the package must not ship its own vulkan-1.dll' }
           $packageDirectory = Join-Path $env:RUNNER_TEMP "ai-video-player-next-$env:APP_VERSION-windows"
           New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
           Copy-Item -Path (Join-Path $releaseDirectory '*') -Destination $packageDirectory -Recurse -Force
@@ -92,6 +161,7 @@ jobs:
             - Build ID: ${{ env.APP_BUILD_ID }}
             - Commit: ${{ github.sha }}
             - Channel: ${{ inputs.release_channel }}
+            - Whisper weights are downloaded inside the app on first use; the package bundles only the Silero VAD model.
           files: ${{ env.WINDOWS_PACKAGE }}
           draft: false
           prerelease: false

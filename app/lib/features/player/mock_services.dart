@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import '../../domain/player/player_service.dart';
-import '../../domain/speech/speech_models.dart';
 import '../../domain/translation/translation_service.dart';
 
 class MockPlayerService implements PlayerService {
@@ -82,51 +81,6 @@ class MockPlayerService implements PlayerService {
     _timer?.cancel();
     await _controller.close();
   }
-}
-
-class MockSpeechRecognitionService implements SpeechRecognitionService {
-  final StreamController<RecognitionEvent> _controller =
-      StreamController.broadcast();
-  String? _sessionId;
-
-  @override
-  Stream<RecognitionEvent> get events => _controller.stream;
-
-  @override
-  Future<void> start(RecognitionRequest request) async {
-    _sessionId = request.sessionId;
-    final start = request.from + const Duration(seconds: 1);
-    _controller.add(RecognitionEvent(
-      sessionId: request.sessionId,
-      segmentId: '${request.sessionId}-1',
-      start: start,
-      end: start + const Duration(seconds: 3),
-      text: '这是模拟识别服务生成的预览字幕。',
-      language: 'zh',
-      kind: RecognitionKind.partial,
-      source: RecognitionSource.whisperCpp,
-      confidence: 0.72,
-    ));
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-    if (_sessionId != request.sessionId) return;
-    _controller.add(RecognitionEvent(
-      sessionId: request.sessionId,
-      segmentId: '${request.sessionId}-1',
-      start: start,
-      end: start + const Duration(seconds: 3),
-      text: '这是模拟识别服务生成的正式字幕。',
-      language: 'zh',
-      kind: RecognitionKind.finalResult,
-      source: RecognitionSource.whisperCpp,
-      confidence: 0.94,
-    ));
-  }
-
-  @override
-  Future<void> stop() async => _sessionId = null;
-
-  @override
-  Future<void> reset({required Duration position}) async => _sessionId = null;
 }
 
 class MockTranslationService implements TranslationService {
