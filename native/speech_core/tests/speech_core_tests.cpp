@@ -207,7 +207,8 @@ void test_wav_loader() {
         "wav decode");
   check(pcm.sample_rate == 16000, "wav rate");
   check(pcm.channels == 1, "wav channels");
-  check(pcm.sample_count >= 15 && pcm.sample_count <= 17, "wav sample count");
+  // Four stereo frames at 8 kHz become eight mono samples at 16 kHz.
+  check(pcm.sample_count >= 7 && pcm.sample_count <= 9, "wav sample count");
   check(diagnostics.input_sample_rate == 8000, "wav input rate");
   check(diagnostics.input_channels == 2, "wav input channels");
   speech_core_pcm_buffer_free(&pcm);

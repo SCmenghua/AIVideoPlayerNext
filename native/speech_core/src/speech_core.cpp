@@ -111,7 +111,8 @@ float text_repetition(const char* text) {
       continue;
     }
     index += length;
-    if (value == U' ' || value == U'　' || value == U'\n' || value == U'\t') {
+    // Space, ideographic space, newline, tab.
+    if (value == 0x20 || value == 0x3000 || value == 0x0A || value == 0x09) {
       continue;
     }
     points.push_back(value);
