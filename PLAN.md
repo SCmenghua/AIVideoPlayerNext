@@ -174,9 +174,15 @@ CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符�
 | 2026-09-15 | Step 4 | 代码完成，待 CI | `WindowsPcmSource`/`IosPcmSource`、`RecognitionMediaResolver`、`WhisperModelCatalog`/`WhisperModelStore`（断点续传 + SHA-256）、`TranscriptStore`、`RecognitionService`；设置新增识别语言/模型/VAD/目标语言/字号；翻译队列改接 `TranscriptStore`；Windows 解码器优先协商 16 kHz 单声道；AppDelegate 删除模型通道；CMake 打包 `windows/models/`。**偏离：** `recognition_media_cache_worker` 未拆分（无编译器条件下盲改 2k 行网络代码风险过高，行为保持不变，后续单独处理） |
 | 2026-09-15 | Step 5 | 代码完成，待 CI | `PlayerShell` + `PlayerOverlay`（自动隐藏控制层、键盘/手势、进度 hover 预览、音量/倍速/字幕模式/全屏）+ `SubtitleLayer`（2.5 s 保持、字号）+ `PlaybackGate`；设置/诊断改为独立页面；Material 3 token 主题；widget 测试与门控单测 |
 | 2026-09-15 | Step 6 | 文档完成 | `docs/architecture.md` 重写；版本 `0.11.0`；发布待 Step 1–5 CI 全绿与真机验收后触发 |
+| 2026-09-17 | Phase 11 Step A | 代码完成，待 CI | 回归口径：`--gap` 默认改为 `longSilence + 0.5 s`（2.0 s）并拒绝更小的值；报告新增窗口亏空、无人认领的片段、按原因分类的丢弃明细；`--no-context` 开关。`识别窗口完成` 日志补窗口起止与切分原因。切窗阈值写成两条单测。`WhisperModelSpec.usesInitialPrompt` + 设置页"识别上下文"三态（跟随模型/开/关）；目录加入 Anime Whisper fp16 与 q5_0（均标记不使用 initial prompt） |
 | 2026-09-15 | CI 首轮通过 | 已完成 | `refactor` @ `e37ab15`，7 轮修复后 `windows.yml` 与 `ios.yml` 全绿：原生 CTest、Dart 包 28 项、Flutter 139 项、Windows 包内 DLL/VAD 校验、iOS 编译。修复内容均为盲写错误（MSVC 字面量、测试期望、接口未 `implements`、import 路径、`dispose` 内用 `ref`、控制条溢出）与 Vulkan 构建 MAX_PATH 问题 |
 
-### 识别回归基线（CI，JSUT 前 20 条，kotoba-whisper-v2.0 fp16 + Silero VAD，CPU 4 线程）
+### 识别回归基线（作废，见 §6.1.1）
+
+下表是 `--gap 1.0` 下测得的，窗口横跨多条 clip，逐条认领不可信。保留仅作历史记录，
+不再作为任何改动的判据；新基线待 Phase 11 Step A 的 CI 运行产生后替换。
+
+<details><summary>旧基线（CI，JSUT 前 20 条，kotoba-whisper-v2.0 fp16 + Silero VAD，CPU 4 线程）</summary>
 
 | 指标 | 值 |
 |---|---|
@@ -187,9 +193,104 @@ CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符�
 | 窗口 / 片段 / 丢弃 | 18 / 30 / 0 |
 | 实时倍率（CI CPU） | 5.92（GPU 真机另计） |
 
-后续每轮改动以此为基线：总体 CER 或起点偏差劣化即视为未完成。
+</details>
 
 ### 待用户操作
 
 1. 真机验收（§3 Step 4/5 完成条件）：手动触发 `build-windows-release.yml` 与 `build-unsigned-ios-ipa.yml`，Windows 与 iPhone 各跑一段日语素材；首次启动会提示下载 kotoba 模型（1.5 GB）。
 2. 验收通过后合并 `refactor` 到 `main`。
+
+## 6. Phase 11：第二识别引擎（Qwen3-ASR via transcribe.cpp）
+
+> 制定日期：2026-09-17
+> 起因：重构后识别仍不准。用户症状三项并存：字词错、整句漏掉不出字幕、重复或凭空编造。
+> 目标平台已明确：**最终目标是 iOS（A19）**，Windows 只作开发期辅助。
+
+### 6.1 症状归因
+
+| 症状 | 归因 | 对策 |
+|---|---|---|
+| 字词识别错 | 模型能力 | 换引擎（§6.2） |
+| 整句漏掉，不出字幕 | 待查。只有真机观察，无可信量化证据（见 §6.1.1） | Step A 修好度量后重新定位 |
+| 重复或凭空编造 | whisper 自回归幻觉 | 换引擎 + 保留并强化文本侧重复检测 |
+
+换模型只解决第一项。第二项必须独立查清，否则新引擎会继承同一条丢弃路径。
+
+#### 6.1.1 §5 的回归基线不可信
+
+`bin/regression.dart` 把全部 clip 首尾拼成一条流，间隔 `--gap` 默认 1.0 s，跑单个 session
+（`regression.dart:182-198`）。但 §2.1 的切窗规则在 1.0 s 间隔上都不成立：
+`longSilence` 要 1500 ms；`minSilence` 500 ms 要求窗口已累积 ≥ `minCutWindow` 6 s，
+而 JSUT 单条只有 4–5 s；`shortSilence` 要求 ≥ 20 s。结果是一个窗口横跨多条 clip——
+基线里"窗口 / 片段 = 18 / 30"对应 20 条 clip，正是这个现象。
+
+打分却按 clip 时间区间认领段（段中点落在 `[offset−gap/2, offset+duration+gap/2)`，
+`regression.dart:255-260`）。窗口跨 clip 时，段时间戳偏移、或组装器跨 clip 合并
+（`assembler.dart:69`：上一句未结束且间隔 ≤ 300 ms 即并），会让一条 clip 认领到两段文本、
+相邻一条认领到零段。
+
+**因此基线中"1 / 20 无输出"大概率是度量假象而非识别漏句，11.34% 也混入了拼接边界的错配。**
+连带影响：这条回归门是 Step 2–5 每一步"不劣化"的判据，其噪声意味着"重构未使识别劣化"
+这一结论的置信度低于 §5 记录的措辞。重构修掉的十项硬伤本身与该门无关，仍然成立；
+但重构究竟带来多少提升，目前没有可信数字。
+
+### 6.2 选型
+
+第二引擎运行时：**`handy-computer/transcribe.cpp`**（MIT，ggml 底座，Metal / Vulkan / CUDA，
+单头 C ABI `include/transcribe.h` + `transcribe.abihash` 摘要）。与现有 speech_core 同构：
+静态构建（`TRANSCRIBE_BUILD_SHARED=OFF` 为默认）、Apple Silicon 自动 `TRANSCRIBE_METAL=ON`
+且 `GGML_METAL_EMBED_LIBRARY=ON`（无需单独 metallib）、`transcribe_backend_request` 与
+`SpeechBackend` 一一对应、`transcribe_set_abort_callback` 对应现有 cancel 语义。
+
+模型：**Qwen3-ASR**（Apache-2.0，音频编码器 + Qwen3 因果 LM，30 语种自动识别）。
+
+| 变体 | 参数 | FLEURS ja CER (q8_0) | q8_0 体积 | 备注 |
+|---|---|---|---|---|
+| `qwen3-asr-1.7b` | 2B | **5.29%** | 2.19 GB | iOS 主力候选；另有 Q6_K 1.69 GB / Q4_K_M 1.32 GB |
+| `qwen3-asr-0.6b` | 782M | 约差 0.5pp | 850 MB | 降级档 / CI 回归用 |
+
+选它而不是日语专用模型，因为用户素材混杂（动画、真人、综艺都有），通用最强项优于单域最强项。
+
+同时加进目录但不作主力：
+
+- `litagin/anime-whisper`（MIT，base 即 kotoba-whisper-v2.0，5300 小时动画/Galgame 微调）。
+  架构与现有 speech_core 完全一致，`Aratako/anime-whisper-ggml` 已有全套量化，接入成本≈加一条目录条目。
+  **模型卡明确要求关闭 initial prompt**，否则严重幻觉——这也是 `contextEnabled` 需要按模型可关的直接原因。
+- ReazonSpeech NeMo v2（FastConformer-RNNT，3.5 万小时日本电视音频，自带 token 时间戳、结构上无幻觉循环）
+  暂不纳入：只覆盖日语，且需先验证能否经 transcribe.cpp 的 parakeet 转换器进同一运行时。留作 Phase 11 之后的备选。
+
+### 6.3 管线改动
+
+Qwen3-ASR **不输出时间戳、不接 initial prompt**（transcribe.cpp 的能力表如此声明）。因此：
+
+- `SpeechSegmenter` 增加 `utterance` 模式：一个 VAD 语音段（合并 <300 ms 间隙，上限约 15 s 强制切）
+  = 一个识别窗 = 一条字幕，时间直接取 VAD 边界。字幕定时改由 VAD 负责，不再依赖模型吐的时间戳。
+- 引入 `EngineCapabilities`（timestamps: none/segment/word/token、hasConfidence、acceptsPrompt）。
+  `SegmentGate` 对无置信度引擎跳过 `avgLogprob` / `noSpeechProb` 分支，只跑空文本、黑名单、
+  n-gram 重复与跨窗整窗重复；utterance 模式下不再需要把段时间 clamp 进语音区间。
+- `contextEnabled` 按引擎能力与模型自动关闭。
+
+Dart 侧直接绑定 `transcribe.h` 的子集，**不再写新的 C++ 封装层**——本地无编译器，盲写 C++ 是
+Step 0–5 里唯一反复出错的部分（§5 记录的 7 轮 CI 修复几乎全是盲写错误）。
+
+### 6.4 执行步骤
+
+| Step | 内容 | 完成条件 |
+|---|---|---|
+| A | 修回归度量（§6.1.1）：`--gap` 默认提到 2.0 s 使 `longSilence` 能切开每条 clip，断言窗口数 == clip 数（跨 clip 合并即 CI 红），报告输出每个丢弃段的原因与时间；`contextEnabled` 改为按模型可关。重跑并以新数字替换 §5 基线 | 窗口与 clip 一一对应；新基线记入 §5，旧基线标注作废 |
+| B | CI 接 transcribe.cpp：pin commit，Windows Vulkan 共享库、iOS 静态归档合并；断言 `transcribe.abihash` 未漂移；冒烟测试（加载 + `samples/jfk.wav`） | `windows.yml` / `ios.yml` 绿，包内产物校验通过 |
+| C | `TranscribeEngine`（worker isolate + FFI）、`EngineCapabilities`、utterance 切窗、门控降级、模型目录泛化为按引擎分类 | 包测试 + `flutter analyze` 通过 |
+| D | `regression.dart --engine`；CI 上 kotoba 与 `qwen3-asr-0.6b` 双跑同一语料；诊断页加双引擎对照视图 | 两条 CER 数字并列写入 job summary |
+| E | iOS 真机：量化档位按内存与 RTF 定案，发未签名 IPA 验收 | 用户在 iPhone 上跑自有素材，三项症状逐条对照 |
+
+Step A 与 Step B 无依赖，可并行。
+
+### 6.5 风险
+
+- transcribe.cpp 处于 0.2.0 开发期，ABI 会动：必须 pin commit 并在 CI 断言 `transcribe.abihash`。
+- 字幕定时完全交给 Silero VAD：BGM 与人群声下 VAD 成为新瓶颈。若 utterance 模式时间不稳，
+  需调阈值或补一次强制对齐。
+- iOS 内存：1.7B Q8_0 2.19 GB 与视频解码、Flutter 共存，需真机 jetsam 验证；
+  降级路径 Q6_K → Q4_K_M → 0.6B。
+- 短窗多次跑自回归 LLM，总开销高于长窗；A19 Metal 的实际 RTF 只能真机测。
+- 现有 JSUT 基线是单人朗读，测不出混杂素材的问题。Step D 的双跑只用于防劣化，最终门仍是 Step E。

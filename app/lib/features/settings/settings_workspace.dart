@@ -423,6 +423,38 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
           value: recognition.vadEnabled,
           onChanged: controller.setVadEnabled,
         ),
+        const SizedBox(height: 8),
+        const Text('识别上下文（initial prompt）'),
+        const SizedBox(height: 6),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'auto', label: Text('跟随模型')),
+            ButtonSegment(value: 'on', label: Text('开')),
+            ButtonSegment(value: 'off', label: Text('关')),
+          ],
+          selected: {
+            switch (recognition.contextEnabled) {
+              true => 'on',
+              false => 'off',
+              _ => 'auto',
+            }
+          },
+          onSelectionChanged: (selection) => controller.setRecognitionContextEnabled(
+            switch (selection.first) {
+              'on' => true,
+              'off' => false,
+              _ => null,
+            },
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '把上一个窗口的结尾喂给下一个窗口，有助于术语与人名一致，但部分微调权重'
+          '（如 Anime Whisper）会因此严重幻觉。当前生效：'
+          '${recognition.effectiveContextEnabled ? '开' : '关'}。',
+          style: TextStyle(color: hint),
+        ),
+        const SizedBox(height: 8),
         Text(
           '模型按需下载到应用数据目录，切换语言或模型后当前媒体会从当前位置重新识别。',
           style: TextStyle(color: hint),

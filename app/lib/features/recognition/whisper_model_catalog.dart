@@ -11,6 +11,7 @@ class WhisperModelSpec {
     required this.sha256,
     required this.sizeBytes,
     this.japaneseOnly = false,
+    this.usesInitialPrompt = true,
   });
 
   final String id;
@@ -24,6 +25,11 @@ class WhisperModelSpec {
   final String sha256;
   final int sizeBytes;
   final bool japaneseOnly;
+
+  /// Whether the weight tolerates the previous window's text as an
+  /// `initial_prompt`. Fine-tunes trained on single utterances tend to
+  /// hallucinate when primed, and say so on their model cards.
+  final bool usesInitialPrompt;
 
   /// Whether this weight fits comfortably in a mobile app's memory budget.
   bool get fitsMobileMemory => sizeBytes < 700 * 1024 * 1024;
@@ -68,6 +74,37 @@ class WhisperModelCatalog {
     japaneseOnly: true,
   );
 
+  static final animeWhisper = WhisperModelSpec(
+    id: 'anime-whisper',
+    fileName: 'ggml-anime-whisper.bin',
+    kind: WhisperModelKind.recognition,
+    label: 'Anime Whisper（日语动画/游戏配音）',
+    description: '在 5300 小时动画与 Galgame 配音上微调的 Kotoba Whisper v2.0：'
+        '句读贴合语气，言い淀み与笑声照写。作者要求关闭识别上下文，否则会严重幻觉。仅支持日语。',
+    url: Uri.parse(
+      'https://huggingface.co/Aratako/anime-whisper-ggml/resolve/main/ggml-anime-whisper.bin',
+    ),
+    sha256: 'bce42c15312fcdbdcc8432b2ce63ba967f4cc3d2cc783fd6ab2ba264caf0db8d',
+    sizeBytes: 1519521155,
+    japaneseOnly: true,
+    usesInitialPrompt: false,
+  );
+
+  static final animeWhisperQ5 = WhisperModelSpec(
+    id: 'anime-whisper-q5_0',
+    fileName: 'ggml-anime-whisper-q5_0.bin',
+    kind: WhisperModelKind.recognition,
+    label: 'Anime Whisper q5_0（日语动画/游戏配音，小体积）',
+    description: '同上的 5-bit 量化版本，体积约三分之一。同样需要关闭识别上下文。仅支持日语。',
+    url: Uri.parse(
+      'https://huggingface.co/Aratako/anime-whisper-ggml/resolve/main/ggml-anime-whisper-q5_0.bin',
+    ),
+    sha256: 'd5b6111bc84107bc641413516a9af083820014ea175ae3a42be05499b86d155c',
+    sizeBytes: 537819875,
+    japaneseOnly: true,
+    usesInitialPrompt: false,
+  );
+
   static final largeV3TurboQ5 = WhisperModelSpec(
     id: 'large-v3-turbo-q5_0',
     fileName: 'ggml-large-v3-turbo-q5_0.bin',
@@ -97,6 +134,8 @@ class WhisperModelCatalog {
   static final List<WhisperModelSpec> recognitionModels = [
     kotobaV2,
     kotobaV2Q5,
+    animeWhisper,
+    animeWhisperQ5,
     largeV3TurboQ5,
   ];
 

@@ -93,6 +93,7 @@ class RecognitionSettings {
     this.language = 'ja',
     this.modelId,
     this.vadEnabled = true,
+    this.contextEnabled,
   });
 
   final String language;
@@ -100,6 +101,10 @@ class RecognitionSettings {
   /// Null selects the catalog default for [language].
   final String? modelId;
   final bool vadEnabled;
+
+  /// Feed the previous window's tail as the next `initial_prompt`. Null
+  /// follows the selected weight's own recommendation.
+  final bool? contextEnabled;
 
   /// True on platforms where a large weight risks the app being killed.
   static bool get compactMemory => Platform.isIOS || Platform.isAndroid;
@@ -110,16 +115,21 @@ class RecognitionSettings {
     return WhisperModelCatalog.defaultFor(language, compact: compactMemory);
   }
 
+  bool get effectiveContextEnabled => contextEnabled ?? model.usesInitialPrompt;
+
   RecognitionSettings copyWith({
     String? language,
     String? modelId,
     bool clearModelId = false,
     bool? vadEnabled,
+    bool? contextEnabled,
+    bool clearContextEnabled = false,
   }) =>
       RecognitionSettings(
         language: language ?? this.language,
         modelId: clearModelId ? null : modelId ?? this.modelId,
         vadEnabled: vadEnabled ?? this.vadEnabled,
+        contextEnabled: clearContextEnabled ? null : contextEnabled ?? this.contextEnabled,
       );
 
   @override
@@ -127,8 +137,9 @@ class RecognitionSettings {
       other is RecognitionSettings &&
       other.language == language &&
       other.modelId == modelId &&
-      other.vadEnabled == vadEnabled;
+      other.vadEnabled == vadEnabled &&
+      other.contextEnabled == contextEnabled;
 
   @override
-  int get hashCode => Object.hash(language, modelId, vadEnabled);
+  int get hashCode => Object.hash(language, modelId, vadEnabled, contextEnabled);
 }

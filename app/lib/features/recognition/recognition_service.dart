@@ -98,6 +98,7 @@ class RecognitionService extends ChangeNotifier {
       '语言': next.language,
       '模型': next.model.fileName,
       'VAD': next.vadEnabled ? '开' : '关',
+      '识别上下文': next.effectiveContextEnabled ? '开' : '关',
     });
     if (restart) {
       final media = _media!;
@@ -302,6 +303,7 @@ class RecognitionService extends ChangeNotifier {
       language: _settings.language,
       backend: SpeechBackend.auto,
       threads: _threads,
+      contextEnabled: _settings.effectiveContextEnabled,
     );
     final session = RecognitionSession(
       source: _source!,

@@ -206,6 +206,7 @@ class AppSettingsController extends ChangeNotifier {
         final language = values['recognitionLanguage'];
         final modelId = values['whisperModelId'];
         final vad = values['vadEnabled'];
+        final context = values['recognitionContextEnabled'];
         final next = RecognitionSettings(
           language: language is String && recognitionLanguageLabels.containsKey(language)
               ? language
@@ -214,6 +215,7 @@ class AppSettingsController extends ChangeNotifier {
               ? modelId
               : _recognition.modelId,
           vadEnabled: vad is bool ? vad : _recognition.vadEnabled,
+          contextEnabled: context is bool ? context : _recognition.contextEnabled,
         );
         if (next != _recognition) {
           _recognition = next;
@@ -407,6 +409,16 @@ class AppSettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Null follows the selected weight's own recommendation.
+  void setRecognitionContextEnabled(bool? value) {
+    if (value == _recognition.contextEnabled) return;
+    _recognition = value == null
+        ? _recognition.copyWith(clearContextEnabled: true)
+        : _recognition.copyWith(contextEnabled: value);
+    _markChanged('recognition');
+    notifyListeners();
+  }
+
   void setModelDownload({required String baseUrl, required String proxy}) {
     final parsedBase = Uri.tryParse(baseUrl.trim());
     final next = ModelDownloadSettings(
@@ -579,6 +591,7 @@ class AppSettingsStore {
       'recognitionLanguage': settings.recognition.language,
       'whisperModelId': settings.recognition.modelId,
       'vadEnabled': settings.recognition.vadEnabled,
+      'recognitionContextEnabled': settings.recognition.contextEnabled,
       'modelDownloadBaseUrl': settings.modelDownload.baseUrl,
       'modelDownloadProxy': settings.modelDownload.proxy,
       'translationMode': settings.translationMode.name,
