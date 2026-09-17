@@ -450,12 +450,19 @@ class RecognitionSession {
         engineState: engine.state,
         engineBackend: result.backend,
       ));
+      final base = window.mediaStart.inMilliseconds;
       _log(RecognitionLogLevel.debug, '识别窗口完成', {
         '窗口': window.id,
+        '窗口起点': base,
+        '窗口终点': window.mediaEnd.inMilliseconds,
+        '切分原因': window.cutReason,
         '推理耗时': result.inference,
         '排队加推理': stopwatch.elapsed,
         '接受': gated.accepted.length,
-        '丢弃': gated.dropped.map((d) => '${d.reason}:${d.segment.text}').toList(),
+        '丢弃': gated.dropped
+            .map((d) => '${d.reason}@${base + d.segment.startMs}-'
+                '${base + d.segment.endMs}ms:${d.segment.text}')
+            .toList(),
         '输出': gated.accepted.map((s) => s.text).toList(),
         '后端': result.backend.actual,
       });

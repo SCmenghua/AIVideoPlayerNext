@@ -34,6 +34,8 @@ PcmSource（平台解码器，任意采样率）
 有界待识别队列（≥3 个窗口时暂停解码）与领先水位（领先播放 30 s 暂停、回落 15 s 恢复）。
 
 `bin/regression.dart` 用同一条管线跑标注语料，输出 CER 与首段时间偏差；CI 每次运行并写入 job summary。
+标注片段被拼成一条流，间隔默认取 `longSilence + 0.5 s`，保证每条片段恰好切成一个窗口；
+窗口数少于片段数即判失败，否则逐条认领的文本会算到相邻片段头上。
 
 ## 应用侧
 
@@ -53,7 +55,8 @@ mpv 与识别解码器都打开 `http://127.0.0.1:<port>/media.<ext>`，代理�
 
 ## 模型与构建
 
-- 权重不入包：`WhisperModelCatalog` 描述 kotoba-whisper-v2.0（fp16 / q5_0）、large-v3-turbo q5_0 与 Silero VAD，
+- 权重不入包：`WhisperModelCatalog` 描述 kotoba-whisper-v2.0（fp16 / q5_0）、Anime Whisper（fp16 / q5_0）、
+  large-v3-turbo q5_0 与 Silero VAD，每条权重自带 `usesInitialPrompt`（设置页可覆盖），
   `WhisperModelStore` 断点续传下载并按大小 + SHA-256 校验后落盘到应用数据目录；仅 VAD 模型随包分发。
 - CI（`.github/workflows`）负责原生构建（Windows Vulkan/CPU、iOS Metal）、CTest、Dart 包测试、Flutter 测试、
   识别回归与打包；本地开发机不需要任何模型或工具链即可改代码。

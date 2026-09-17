@@ -99,4 +99,30 @@ void main() {
     third.feed(const Duration(seconds: 2), 0.05);
     expect(third.windows.single.id, 'c-w00000');
   });
+
+  // The regression harness concatenates labelled clips and attributes each
+  // window back to a clip, so the silence it inserts has to be long enough to
+  // cut. These two cases pin the threshold the harness depends on.
+  test('utterances separated by less than longSilence land in one window', () {
+    const options = SegmenterOptions();
+    final feeder = Feeder(SpeechSegmenter(frameSamples: frame))..segmenter.reset(sessionId: 's');
+    feeder.feed(const Duration(seconds: 4), 0.9);
+    feeder.feed(options.longSilence - const Duration(milliseconds: 500), 0.05);
+    feeder.feed(const Duration(seconds: 4), 0.9);
+    feeder.feed(const Duration(seconds: 3), 0.05);
+    expect(feeder.windows.length, 1, reason: 'both utterances share one window');
+  });
+
+  test('utterances separated by longSilence become one window each', () {
+    const options = SegmenterOptions();
+    final feeder = Feeder(SpeechSegmenter(frameSamples: frame))..segmenter.reset(sessionId: 's');
+    feeder.feed(const Duration(seconds: 4), 0.9);
+    feeder.feed(options.longSilence + const Duration(milliseconds: 500), 0.05);
+    feeder.feed(const Duration(seconds: 4), 0.9);
+    feeder.feed(options.longSilence + const Duration(milliseconds: 500), 0.05);
+    expect(feeder.windows.length, 2);
+    for (final window in feeder.windows) {
+      expect(window.cutReason, 'longSilence');
+    }
+  });
 }

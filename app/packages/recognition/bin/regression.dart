@@ -4,9 +4,16 @@
 //
 // dart run recognition:regression --library speech_core.dll --model X.bin \
 //   --vad-model silero.bin --dataset DIR [--threads N] [--backend cpu] \
+//   [--gap 2.0] [--no-context] \
 //   [--summary FILE] [--json FILE] [--max-cer 0.2] [--max-start-deviation-ms 500]
 //
 // DIR/manifest.json: {"clips":[{"file":"0001.wav","text":"..."}, ...]}
+//
+// The clips are concatenated into one stream with `--gap` seconds of silence
+// between them, so the whole streaming pipeline is exercised. The gap must
+// exceed SegmenterOptions.longSilence, otherwise a window spans several clips
+// and the per-clip attribution below reports the model's output against the
+// wrong reference. `windowDeficit` guards that invariant.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
@@ -164,7 +171,18 @@ Future<void> main(List<String> arguments) async {
     orElse: () => SpeechBackend.auto,
   );
   final language = options['language'] ?? 'ja';
-  final gapSeconds = double.tryParse(options['gap'] ?? '') ?? 1.0;
+  const segmenter = SegmenterOptions();
+  // Long enough for the segmenter's longSilence cut to fire inside every gap,
+  // so one clip becomes exactly one window.
+  final minimumGap = segmenter.longSilence.inMilliseconds / 1000 + 0.5;
+  final gapSeconds = double.tryParse(options['gap'] ?? '') ?? minimumGap;
+  if (gapSeconds < minimumGap) {
+    stderr.writeln('--gap $gapSeconds is below the segmenter cut threshold '
+        '(${minimumGap.toStringAsFixed(1)} s); windows would span several clips');
+    exitCode = 2;
+    return;
+  }
+  final contextEnabled = options['no-context'] == null;
 
   final manifest = jsonDecode(File('$dataset/manifest.json').readAsStringSync())
       as Map<String, Object?>;
@@ -208,6 +226,8 @@ Future<void> main(List<String> arguments) async {
     language: language,
     backend: backend,
     threads: threads,
+    segmenter: segmenter,
+    contextEnabled: contextEnabled,
     leadPause: null,
     maxPendingWindows: 1000,
   );
@@ -249,6 +269,7 @@ Future<void> main(List<String> arguments) async {
   final results = <Map<String, Object?>>[];
   final cers = <double>[];
   final startDeviations = <int>[];
+  final claimed = <String>{};
   var totalReferenceChars = 0;
   var totalEdits = 0.0;
   for (final clip in clips) {
@@ -258,6 +279,7 @@ Future<void> main(List<String> arguments) async {
       final midpoint = (segment.startMs + segment.endMs) ~/ 2;
       return midpoint >= from.inMilliseconds && midpoint < to.inMilliseconds;
     }).toList();
+    claimed.addAll(segments.map((segment) => segment.id));
     final hypothesis = segments.map((segment) => segment.text).join();
     final cer = characterErrorRate(clip.text, hypothesis);
     final referenceLength = normalizeForComparison(clip.text).runes.length;
@@ -278,12 +300,27 @@ Future<void> main(List<String> arguments) async {
   final overallCer = totalReferenceChars == 0 ? 1.0 : totalEdits / totalReferenceChars;
   final medianStart = median(startDeviations);
   final totalAudio = Duration(microseconds: all.length * 1000000 ~/ speechSampleRate);
+  // Fewer windows than clips means at least one window spanned a gap, so its
+  // text is scored against whichever clip the segment midpoints happened to
+  // land in. Any such run is measuring the harness, not the model.
+  final windowDeficit = clips.length - windows.length;
+  final unclaimed = transcript.segments
+      .where((segment) => !claimed.contains(segment.id))
+      .map((segment) => '${segment.startMs}-${segment.endMs}ms:${segment.text}')
+      .toList(growable: false);
+  final dropReasons = <String, int>{};
+  for (final entry in dropped) {
+    final reason = entry.split('@').first;
+    dropReasons[reason] = (dropReasons[reason] ?? 0) + 1;
+  }
   final inferenceMs = windows.fold<int>(
       0, (sum, window) => sum + (window['推理耗时'] as Duration).inMilliseconds);
   final summary = {
     'model': model,
     'vadModel': vadModel,
     'language': language,
+    'gapSeconds': gapSeconds,
+    'contextEnabled': contextEnabled,
     'backend': engine.backendInfo?.toMap(),
     'clips': clips.length,
     'audioSeconds': totalAudio.inMilliseconds / 1000,
@@ -292,8 +329,12 @@ Future<void> main(List<String> arguments) async {
     'medianStartDeviationMs': medianStart,
     'missingClips': results.where((r) => r['segments'] == 0).length,
     'windows': windows.length,
+    'windowDeficit': windowDeficit,
     'segments': transcript.segments.length,
+    'unclaimedSegments': unclaimed,
     'droppedSegments': dropped.length,
+    'dropReasons': dropReasons,
+    'dropped': dropped,
     'inferenceSeconds': inferenceMs / 1000,
     'realtimeFactor': totalAudio.inMilliseconds == 0 ? 0 : inferenceMs / totalAudio.inMilliseconds,
     'wallSeconds': wall.inMilliseconds / 1000,
@@ -312,14 +353,37 @@ Future<void> main(List<String> arguments) async {
     ..writeln('| Model | `${model.split(RegExp(r'[\\/]')).last}` |')
     ..writeln('| VAD | `${vadModel?.split(RegExp(r'[\\/]')).last ?? 'energy'}` |')
     ..writeln('| Backend | ${engine.backendInfo?.actual} |')
+    ..writeln('| Gap / context | ${gapSeconds.toStringAsFixed(1)}s / '
+        '${contextEnabled ? 'on' : 'off'} |')
     ..writeln('| Clips / audio | ${clips.length} / ${totalAudio.inSeconds}s |')
     ..writeln('| Overall CER | ${(overallCer * 100).toStringAsFixed(2)}% |')
     ..writeln('| Median clip CER | ${(median(cers) * 100).toStringAsFixed(2)}% |')
     ..writeln('| Median start deviation | ${medianStart.toStringAsFixed(0)} ms |')
     ..writeln('| Clips without output | ${summary['missingClips']} |')
     ..writeln('| Windows / segments / dropped | ${windows.length} / ${transcript.segments.length} / ${dropped.length} |')
+    ..writeln('| Window deficit (clips - windows) | $windowDeficit |')
+    ..writeln('| Segments claimed by no clip | ${unclaimed.length} |')
+    ..writeln('| Drop reasons | ${dropReasons.isEmpty ? '-' : dropReasons.entries.map((e) => '${e.key} ${e.value}').join(', ')} |')
     ..writeln('| Inference / realtime factor | ${(inferenceMs / 1000).toStringAsFixed(1)}s / ${(summary['realtimeFactor'] as num).toStringAsFixed(3)} |')
-    ..writeln()
+    ..writeln();
+  if (unclaimed.isNotEmpty || dropped.isNotEmpty) {
+    markdown
+      ..writeln('<details><summary>Unclaimed and dropped</summary>')
+      ..writeln()
+      ..writeln('```');
+    for (final entry in unclaimed) {
+      markdown.writeln('unclaimed $entry');
+    }
+    for (final entry in dropped) {
+      markdown.writeln('dropped   $entry');
+    }
+    markdown
+      ..writeln('```')
+      ..writeln()
+      ..writeln('</details>')
+      ..writeln();
+  }
+  markdown
     ..writeln('<details><summary>Per clip</summary>')
     ..writeln()
     ..writeln('| Clip | CER | Δstart | Hypothesis |')
@@ -342,6 +406,11 @@ Future<void> main(List<String> arguments) async {
   await engine.dispose();
   await vad.dispose();
 
+  if (windowDeficit > 0) {
+    stderr.writeln('${windows.length} window(s) for ${clips.length} clips: a window '
+        'spanned a gap or failed to decode, so per-clip CER is not attributable');
+    exitCode = 1;
+  }
   final maxCer = double.tryParse(options['max-cer'] ?? '');
   if (maxCer != null && overallCer > maxCer) {
     stderr.writeln('CER ${overallCer.toStringAsFixed(3)} exceeds $maxCer');
