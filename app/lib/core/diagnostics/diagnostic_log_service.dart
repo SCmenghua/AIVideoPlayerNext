@@ -99,7 +99,10 @@ class DiagnosticLogService extends ChangeNotifier {
       await logs.create(recursive: true);
       _logDirectory = logs;
       await purgeExpiredLogs();
-      final file = File('${logs.path}${Platform.pathSeparator}session-${_timestamp()}.log');
+      // Millisecond precision: a crash-restart loop can start two runs inside
+      // the same second, and a name collision would overwrite the very log
+      // that recorded the crash.
+      final file = File('${logs.path}${Platform.pathSeparator}session-${_sessionStamp()}.log');
       await file.writeAsString(
         '# ${_formatTime(DateTime.now())} 会话开始 '
         '${AppBuildInfo.version} / ${AppBuildInfo.buildTime} / ${AppBuildInfo.buildId}\n',
@@ -403,6 +406,9 @@ class DiagnosticLogService extends ChangeNotifier {
   }
 
   static String _fileName() => 'ai-video-player-diagnostics-${_timestamp()}.txt';
+
+  static String _sessionStamp() =>
+      '${_timestamp()}-${DateTime.now().millisecond.toString().padLeft(3, '0')}';
 
   static String _timestamp() {
     final now = DateTime.now();

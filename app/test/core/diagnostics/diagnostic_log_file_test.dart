@@ -33,8 +33,8 @@ void main() {
     expect(content, contains('识别窗口失败'));
     first.dispose();
 
-    // A second run does not overwrite the first.
-    await Future<void>.delayed(const Duration(seconds: 1));
+    // A second run does not overwrite the first, even started in the same
+    // second.
     final second = DiagnosticLogService();
     await second.attachFile(root);
     second.info('应用', '第二次运行');
