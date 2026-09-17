@@ -174,10 +174,29 @@ CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符�
 | 2026-09-15 | Step 4 | 代码完成，待 CI | `WindowsPcmSource`/`IosPcmSource`、`RecognitionMediaResolver`、`WhisperModelCatalog`/`WhisperModelStore`（断点续传 + SHA-256）、`TranscriptStore`、`RecognitionService`；设置新增识别语言/模型/VAD/目标语言/字号；翻译队列改接 `TranscriptStore`；Windows 解码器优先协商 16 kHz 单声道；AppDelegate 删除模型通道；CMake 打包 `windows/models/`。**偏离：** `recognition_media_cache_worker` 未拆分（无编译器条件下盲改 2k 行网络代码风险过高，行为保持不变，后续单独处理） |
 | 2026-09-15 | Step 5 | 代码完成，待 CI | `PlayerShell` + `PlayerOverlay`（自动隐藏控制层、键盘/手势、进度 hover 预览、音量/倍速/字幕模式/全屏）+ `SubtitleLayer`（2.5 s 保持、字号）+ `PlaybackGate`；设置/诊断改为独立页面；Material 3 token 主题；widget 测试与门控单测 |
 | 2026-09-15 | Step 6 | 文档完成 | `docs/architecture.md` 重写；版本 `0.11.0`；发布待 Step 1–5 CI 全绿与真机验收后触发 |
-| 2026-09-17 | Phase 11 Step A | 代码完成，待 CI | 回归口径：`--gap` 默认改为 `longSilence + 0.5 s`（2.0 s）并拒绝更小的值；报告新增窗口亏空、无人认领的片段、按原因分类的丢弃明细；`--no-context` 开关。`识别窗口完成` 日志补窗口起止与切分原因。切窗阈值写成两条单测。`WhisperModelSpec.usesInitialPrompt` + 设置页"识别上下文"三态（跟随模型/开/关）；目录加入 Anime Whisper fp16 与 q5_0（均标记不使用 initial prompt） |
+| 2026-09-17 | Phase 11 Step A | 已完成 | CI run 81 全绿。新基线：CER 5.67%（旧 11.34%）、单条中位 0.00%（旧 6.07%）、起点偏差 155.5 ms（旧 278 ms）、无输出 0 条（旧 1 条）、窗口 20/20。差异全部来自度量口径 |
+| 2026-09-17 | Phase 11 Step A 代码 | 已推送 | 回归口径：`--gap` 默认改为 `longSilence + 0.5 s`（2.0 s）并拒绝更小的值；报告新增窗口亏空、无人认领的片段、按原因分类的丢弃明细；`--no-context` 开关。`识别窗口完成` 日志补窗口起止与切分原因。切窗阈值写成两条单测。`WhisperModelSpec.usesInitialPrompt` + 设置页"识别上下文"三态（跟随模型/开/关）；目录加入 Anime Whisper fp16 与 q5_0（均标记不使用 initial prompt） |
 | 2026-09-15 | CI 首轮通过 | 已完成 | `refactor` @ `e37ab15`，7 轮修复后 `windows.yml` 与 `ios.yml` 全绿：原生 CTest、Dart 包 28 项、Flutter 139 项、Windows 包内 DLL/VAD 校验、iOS 编译。修复内容均为盲写错误（MSVC 字面量、测试期望、接口未 `implements`、import 路径、`dispose` 内用 `ref`、控制条溢出）与 Vulkan 构建 MAX_PATH 问题 |
 
-### 识别回归基线（作废，见 §6.1.1）
+### 识别回归基线（CI run 81，`refactor` @ `dbc7b27`）
+
+JSUT 前 20 条，kotoba-whisper-v2.0 fp16 + Silero VAD，CPU 4 线程，`--gap 2.0`，识别上下文开。
+
+| 指标 | 值 |
+|---|---|
+| 窗口 / clip | 20 / 20（窗口亏空 0） |
+| 总体 CER | 5.67% |
+| 单条 CER 中位数 | 0.00% |
+| 首段起点偏差中位数 | 155.5 ms |
+| 无输出的条目 | 0 / 20 |
+| 片段 / 丢弃 / 无人认领 | 32 / 0 / 0 |
+| 实时倍率（CI CPU） | 6.63 |
+
+与旧基线的差异全部来自度量口径，管线未改。**结论：朗读语料上 kotoba-whisper 单条中位
+CER 为 0，whisper 在干净朗读日语上没有触顶**；真机上的问题属于域（电视对白、BGM、叠话、
+口语）与幻觉，而不是模型在干净语音上的识别能力。后续改动以此表为基线。
+
+### 旧基线（作废，见 §6.1.1）
 
 下表是 `--gap 1.0` 下测得的，窗口横跨多条 clip，逐条认领不可信。保留仅作历史记录，
 不再作为任何改动的判据；新基线待 Phase 11 Step A 的 CI 运行产生后替换。
@@ -250,6 +269,13 @@ CI 每次运行 `speech_regression` 对固定日语公开素材输出：字符�
 | `qwen3-asr-0.6b` | 782M | 约差 0.5pp | 850 MB | 降级档 / CI 回归用 |
 
 选它而不是日语专用模型，因为用户素材混杂（动画、真人、综艺都有），通用最强项优于单域最强项。
+
+**Step A 之后这笔账要重算。** 制定本节时的对比是"Qwen3-ASR 5.29%（FLEURS ja）对 kotoba 11.34%
+（JSUT）"，而 11.34% 已证实是度量假象；真实值 5.67%，单条中位 0%。两个数字来自不同语料，
+不能相减，但量级相当——换引擎能带来的纯精度增益远小于原先估计。真正待验证的是域鲁棒性
+（电视对白、BGM、叠话、口语）与幻觉率，而 JSUT 与 FLEURS 都测不出来。因此 Step D 的双跑
+不足以支撑选型决策，**Step E 的真机对照才是 Phase 11 是否继续的判据**；若真机上 whisper 的
+主要缺陷是幻觉而非听错，优先级应从"换引擎"移到"门控与切窗"。
 
 同时加进目录但不作主力：
 
