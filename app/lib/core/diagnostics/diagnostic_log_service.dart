@@ -25,6 +25,28 @@ const diagnosticLogLevelLabels = {
   DiagnosticLogLevel.off: '关闭',
 };
 
+/// One run's log file on disk.
+class DiagnosticLogFile {
+  const DiagnosticLogFile({
+    required this.file,
+    required this.modified,
+    required this.sizeBytes,
+    required this.isCurrent,
+  });
+
+  final File file;
+  final DateTime modified;
+  final int sizeBytes;
+  final bool isCurrent;
+
+  /// `session-20260917-143022`, used as the exported file name.
+  String get label => file.uri.pathSegments.last.replaceAll('.log', '');
+
+  String get sizeLabel => sizeBytes >= 1 << 20
+      ? '${(sizeBytes / (1 << 20)).toStringAsFixed(1)} MB'
+      : '${(sizeBytes / (1 << 10)).toStringAsFixed(0)} KB';
+}
+
 class DiagnosticLogEntry {
   const DiagnosticLogEntry({
     required this.timestamp,
@@ -48,6 +70,7 @@ class DiagnosticLogService extends ChangeNotifier {
   DiagnosticLogService({
     bool? preserveSensitiveDetails,
     this.minimumLevel = DiagnosticLogLevel.info,
+    this.logRetention = const Duration(days: 1),
   }) : preserveSensitiveDetails = preserveSensitiveDetails ?? !kReleaseMode;
   static const _maximumEntries = 800;
   final bool preserveSensitiveDetails;
@@ -55,53 +78,88 @@ class DiagnosticLogService extends ChangeNotifier {
 
   final List<DiagnosticLogEntry> _entries = [];
 
-  // Crash survival: the in-memory ring is lost when the system kills the app,
-  // which is exactly when the log matters. Entries are mirrored to a file and
-  // the previous run's file is kept so it can be exported after a restart.
+  // Crash survival: the in-memory ring dies with the process, which is exactly
+  // when the log matters — and inside a sideloading container there is no
+  // system crash report to fall back on. Every run writes its own file and
+  // files older than [logRetention] are purged at startup.
   File? _sink;
-  File? _previousSink;
+  Directory? _logDirectory;
   final StringBuffer _pending = StringBuffer();
   Timer? _flushTimer;
 
-  /// Starts mirroring entries to `<directory>/diagnostics`, rotating the
-  /// previous run's file aside. Safe to call once at startup; failures leave
-  /// logging in memory only.
+  /// How long past runs are kept.
+  final Duration logRetention;
+
+  /// Starts a new session file under `<directory>/diagnostics` and deletes
+  /// runs older than [logRetention]. Safe to call once at startup; failures
+  /// leave logging in memory only.
   Future<void> attachFile(Directory directory) async {
     try {
       final logs = Directory('${directory.path}${Platform.pathSeparator}diagnostics');
       await logs.create(recursive: true);
-      final current = File('${logs.path}${Platform.pathSeparator}current.log');
-      final previous = File('${logs.path}${Platform.pathSeparator}previous.log');
-      if (await current.exists()) {
-        if (await previous.exists()) await previous.delete();
-        await current.rename(previous.path);
-      }
-      await current.writeAsString(
+      _logDirectory = logs;
+      await purgeExpiredLogs();
+      final file = File('${logs.path}${Platform.pathSeparator}session-${_timestamp()}.log');
+      await file.writeAsString(
         '# ${_formatTime(DateTime.now())} 会话开始 '
-        '${AppBuildInfo.version} ${AppBuildInfo.buildId}\n',
+        '${AppBuildInfo.version} / ${AppBuildInfo.buildTime} / ${AppBuildInfo.buildId}\n',
         flush: true,
       );
-      _sink = current;
-      _previousSink = await previous.exists() ? previous : null;
+      _sink = file;
     } on Object {
       _sink = null;
     }
   }
 
-  /// The previous run's log, or null when there is none. After a crash this
-  /// is where the evidence is.
-  Future<String?> previousSessionLog() async {
-    final file = _previousSink;
-    if (file == null || !await file.exists()) return null;
-    return file.readAsString();
+  Future<void> purgeExpiredLogs() async {
+    final logs = _logDirectory;
+    if (logs == null) return;
+    final cutoff = DateTime.now().subtract(logRetention);
+    try {
+      await for (final entity in logs.list()) {
+        if (entity is! File || !entity.path.endsWith('.log')) continue;
+        if ((await entity.stat()).modified.isBefore(cutoff)) await entity.delete();
+      }
+    } on Object {
+      // Housekeeping must never take down the session.
+    }
   }
 
-  bool get hasPreviousSessionLog => _previousSink != null;
+  /// Past and current runs, newest first. The first entry is the running
+  /// session; after a crash the one before it holds the evidence.
+  Future<List<DiagnosticLogFile>> sessionLogs() async {
+    final logs = _logDirectory;
+    if (logs == null) return const [];
+    final result = <DiagnosticLogFile>[];
+    try {
+      await for (final entity in logs.list()) {
+        if (entity is! File || !entity.path.endsWith('.log')) continue;
+        final stat = await entity.stat();
+        result.add(DiagnosticLogFile(
+          file: entity,
+          modified: stat.modified,
+          sizeBytes: stat.size,
+          isCurrent: entity.path == _sink?.path,
+        ));
+      }
+    } on Object {
+      return const [];
+    }
+    result.sort((left, right) => right.modified.compareTo(left.modified));
+    return result;
+  }
 
-  Future<String?> savePreviousSessionLog() async {
-    final content = await previousSessionLog();
-    if (content == null) return null;
-    final name = 'ai-video-player-previous-session-${_timestamp()}.txt';
+  bool get hasSessionLogs => _sink != null;
+
+  /// Reads one session file, flushing first when it is the running one.
+  Future<String> readSessionLog(DiagnosticLogFile log) async {
+    if (log.isCurrent) _flush();
+    return log.file.readAsString();
+  }
+
+  Future<String?> saveSessionLog(DiagnosticLogFile log) async {
+    final content = await readSessionLog(log);
+    final name = 'ai-video-player-${log.label}.txt';
     if (Platform.isIOS) {
       final directory = await getApplicationDocumentsDirectory();
       final path = '${directory.path}${Platform.pathSeparator}$name';
@@ -120,13 +178,15 @@ class DiagnosticLogService extends ChangeNotifier {
     return path;
   }
 
-  Future<ShareResult?> sharePreviousSessionLog({Rect? sharePositionOrigin}) async {
-    final content = await previousSessionLog();
-    if (content == null) return null;
-    final name = 'ai-video-player-previous-session-${_timestamp()}.txt';
+  Future<ShareResult> shareSessionLog(
+    DiagnosticLogFile log, {
+    Rect? sharePositionOrigin,
+  }) async {
+    final content = await readSessionLog(log);
+    final name = 'ai-video-player-${log.label}.txt';
     return Share.shareXFiles(
       [XFile.fromData(Uint8List.fromList(utf8.encode(content)), name: name, mimeType: 'text/plain')],
-      subject: 'AI 视频播放器上次运行日志',
+      subject: 'AI 视频播放器运行日志',
       sharePositionOrigin: sharePositionOrigin,
       fileNameOverrides: [name],
     );
@@ -142,11 +202,11 @@ class DiagnosticLogService extends ChangeNotifier {
     );
     // A kill gives no warning, so anything worth acting on is flushed at once;
     // routine detail is batched so logging cannot stall the UI isolate.
-    if (entry.level.index >= DiagnosticLogLevel.warning.index || _pending.length > 8192) {
+    if (entry.level.index >= DiagnosticLogLevel.warning.index || _pending.length > 4096) {
       _flush();
       return;
     }
-    _flushTimer ??= Timer(const Duration(milliseconds: 250), _flush);
+    _flushTimer ??= Timer(const Duration(milliseconds: 100), _flush);
   }
 
   void _flush() {
@@ -225,7 +285,10 @@ class DiagnosticLogService extends ChangeNotifier {
     String action,
     Map<String, Object?> details,
   ) {
-    if (level.index < minimumLevel.index) return;
+    if (minimumLevel == DiagnosticLogLevel.off) return;
+    // The file keeps everything: the level control is a filter on what the
+    // list shows, not on what a later crash investigation gets to see.
+    final visible = level.index >= minimumLevel.index;
     final safeDetails = <String, String>{};
     details.forEach((key, value) {
       if (value == null) return;
@@ -240,9 +303,10 @@ class DiagnosticLogService extends ChangeNotifier {
       action: action,
       details: UnmodifiableMapView(safeDetails),
     );
+    _mirror(entry);
+    if (!visible) return;
     _entries.add(entry);
     if (_entries.length > _maximumEntries) _entries.removeAt(0);
-    _mirror(entry);
     notifyListeners();
   }
 

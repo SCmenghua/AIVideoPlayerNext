@@ -55,7 +55,7 @@ final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
     logs.info('应用', '诊断日志已启动', {
       '平台': defaultTargetPlatform.name,
       '日志策略': logs.preserveSensitiveDetails ? '测试完整记录' : '正式构建脱敏',
-      '上次运行日志': logs.hasPreviousSessionLog ? '已保留' : '无',
+      '日志落盘': logs.hasSessionLogs ? '已启用（保留 1 天）' : '不可用',
     });
   }).catchError((Object _) {}));
   return logs;

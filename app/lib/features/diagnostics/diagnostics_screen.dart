@@ -248,6 +248,78 @@ class _ExportButtons extends StatelessWidget {
       );
 }
 
+/// Lists the runs kept on disk so the one that crashed can be exported.
+class _SessionLogDialog extends StatelessWidget {
+  const _SessionLogDialog({required this.logs});
+
+  final DiagnosticLogService logs;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('历史运行日志'),
+        content: SizedBox(
+          width: 420,
+          child: FutureBuilder<List<DiagnosticLogFile>>(
+            future: logs.sessionLogs(),
+            builder: (context, snapshot) {
+              final sessions = snapshot.data;
+              if (sessions == null) {
+                return const SizedBox(height: 80, child: Center(child: CircularProgressIndicator()));
+              }
+              if (sessions.isEmpty) return const Text('还没有日志文件。');
+              return ListView.builder(
+                shrinkWrap: true,
+                itemCount: sessions.length,
+                itemBuilder: (context, index) {
+                  final session = sessions[index];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      session.isCurrent ? Icons.play_circle_outline : Icons.history,
+                    ),
+                    title: Text(_time(session.modified)),
+                    subtitle: Text(
+                      '${session.sizeLabel}${session.isCurrent ? ' · 当前运行' : ''}',
+                    ),
+                    trailing: IconButton(
+                      tooltip: Platform.isIOS ? '分享' : '保存',
+                      icon: Icon(
+                        Platform.isIOS ? Icons.ios_share_outlined : Icons.save_outlined,
+                      ),
+                      onPressed: () async {
+                        final messenger = ScaffoldMessenger.maybeOf(context);
+                        if (Platform.isIOS) {
+                          await logs.shareSessionLog(session);
+                        } else {
+                          final path = await logs.saveSessionLog(session);
+                          if (path != null) {
+                            messenger?.showSnackBar(SnackBar(content: Text('已保存到 $path')));
+                          }
+                        }
+                      },
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          Text('保留 1 天', style: Theme.of(context).textTheme.bodySmall),
+          const Spacer(),
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('关闭')),
+        ],
+      );
+
+  static String _time(DateTime value) {
+    final local = value.toLocal();
+    return '${local.month}/${local.day} '
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:'
+        '${local.second.toString().padLeft(2, '0')}';
+  }
+}
+
 class _LogTab extends ConsumerWidget {
   const _LogTab();
 
@@ -297,13 +369,11 @@ class _LogTab extends ConsumerWidget {
                           }
                         case 'share':
                           await logs.export();
-                        case 'previous-save':
-                          final path = await logs.savePreviousSessionLog();
-                          messenger.showSnackBar(SnackBar(
-                            content: Text(path == null ? '没有上次运行的日志' : '已保存到 $path'),
-                          ));
-                        case 'previous-share':
-                          await logs.sharePreviousSessionLog();
+                        case 'sessions':
+                          await showDialog<void>(
+                            context: context,
+                            builder: (_) => _SessionLogDialog(logs: logs),
+                          );
                         case 'clear':
                           logs.clear();
                       }
@@ -312,18 +382,12 @@ class _LogTab extends ConsumerWidget {
                       const PopupMenuItem(value: 'copy', child: Text('复制')),
                       const PopupMenuItem(value: 'save', child: Text('保存为 TXT')),
                       if (Platform.isIOS) const PopupMenuItem(value: 'share', child: Text('分享')),
-                      if (logs.hasPreviousSessionLog) ...[
+                      if (logs.hasSessionLogs) ...[
                         const PopupMenuDivider(),
-                        if (Platform.isIOS)
-                          const PopupMenuItem(
-                            value: 'previous-share',
-                            child: Text('分享上次运行日志（崩溃前）'),
-                          )
-                        else
-                          const PopupMenuItem(
-                            value: 'previous-save',
-                            child: Text('保存上次运行日志（崩溃前）'),
-                          ),
+                        const PopupMenuItem(
+                          value: 'sessions',
+                          child: Text('历史运行日志（含崩溃前）…'),
+                        ),
                       ],
                       const PopupMenuItem(value: 'clear', child: Text('清空')),
                     ],
