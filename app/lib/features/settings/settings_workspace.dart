@@ -321,6 +321,14 @@ class _SettingsWorkspaceState extends ConsumerState<SettingsWorkspace> {
         ),
         const SizedBox(height: 6),
         Text(recognition.model.description, style: TextStyle(color: hint)),
+        if (RecognitionSettings.compactMemory && !recognition.model.fitsMobileMemory) ...[
+          const SizedBox(height: 6),
+          Text(
+            '⚠ ${recognition.model.sizeLabel} 的权重在手机上可能因内存不足被系统结束进程，'
+            '建议改用 ${WhisperModelCatalog.kotobaV2Q5.label}。',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
         const SizedBox(height: 10),
         Wrap(
           spacing: 8,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -53,6 +54,120 @@ class DiagnosticLogService extends ChangeNotifier {
   DiagnosticLogLevel minimumLevel;
 
   final List<DiagnosticLogEntry> _entries = [];
+
+  // Crash survival: the in-memory ring is lost when the system kills the app,
+  // which is exactly when the log matters. Entries are mirrored to a file and
+  // the previous run's file is kept so it can be exported after a restart.
+  File? _sink;
+  File? _previousSink;
+  final StringBuffer _pending = StringBuffer();
+  Timer? _flushTimer;
+
+  /// Starts mirroring entries to `<directory>/diagnostics`, rotating the
+  /// previous run's file aside. Safe to call once at startup; failures leave
+  /// logging in memory only.
+  Future<void> attachFile(Directory directory) async {
+    try {
+      final logs = Directory('${directory.path}${Platform.pathSeparator}diagnostics');
+      await logs.create(recursive: true);
+      final current = File('${logs.path}${Platform.pathSeparator}current.log');
+      final previous = File('${logs.path}${Platform.pathSeparator}previous.log');
+      if (await current.exists()) {
+        if (await previous.exists()) await previous.delete();
+        await current.rename(previous.path);
+      }
+      await current.writeAsString(
+        '# ${_formatTime(DateTime.now())} 会话开始 '
+        '${AppBuildInfo.version} ${AppBuildInfo.buildId}\n',
+        flush: true,
+      );
+      _sink = current;
+      _previousSink = await previous.exists() ? previous : null;
+    } on Object {
+      _sink = null;
+    }
+  }
+
+  /// The previous run's log, or null when there is none. After a crash this
+  /// is where the evidence is.
+  Future<String?> previousSessionLog() async {
+    final file = _previousSink;
+    if (file == null || !await file.exists()) return null;
+    return file.readAsString();
+  }
+
+  bool get hasPreviousSessionLog => _previousSink != null;
+
+  Future<String?> savePreviousSessionLog() async {
+    final content = await previousSessionLog();
+    if (content == null) return null;
+    final name = 'ai-video-player-previous-session-${_timestamp()}.txt';
+    if (Platform.isIOS) {
+      final directory = await getApplicationDocumentsDirectory();
+      final path = '${directory.path}${Platform.pathSeparator}$name';
+      await File(path).writeAsString(content, encoding: utf8);
+      return path;
+    }
+    final location = await getSaveLocation(
+      acceptedTypeGroups: const [XTypeGroup(label: '文本文件', extensions: ['txt'])],
+      suggestedName: name,
+      confirmButtonText: '保存',
+    );
+    if (location == null) return null;
+    final path =
+        location.path.toLowerCase().endsWith('.txt') ? location.path : '${location.path}.txt';
+    await File(path).writeAsString(content, encoding: utf8);
+    return path;
+  }
+
+  Future<ShareResult?> sharePreviousSessionLog({Rect? sharePositionOrigin}) async {
+    final content = await previousSessionLog();
+    if (content == null) return null;
+    final name = 'ai-video-player-previous-session-${_timestamp()}.txt';
+    return Share.shareXFiles(
+      [XFile.fromData(Uint8List.fromList(utf8.encode(content)), name: name, mimeType: 'text/plain')],
+      subject: 'AI 视频播放器上次运行日志',
+      sharePositionOrigin: sharePositionOrigin,
+      fileNameOverrides: [name],
+    );
+  }
+
+  void _mirror(DiagnosticLogEntry entry) {
+    final sink = _sink;
+    if (sink == null) return;
+    _pending.writeln(
+      '[${_formatTime(entry.timestamp)}] ${_levelLabel(entry.level)} · '
+      '${entry.category} · ${entry.action}'
+      '${entry.details.isEmpty ? '' : ' · ${entry.details}'}',
+    );
+    // A kill gives no warning, so anything worth acting on is flushed at once;
+    // routine detail is batched so logging cannot stall the UI isolate.
+    if (entry.level.index >= DiagnosticLogLevel.warning.index || _pending.length > 8192) {
+      _flush();
+      return;
+    }
+    _flushTimer ??= Timer(const Duration(milliseconds: 250), _flush);
+  }
+
+  void _flush() {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    final sink = _sink;
+    if (sink == null || _pending.isEmpty) return;
+    final text = _pending.toString();
+    _pending.clear();
+    try {
+      sink.writeAsStringSync(text, mode: FileMode.append, flush: true);
+    } on Object {
+      // Losing the mirror must never take down the session.
+    }
+  }
+
+  @override
+  void dispose() {
+    _flush();
+    super.dispose();
+  }
 
   UnmodifiableListView<DiagnosticLogEntry> get entries =>
       UnmodifiableListView(_entries);
@@ -118,14 +233,16 @@ class DiagnosticLogService extends ChangeNotifier {
           ? value.toString()
           : _sanitize(key, value.toString());
     });
-    _entries.add(DiagnosticLogEntry(
+    final entry = DiagnosticLogEntry(
       timestamp: DateTime.now(),
       level: level,
       category: category,
       action: action,
       details: UnmodifiableMapView(safeDetails),
-    ));
+    );
+    _entries.add(entry);
     if (_entries.length > _maximumEntries) _entries.removeAt(0);
+    _mirror(entry);
     notifyListeners();
   }
 
@@ -221,15 +338,16 @@ class DiagnosticLogService extends ChangeNotifier {
     }
   }
 
-  static String _fileName() {
+  static String _fileName() => 'ai-video-player-diagnostics-${_timestamp()}.txt';
+
+  static String _timestamp() {
     final now = DateTime.now();
-    final timestamp = '${now.year.toString().padLeft(4, '0')}'
+    return '${now.year.toString().padLeft(4, '0')}'
         '${now.month.toString().padLeft(2, '0')}'
         '${now.day.toString().padLeft(2, '0')}-'
         '${now.hour.toString().padLeft(2, '0')}'
         '${now.minute.toString().padLeft(2, '0')}'
         '${now.second.toString().padLeft(2, '0')}';
-    return 'ai-video-player-diagnostics-$timestamp.txt';
   }
 
   static String _sanitize(String key, String value) {

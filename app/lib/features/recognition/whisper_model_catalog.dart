@@ -25,6 +25,9 @@ class WhisperModelSpec {
   final int sizeBytes;
   final bool japaneseOnly;
 
+  /// Whether this weight fits comfortably in a mobile app's memory budget.
+  bool get fitsMobileMemory => sizeBytes < 700 * 1024 * 1024;
+
   String get sizeLabel {
     if (sizeBytes >= 1 << 30) return '${(sizeBytes / (1 << 30)).toStringAsFixed(2)} GB';
     if (sizeBytes >= 1 << 20) return '${(sizeBytes / (1 << 20)).toStringAsFixed(0)} MB';
@@ -106,8 +109,14 @@ class WhisperModelCatalog {
     return null;
   }
 
-  static WhisperModelSpec defaultFor(String language) =>
-      language == 'ja' ? kotobaV2 : largeV3TurboQ5;
+  /// iOS gives one app roughly two to three gigabytes before the system kills
+  /// it, and the weights are only part of the footprint: ggml's compute
+  /// buffers, Metal and video decoding share that budget. Quantised weights
+  /// are the default there; the fp16 model stays selectable on desktop.
+  static WhisperModelSpec defaultFor(String language, {bool compact = false}) {
+    if (language != 'ja') return largeV3TurboQ5;
+    return compact ? kotobaV2Q5 : kotobaV2;
+  }
 
   static bool supports(WhisperModelSpec spec, String language) =>
       !spec.japaneseOnly || language == 'ja';

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'whisper_model_catalog.dart';
 
 /// Languages offered in settings; `auto` lets Whisper detect.
@@ -99,10 +101,13 @@ class RecognitionSettings {
   final String? modelId;
   final bool vadEnabled;
 
+  /// True on platforms where a large weight risks the app being killed.
+  static bool get compactMemory => Platform.isIOS || Platform.isAndroid;
+
   WhisperModelSpec get model {
     final chosen = modelId == null ? null : WhisperModelCatalog.byId(modelId!);
     if (chosen != null && WhisperModelCatalog.supports(chosen, language)) return chosen;
-    return WhisperModelCatalog.defaultFor(language);
+    return WhisperModelCatalog.defaultFor(language, compact: compactMemory);
   }
 
   RecognitionSettings copyWith({

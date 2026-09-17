@@ -297,6 +297,13 @@ class _LogTab extends ConsumerWidget {
                           }
                         case 'share':
                           await logs.export();
+                        case 'previous-save':
+                          final path = await logs.savePreviousSessionLog();
+                          messenger.showSnackBar(SnackBar(
+                            content: Text(path == null ? '没有上次运行的日志' : '已保存到 $path'),
+                          ));
+                        case 'previous-share':
+                          await logs.sharePreviousSessionLog();
                         case 'clear':
                           logs.clear();
                       }
@@ -305,6 +312,19 @@ class _LogTab extends ConsumerWidget {
                       const PopupMenuItem(value: 'copy', child: Text('复制')),
                       const PopupMenuItem(value: 'save', child: Text('保存为 TXT')),
                       if (Platform.isIOS) const PopupMenuItem(value: 'share', child: Text('分享')),
+                      if (logs.hasPreviousSessionLog) ...[
+                        const PopupMenuDivider(),
+                        if (Platform.isIOS)
+                          const PopupMenuItem(
+                            value: 'previous-share',
+                            child: Text('分享上次运行日志（崩溃前）'),
+                          )
+                        else
+                          const PopupMenuItem(
+                            value: 'previous-save',
+                            child: Text('保存上次运行日志（崩溃前）'),
+                          ),
+                      ],
                       const PopupMenuItem(value: 'clear', child: Text('清空')),
                     ],
                   ),

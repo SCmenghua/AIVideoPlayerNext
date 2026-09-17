@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:recognition/recognition.dart';
 
 import '../core/diagnostics/diagnostic_log_service.dart';
@@ -49,10 +50,14 @@ String? speechCoreLibraryPath() {
 
 final diagnosticsLogProvider = Provider<DiagnosticLogService>((ref) {
   final logs = DiagnosticLogService();
-  logs.info('应用', '诊断日志已启动', {
-    '平台': defaultTargetPlatform.name,
-    '日志策略': logs.preserveSensitiveDetails ? '测试完整记录' : '正式构建脱敏',
-  });
+  // Mirror to disk so a crash or a system kill still leaves evidence.
+  unawaited(getApplicationSupportDirectory().then(logs.attachFile).then((_) {
+    logs.info('应用', '诊断日志已启动', {
+      '平台': defaultTargetPlatform.name,
+      '日志策略': logs.preserveSensitiveDetails ? '测试完整记录' : '正式构建脱敏',
+      '上次运行日志': logs.hasPreviousSessionLog ? '已保留' : '无',
+    });
+  }).catchError((Object _) {}));
   return logs;
 });
 
